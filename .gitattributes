@@ -1,0 +1,11 @@
+# Oracle fixtures captured from real Pi are BYTE-EXACT contracts: the Rust golden
+# suites compare against their literal bytes. Git must never rewrite their line
+# endings (core.autocrlf=true is set on at least one dev machine, which would
+# turn every LF into CRLF on checkout and fail every byte assertion).
+tests/fixtures/** -text
+*.golden -text
+*.jsonl -text
+
+# Oracle generator scripts emit LF-only fixtures; keep them LF so reruns are
+# idempotent and `--check` does not report phantom drift.
+scripts/*.mjs text eol=lf

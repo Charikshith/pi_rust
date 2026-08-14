@@ -1,0 +1,247 @@
+{
+  "note": "Every path accessor in pi/packages/coding-agent/src/config.ts. Paths are raw node:path.join output, so separators and drive letters are native to `platform`. {HOME} is os.homedir(), {TMPROOT} the oracle temp root, {PIPKG} the pi coding-agent package root.",
+  "platform": "win32",
+  "sep": "\\",
+  "identity": {
+    "APP_NAME": "pi",
+    "CONFIG_DIR_NAME": ".pi",
+    "ENV_AGENT_DIR": "PI_CODING_AGENT_DIR",
+    "ENV_SESSION_DIR": "PI_CODING_AGENT_SESSION_DIR"
+  },
+  "agentDirBranches": {
+    "env-set-absolute": {
+      "note": "PI_CODING_AGENT_DIR is an absolute path: getAgentDir returns expandTildePath(envDir), which for a non-tilde absolute path is the value VERBATIM - it is NOT resolve()d, so it is not canonicalised and a relative value would stay relative",
+      "envValue": "{TMPROOT}\\config-branch\\agent",
+      "paths": {
+        "getAgentDir": "{TMPROOT}\\config-branch\\agent",
+        "getCustomThemesDir": "{TMPROOT}\\config-branch\\agent\\themes",
+        "getModelsPath": "{TMPROOT}\\config-branch\\agent\\models.json",
+        "getAuthPath": "{TMPROOT}\\config-branch\\agent\\auth.json",
+        "getSettingsPath": "{TMPROOT}\\config-branch\\agent\\settings.json",
+        "getToolsDir": "{TMPROOT}\\config-branch\\agent\\tools",
+        "getBinDir": "{TMPROOT}\\config-branch\\agent\\bin",
+        "getPromptsDir": "{TMPROOT}\\config-branch\\agent\\prompts",
+        "getSessionsDir": "{TMPROOT}\\config-branch\\agent\\sessions",
+        "getDebugLogPath": "{TMPROOT}\\config-branch\\agent\\pi-debug.log"
+      }
+    },
+    "env-set-tilde-only": {
+      "note": "PI_CODING_AGENT_DIR=\"~\" expands to homedir() exactly",
+      "envValue": "~",
+      "paths": {
+        "getAgentDir": "{HOME}",
+        "getCustomThemesDir": "{HOME}\\themes",
+        "getModelsPath": "{HOME}\\models.json",
+        "getAuthPath": "{HOME}\\auth.json",
+        "getSettingsPath": "{HOME}\\settings.json",
+        "getToolsDir": "{HOME}\\tools",
+        "getBinDir": "{HOME}\\bin",
+        "getPromptsDir": "{HOME}\\prompts",
+        "getSessionsDir": "{HOME}\\sessions",
+        "getDebugLogPath": "{HOME}\\pi-debug.log"
+      }
+    },
+    "env-set-tilde-slash": {
+      "note": "PI_CODING_AGENT_DIR=\"~/custom-agent\" -> join(home, \"custom-agent\")",
+      "envValue": "~/custom-agent",
+      "paths": {
+        "getAgentDir": "{HOME}\\custom-agent",
+        "getCustomThemesDir": "{HOME}\\custom-agent\\themes",
+        "getModelsPath": "{HOME}\\custom-agent\\models.json",
+        "getAuthPath": "{HOME}\\custom-agent\\auth.json",
+        "getSettingsPath": "{HOME}\\custom-agent\\settings.json",
+        "getToolsDir": "{HOME}\\custom-agent\\tools",
+        "getBinDir": "{HOME}\\custom-agent\\bin",
+        "getPromptsDir": "{HOME}\\custom-agent\\prompts",
+        "getSessionsDir": "{HOME}\\custom-agent\\sessions",
+        "getDebugLogPath": "{HOME}\\custom-agent\\pi-debug.log"
+      }
+    },
+    "env-set-tilde-backslash": {
+      "note": "PI_CODING_AGENT_DIR=\"~\\\\custom-agent\" - the backslash form is only recognised when process.platform === \"win32\"",
+      "envValue": "~\\custom-agent",
+      "paths": {
+        "getAgentDir": "{HOME}\\custom-agent",
+        "getCustomThemesDir": "{HOME}\\custom-agent\\themes",
+        "getModelsPath": "{HOME}\\custom-agent\\models.json",
+        "getAuthPath": "{HOME}\\custom-agent\\auth.json",
+        "getSettingsPath": "{HOME}\\custom-agent\\settings.json",
+        "getToolsDir": "{HOME}\\custom-agent\\tools",
+        "getBinDir": "{HOME}\\custom-agent\\bin",
+        "getPromptsDir": "{HOME}\\custom-agent\\prompts",
+        "getSessionsDir": "{HOME}\\custom-agent\\sessions",
+        "getDebugLogPath": "{HOME}\\custom-agent\\pi-debug.log"
+      }
+    },
+    "env-set-relative": {
+      "note": "a RELATIVE env value is returned as-is; every accessor then joins onto a relative base",
+      "envValue": "rel/agent",
+      "paths": {
+        "getAgentDir": "rel/agent",
+        "getCustomThemesDir": "rel\\agent\\themes",
+        "getModelsPath": "rel\\agent\\models.json",
+        "getAuthPath": "rel\\agent\\auth.json",
+        "getSettingsPath": "rel\\agent\\settings.json",
+        "getToolsDir": "rel\\agent\\tools",
+        "getBinDir": "rel\\agent\\bin",
+        "getPromptsDir": "rel\\agent\\prompts",
+        "getSessionsDir": "rel\\agent\\sessions",
+        "getDebugLogPath": "rel\\agent\\pi-debug.log"
+      }
+    },
+    "env-set-empty-string": {
+      "note": "EDGE: \"\" is falsy, so the `if (envDir)` guard fails and the homedir fallback is used - an empty env var behaves exactly like an unset one",
+      "envValue": "",
+      "paths": {
+        "getAgentDir": "{HOME}\\.pi\\agent",
+        "getCustomThemesDir": "{HOME}\\.pi\\agent\\themes",
+        "getModelsPath": "{HOME}\\.pi\\agent\\models.json",
+        "getAuthPath": "{HOME}\\.pi\\agent\\auth.json",
+        "getSettingsPath": "{HOME}\\.pi\\agent\\settings.json",
+        "getToolsDir": "{HOME}\\.pi\\agent\\tools",
+        "getBinDir": "{HOME}\\.pi\\agent\\bin",
+        "getPromptsDir": "{HOME}\\.pi\\agent\\prompts",
+        "getSessionsDir": "{HOME}\\.pi\\agent\\sessions",
+        "getDebugLogPath": "{HOME}\\.pi\\agent\\pi-debug.log"
+      }
+    },
+    "unset": {
+      "note": "the fallback: join(homedir(), CONFIG_DIR_NAME, \"agent\"). No filesystem access happens; this row is a pure path computation over the real home dir, substituted to {HOME}.",
+      "envValue": null,
+      "paths": {
+        "getAgentDir": "{HOME}\\.pi\\agent",
+        "getCustomThemesDir": "{HOME}\\.pi\\agent\\themes",
+        "getModelsPath": "{HOME}\\.pi\\agent\\models.json",
+        "getAuthPath": "{HOME}\\.pi\\agent\\auth.json",
+        "getSettingsPath": "{HOME}\\.pi\\agent\\settings.json",
+        "getToolsDir": "{HOME}\\.pi\\agent\\tools",
+        "getBinDir": "{HOME}\\.pi\\agent\\bin",
+        "getPromptsDir": "{HOME}\\.pi\\agent\\prompts",
+        "getSessionsDir": "{HOME}\\.pi\\agent\\sessions",
+        "getDebugLogPath": "{HOME}\\.pi\\agent\\pi-debug.log"
+      }
+    }
+  },
+  "packageAssetPaths": {
+    "note": "These depend on where pi is installed, not on Pi's logic. getThemesDir/getExportTemplateDir/getInteractiveAssetsDir each pick \"src\" or \"dist\" with existsSync(join(packageDir, \"src\")); this capture ran against a source checkout, so they resolved to src.",
+    "srcOrDist": "src",
+    "paths": {
+      "getPackageDir": "{PIPKG}",
+      "getThemesDir": "{PIPKG}\\src\\modes\\interactive\\theme",
+      "getExportTemplateDir": "{PIPKG}\\src\\core\\export-html",
+      "getPackageJsonPath": "{PIPKG}\\package.json",
+      "getReadmePath": "{PIPKG}\\README.md",
+      "getDocsPath": "{PIPKG}\\docs",
+      "getExamplesPath": "{PIPKG}\\examples",
+      "getChangelogPath": "{PIPKG}\\CHANGELOG.md",
+      "getInteractiveAssetsDir": "{PIPKG}\\src\\modes\\interactive\\assets",
+      "getBundledInteractiveAssetPath(\"logo.png\")": "{PIPKG}\\src\\modes\\interactive\\assets\\logo.png"
+    }
+  },
+  "expandTildePath": [
+    {
+      "input": "~",
+      "note": "the bare tilde returns homedir() with no separator appended",
+      "result": "{HOME}"
+    },
+    {
+      "input": "~/x",
+      "note": "join(home, \"x\") - note join(), so the separator is native",
+      "result": "{HOME}\\x"
+    },
+    {
+      "input": "~\\x",
+      "note": "win32 only: `process.platform === \"win32\" && startsWith(\"~\\\\\")`. On other platforms this is a LITERAL relative filename.",
+      "result": "{HOME}\\x"
+    },
+    {
+      "input": "~/",
+      "note": "slice(2) is the empty string, so join(home, \"\") normalises to home itself",
+      "result": "{HOME}"
+    },
+    {
+      "input": "~/a/b/c",
+      "note": "deeper path",
+      "result": "{HOME}\\a\\b\\c"
+    },
+    {
+      "input": "~user/x",
+      "note": "NOT expanded: only \"~\", \"~/\" and (win32) \"~\\\\\" are recognised",
+      "result": "~user/x"
+    },
+    {
+      "input": "~~",
+      "note": "NOT expanded",
+      "result": "~~"
+    },
+    {
+      "input": "x/~/y",
+      "note": "a tilde that is not at position 0 is left alone",
+      "result": "x/~/y"
+    },
+    {
+      "input": "",
+      "note": "the empty string passes straight through",
+      "result": ""
+    },
+    {
+      "input": "  ~/x  ",
+      "note": "expandTildePath passes no options, so `trim` defaults to FALSE and the leading spaces defeat the tilde check",
+      "result": "  ~/x  "
+    },
+    {
+      "input": "/abs/path",
+      "note": "absolute POSIX path, returned verbatim (no resolve, no separator conversion)",
+      "result": "/abs/path"
+    },
+    {
+      "input": "C:\\abs\\path",
+      "note": "absolute win32 path, returned verbatim",
+      "result": "C:\\abs\\path"
+    },
+    {
+      "input": "relative/path",
+      "note": "relative path, returned verbatim",
+      "result": "relative/path"
+    },
+    {
+      "input": "file:///C:/tmp/x",
+      "note": "the /^file:\\/\\// branch runs fileURLToPath()",
+      "result": "C:\\tmp\\x"
+    },
+    {
+      "input": "file:///tmp/x",
+      "note": "a POSIX file URL; on win32 fileURLToPath yields a rooted path with no drive",
+      "error": "TypeError: File URL path must be absolute"
+    },
+    {
+      "input": "FILE:///tmp/x",
+      "note": "the regex is case SENSITIVE, so this is returned verbatim",
+      "result": "FILE:///tmp/x"
+    },
+    {
+      "input": "a b",
+      "note": "expandTildePath passes no options, so normalizeUnicodeSpaces is off and U+00A0 survives",
+      "result": "a b"
+    },
+    {
+      "input": "@file.md",
+      "note": "stripAtPrefix is off by default, so the @ survives",
+      "result": "@file.md"
+    }
+  ],
+  "getShareViewerUrl": [
+    {
+      "env": null,
+      "note": "default base URL",
+      "input": "abc123",
+      "result": "https://pi.dev/session/#abc123"
+    },
+    {
+      "env": "https://example.test/s/",
+      "note": "PI_SHARE_VIEWER_URL overrides the base; the gist id is appended after a literal \"#\" with no separator normalisation",
+      "input": "abc123",
+      "result": "https://example.test/s/#abc123"
+    }
+  ]
+}

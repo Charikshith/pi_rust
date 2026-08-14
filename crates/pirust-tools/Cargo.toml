@@ -1,0 +1,23 @@
+[package]
+name = "pirust-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "UI-free built-in tool logic + JSON schemas (read/bash/edit/write/grep/find/ls)"
+
+[dependencies]
+pirust-agent-core = { workspace = true }
+pirust-ai = { workspace = true }           # UserContent/TextContent for tool results
+serde = { workspace = true }
+# preserve_order is load-bearing: tool JSON schemas must serialize in TypeBox's key
+# order (`required` before `properties`) to match tests/fixtures/pi/tools/schemas/.
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }               # fs + process spawn (bash/grep/find)
+tokio-util = { workspace = true }          # CancellationToken (= Pi's AbortSignal)
+async-trait = { workspace = true }         # AgentTool + per-tool Operations traits
+unicode-normalization = { workspace = true } # NFD for read's macOS path fallbacks
+
+[dev-dependencies]
+tempfile = { workspace = true }            # rebuild the captured exec fixture tree

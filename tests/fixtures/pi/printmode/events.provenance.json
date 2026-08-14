@@ -1,0 +1,703 @@
+{
+  "description": "Provenance for the `events` arrays in text_mode.cases.jsonl / json_mode.cases.jsonl. Every event was produced by a REAL coding-agent AgentSession over a REAL Agent, with only the provider's stream function replaced by Pi's own scripted test double (packages/ai/src/providers/faux.ts, via registerFauxProvider). The runtime is assembled exactly the way pi's own packages/coding-agent/test/agent-session-runtime-events.test.ts assembles one.",
+  "seam": {
+    "phase1_harvest": "real ModelRuntime + AuthStorage.inMemory + registerFauxProvider + createAgentSessionServices + createAgentSessionFromServices + createAgentSessionRuntime, then session.bindExtensions({mode}) and session.prompt(text) driven prompt-by-prompt with session.subscribe() collecting structuredClone'd AgentSessionEvents.",
+    "phase2_capture": "the REAL runPrintMode, in a child process with separate stdout/stderr pipes, over the REAL AgentSessionRuntime class wrapping a STUB AgentSession of the same shape pi's own packages/coding-agent/test/print-mode.test.ts uses. runPrintMode reads only sessionManager.getHeader, bindExtensions, subscribe, prompt, state and extensionRunner off the session and never reaches a provider. The child calls takeOverStdout() before and restoreStdout() after, mirroring main.ts:540-544,855.",
+    "why": "a live run bakes wall-clock timestamps, uuidv7 ids, temp paths and faux's prompt-length-derived token counts into the very bytes that are supposed to be the assertion target. Replaying NORMALIZED events keeps `events` and `stdout` exactly consistent, which is what a byte-for-byte Rust test needs. The crossCheck below proves the replay is faithful."
+  },
+  "crossCheck": {
+    "description": "For every scenario, a LIVE json-mode runPrintMode was additionally run against the real faux-backed runtime; its stdout was parsed back line by line and compared - after identical normalization - to [header, ...harvestedEvents]. `match: true` means print mode's json stream IS exactly one compact JSON.stringify per event, header first, and that the phase-2 replay reproduces it.",
+    "allMatch": true,
+    "rows": [
+      {
+        "scenario": "text-only-reply",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 13,
+        "expectedLineCount": 13,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "tool-call-and-result",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 24,
+        "expectedLineCount": 24,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "multi-turn",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 25,
+        "expectedLineCount": 25,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "reasoning-content",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 16,
+        "expectedLineCount": 16,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "provider-error-mid-stream",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 13,
+        "expectedLineCount": 13,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "provider-error-retried-then-succeeds",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 24,
+        "expectedLineCount": 24,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "provider-error-retried-then-exhausted",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 21,
+        "expectedLineCount": 21,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "provider-error-no-message",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 13,
+        "expectedLineCount": 13,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "no-responses-queued",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 10,
+        "expectedLineCount": 10,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "aborted-run",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 13,
+        "expectedLineCount": 13,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "aborted-no-message",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 13,
+        "expectedLineCount": 13,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "empty-response",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 10,
+        "expectedLineCount": 10,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "multi-text-blocks",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 16,
+        "expectedLineCount": 16,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "text-with-trailing-newline",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 13,
+        "expectedLineCount": 13,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      },
+      {
+        "scenario": "text-multiline-and-unicode",
+        "liveExitCode": 0,
+        "liveChildStatus": 0,
+        "liveLineCount": 13,
+        "expectedLineCount": 13,
+        "parseError": null,
+        "match": true,
+        "liveStderr": ""
+      }
+    ]
+  },
+  "determinism": {
+    "clock": "Date replaced by a subclass returning ORACLE_NOW=1700000000000 (\"2023-11-14T22:13:20.000Z\") for new Date() and Date.now(); new Date(x) unchanged.",
+    "rng": "crypto.getRandomValues and Math.random redirected to a seeded mulberry32 (seed 0xbadf00d), reset before each runtime build.",
+    "faux": "registerFauxProvider({api:\"faux\", tokenSize:{min:100000,max:100000}}) - the explicit api removes faux's `faux:<Date.now()>:<Math.random()>` default, and the huge token size forces exactly ONE delta event per content block (splitStringByTokenSize is otherwise random-length, making the message_update COUNT non-deterministic).",
+    "placeholders": {
+      "{TMPROOT}": "the mkdtemp'd oracle root",
+      "{PROJECTDIR}": "the per-scenario temp project cwd (appears in the session header's `cwd`)",
+      "{AGENTDIR}": "the per-scenario temp agent dir",
+      "{SESSIONDIR}": "the per-scenario temp sessions dir",
+      "{SESSIONID}": "the session header's uuidv7 `id`",
+      "{HOME}": "os.homedir()",
+      "{PIPKG}": "the pi checkout's coding-agent package root (the default system prompt embeds getReadmePath()/getDocsPath()/getExamplesPath())"
+    },
+    "usageNormalization": {
+      "what": "every object whose key list is exactly [input,output,cacheRead,cacheWrite,totalTokens,cost] had its integers replaced by CANONICAL_USAGE.",
+      "canonical": {
+        "input": 1000,
+        "output": 25,
+        "cacheRead": 0,
+        "cacheWrite": 1000,
+        "totalTokens": 2025,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0
+        }
+      },
+      "why": "faux derives usage from Math.ceil(serializeContext(context).length / 4), and the serialized context embeds the absolute cwd and the absolute paths of pi's shipped docs, so the numbers are a function of WHERE the checkout lives and differ on every machine. Key order, field presence and the nested `cost` object are preserved exactly and ARE contract; only the integers are placeholders.",
+      "rawObserved": [
+        {
+          "input": 1347,
+          "output": 3,
+          "cacheRead": 0,
+          "cacheWrite": 1347,
+          "totalTokens": 2697,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 479,
+          "output": 5,
+          "cacheRead": 0,
+          "cacheWrite": 479,
+          "totalTokens": 963,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 58,
+          "output": 2,
+          "cacheRead": 434,
+          "cacheWrite": 58,
+          "totalTokens": 552,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1347,
+          "output": 4,
+          "cacheRead": 0,
+          "cacheWrite": 1347,
+          "totalTokens": 2698,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 707,
+          "output": 4,
+          "cacheRead": 652,
+          "cacheWrite": 708,
+          "totalTokens": 2071,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1349,
+          "output": 9,
+          "cacheRead": 0,
+          "cacheWrite": 1349,
+          "totalTokens": 2707,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1349,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 1349,
+          "totalTokens": 2698,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1351,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 1351,
+          "totalTokens": 2702,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 0,
+          "output": 3,
+          "cacheRead": 1351,
+          "cacheWrite": 0,
+          "totalTokens": 1354,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1352,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 1352,
+          "totalTokens": 2704,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 1352,
+          "cacheWrite": 0,
+          "totalTokens": 1352,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1347,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 1347,
+          "totalTokens": 2694,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1345,
+          "output": 3,
+          "cacheRead": 0,
+          "cacheWrite": 1345,
+          "totalTokens": 2693,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1348,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 1348,
+          "totalTokens": 2696,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1348,
+          "output": 5,
+          "cacheRead": 0,
+          "cacheWrite": 1348,
+          "totalTokens": 2701,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1350,
+          "output": 5,
+          "cacheRead": 0,
+          "cacheWrite": 1350,
+          "totalTokens": 2705,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 1350,
+          "output": 14,
+          "cacheRead": 0,
+          "cacheWrite": 1350,
+          "totalTokens": 2714,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        }
+      ]
+    },
+    "ansi": "print-mode.ts imports no chalk and emits no escape sequences of its own; NO_COLOR=1 is set in every child anyway. There is no colour-ON variant because there is nothing to colour. (main.ts's diagnostics DO use chalk, but they run before runPrintMode.)"
+  },
+  "notCaptured": [
+    "entry_appended - only emitted from the extension API's appendEntry (agent-session.ts:2357-2363); needs a loaded extension (feat-007).",
+    "session_info_changed / thinking_level_changed - need /name and /thinking, i.e. interactive slash commands.",
+    "queue_update - needs a steering/follow-up message queued while the agent is streaming.",
+    "compaction_start / compaction_end - need an over-threshold context window.",
+    "CAPTURED (not missing): auto_retry_start / auto_retry_end appear for real in the provider-error-retried-then-succeeds and provider-error-retried-then-exhausted scenarios, because an errorMessage containing \"503\" is classified retryable by ai/src/utils/retry.ts.",
+    "a real mid-stream session.abort() - not byte-deterministic (where the abort lands decides how many text_delta events precede it). The aborted TERMINAL shape is captured instead, via faux's own stopReason:\"aborted\" path (faux.ts:291-298,393-397).",
+    "SIGHUP - print-mode.ts:49-51 only registers it off win32; the observed listener counts are in exit_codes.json.",
+    "Any of these matters only for WHICH events exist, not for how print mode renders them: the json branch is `writeRawStdout(`${JSON.stringify(event)}\\n`)` for EVERY event with no switch on type, and the text branch never looks at events at all."
+  ],
+  "scenarios": [
+    {
+      "name": "text-only-reply",
+      "note": "a plain text-only assistant reply, one turn",
+      "prompts": [
+        "Say hello"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "Hello there."
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "tool-call-and-result",
+      "note": "turn 1 calls a custom tool, turn 2 answers; pins tool rendering in print mode (json mode streams tool_execution_* and the toolResult message; TEXT mode prints NOTHING for them)",
+      "prompts": [
+        "echo hi"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "toolCall",
+          "name": "echo",
+          "args": {
+            "text": "hi"
+          },
+          "id": "call-1"
+        },
+        {
+          "kind": "text",
+          "text": "Echoed."
+        }
+      ],
+      "tools": [
+        "echo"
+      ]
+    },
+    {
+      "name": "multi-turn",
+      "note": "initialMessage plus one follow-up in options.messages; TEXT mode prints only the LAST assistant message",
+      "prompts": [
+        "first question",
+        "second question"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "First answer."
+        },
+        {
+          "kind": "text",
+          "text": "Second answer."
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "reasoning-content",
+      "note": "an assistant reply carrying thinking content; TEXT mode DROPS thinking blocks and prints only text blocks",
+      "prompts": [
+        "think about it"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "blocks",
+          "blocks": [
+            {
+              "t": "thinking",
+              "v": "step one, step two"
+            },
+            {
+              "t": "text",
+              "v": "The answer is 42."
+            }
+          ]
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "provider-error-mid-stream",
+      "note": "faux returns stopReason:\"error\" with a NON-retryable errorMessage (it matches neither pattern in ai/src/utils/retry.ts), so there is exactly one turn; TEXT mode prints errorMessage to STDERR and exits 1, JSON mode exits 0",
+      "prompts": [
+        "boom"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "",
+          "stopReason": "error",
+          "errorMessage": "provider exploded: invalid_request_error"
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "provider-error-retried-then-succeeds",
+      "note": "the errorMessage contains \"503\", which ai/src/utils/retry.ts classifies as RETRYABLE, so AgentSession auto-retries: the stream carries a real auto_retry_start / auto_retry_end(success:true) pair and a second agent_start..agent_end cycle. TEXT mode prints only the LAST assistant message, so the failed turn is invisible there and the exit code is 0",
+      "prompts": [
+        "boom"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "",
+          "stopReason": "error",
+          "errorMessage": "provider exploded: 503 upstream"
+        },
+        {
+          "kind": "text",
+          "text": "Recovered."
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "provider-error-retried-then-exhausted",
+      "note": "a retryable 503 with NOTHING queued behind it: auto_retry_start fires, the retry hits faux's own `No more faux responses queued` error (which is NOT retryable), and auto_retry_end carries success:false + finalError. TEXT mode reports the SECOND error message, not the first",
+      "prompts": [
+        "boom"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "",
+          "stopReason": "error",
+          "errorMessage": "provider exploded: 503 upstream"
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "provider-error-no-message",
+      "note": "stopReason:\"error\" with errorMessage undefined -> TEXT mode falls back to `Request error`",
+      "prompts": [
+        "boom"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "",
+          "stopReason": "error",
+          "errorMessage": null
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "no-responses-queued",
+      "note": "faux has NO queued response: its own createErrorMessage path (faux.ts:451-460) yields stopReason error + `No more faux responses queued`",
+      "prompts": [
+        "boom"
+      ],
+      "fauxResponses": [],
+      "tools": null
+    },
+    {
+      "name": "aborted-run",
+      "note": "stopReason:\"aborted\" - faux.ts:291-298/393-397, the same terminal shape a real session.abort() produces; TEXT mode prints errorMessage or `Request aborted` and exits 1",
+      "prompts": [
+        "stop"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "partial answ",
+          "stopReason": "aborted",
+          "errorMessage": "Request was aborted"
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "aborted-no-message",
+      "note": "stopReason:\"aborted\" with errorMessage undefined -> TEXT mode falls back to `Request aborted`",
+      "prompts": [
+        "stop"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "partial answ",
+          "stopReason": "aborted",
+          "errorMessage": null
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "empty-response",
+      "note": "an assistant message with an EMPTY content array: no text blocks, so TEXT mode writes nothing at all and exits 0",
+      "prompts": [
+        "say nothing"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "blocks",
+          "blocks": []
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "multi-text-blocks",
+      "note": "two text blocks in ONE assistant message: TEXT mode writes each with its own trailing newline, in block order",
+      "prompts": [
+        "two parts"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "blocks",
+          "blocks": [
+            {
+              "t": "text",
+              "v": "part one"
+            },
+            {
+              "t": "text",
+              "v": "part two"
+            }
+          ]
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "text-with-trailing-newline",
+      "note": "assistant text that already ENDS in \\n: print mode appends another one unconditionally (`${content.text}\\n`)",
+      "prompts": [
+        "trailing"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "ends with newline\n"
+        }
+      ],
+      "tools": null
+    },
+    {
+      "name": "text-multiline-and-unicode",
+      "note": "embedded newlines, CRLF, a tab, non-ASCII and an emoji pass through verbatim; JSON.stringify escapes them, writeRawStdout does not",
+      "prompts": [
+        "unicode"
+      ],
+      "fauxResponses": [
+        {
+          "kind": "text",
+          "text": "line1\nline2\r\ntab\there café 日本語 🚀 \"quoted\" back\\slash"
+        }
+      ],
+      "tools": null
+    }
+  ]
+}

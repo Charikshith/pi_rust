@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pirust-ai",
+    "crates/pirust-agent-core",
+    "crates/pirust-tui",
+    "crates/pirust-tools",
+    "crates/pirust-coding-agent",
+    "crates/pirust-orchestrator",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version = "1.90"
+
+# Shared dependency versions. Ports mirror pi_space/pi (see docs/analysis/00-overview.md §5).
+[workspace.dependencies]
+pirust-ai = { path = "crates/pirust-ai" }
+pirust-agent-core = { path = "crates/pirust-agent-core" }
+pirust-tui = { path = "crates/pirust-tui" }
+pirust-tools = { path = "crates/pirust-tools" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+# feat-002 Anthropic streaming runtime deps (docs/analysis/06-anthropic-runtime-spec.md §Crates).
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+futures = "0.3"
+bytes = "1"
+base64 = "0.22"
+# feat-003 agent-core deps (docs/analysis/07-agent-core-spec.md §13 "Crates to add").
+async-trait = "0.1"       # async methods in AgentTool / ExecutionEnv traits
+jsonschema = "0.26"       # tool-argument validation (≈ pi-ai validateToolArguments)
+serde_yaml = "0.9"        # skill/prompt frontmatter parsing
+# feat-004 pirust-tools deps (docs/analysis/08-tools-spec.md).
+tempfile = "3"            # test-only: rebuild the captured exec fixture tree
+# String.prototype.normalize("NFD") for read's macOS filename fallbacks
+# (path-utils.ts:11). Hand-rolling full canonical decomposition is not viable.
+unicode-normalization = "0.1"

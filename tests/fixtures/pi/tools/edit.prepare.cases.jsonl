@@ -1,0 +1,10 @@
+{"fn":"prepareArguments","tool":"edit","note":"already-canonical input passes through","input":{"path":"a.ts","edits":[{"oldText":"x","newText":"y"}]},"ok":true,"output":{"path":"a.ts","edits":[{"oldText":"x","newText":"y"}]}}
+{"fn":"prepareArguments","tool":"edit","note":"legacy flat oldText/newText hoisted into edits[]","input":{"path":"a.ts","oldText":"x","newText":"y"},"ok":true,"output":{"path":"a.ts","edits":[{"oldText":"x","newText":"y"}]}}
+{"fn":"prepareArguments","tool":"edit","note":"legacy flat pair APPENDED after existing edits[]","input":{"path":"a.ts","edits":[{"oldText":"1","newText":"2"}],"oldText":"x","newText":"y"},"ok":true,"output":{"path":"a.ts","edits":[{"oldText":"1","newText":"2"},{"oldText":"x","newText":"y"}]}}
+{"fn":"prepareArguments","tool":"edit","note":"edits sent as a JSON string (Opus 4.6 / GLM-5.1 behaviour)","input":{"path":"a.ts","edits":"[{\"oldText\":\"x\",\"newText\":\"y\"}]"},"ok":true,"output":{"path":"a.ts","edits":[{"oldText":"x","newText":"y"}]}}
+{"fn":"prepareArguments","tool":"edit","note":"edits sent as an unparseable string: left as-is","input":{"path":"a.ts","edits":"[not json"},"ok":true,"output":{"path":"a.ts","edits":"[not json"}}
+{"fn":"prepareArguments","tool":"edit","note":"edits sent as a JSON string that is not an array: left as-is","input":{"path":"a.ts","edits":"{\"oldText\":\"x\"}"},"ok":true,"output":{"path":"a.ts","edits":"{\"oldText\":\"x\"}"}}
+{"fn":"prepareArguments","tool":"edit","note":"only oldText present (newText missing) -> no hoisting","input":{"path":"a.ts","oldText":"x"},"ok":true,"output":{"path":"a.ts","oldText":"x"}}
+{"fn":"prepareArguments","tool":"edit","note":"non-string oldText -> no hoisting","input":{"path":"a.ts","oldText":1,"newText":"y"},"ok":true,"output":{"path":"a.ts","oldText":1,"newText":"y"}}
+{"fn":"prepareArguments","tool":"edit","note":"null input passes through","input":null,"ok":true,"output":null}
+{"fn":"prepareArguments","tool":"edit","note":"string input passes through","input":"nope","ok":true,"output":"nope"}

@@ -1,0 +1,24 @@
+{
+  "note": "App identity read from pi/packages/coding-agent/package.json when the help goldens were captured. printHelp() interpolates APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR and ENV_SESSION_DIR into its template; the Rust port renders the SAME template with pirust's identity, so a golden test substitutes these values back in to prove byte-identity. VERSION/APP_TITLE/PACKAGE_NAME do NOT appear in the help text and are recorded for reference only.",
+  "PACKAGE_NAME": "@earendil-works/pi-coding-agent",
+  "APP_NAME": "pi",
+  "APP_TITLE": "π",
+  "CONFIG_DIR_NAME": ".pi",
+  "VERSION": "0.80.10",
+  "ENV_AGENT_DIR": "PI_CODING_AGENT_DIR",
+  "ENV_SESSION_DIR": "PI_CODING_AGENT_SESSION_DIR",
+  "isBunBinary": false,
+  "isBunRuntime": false,
+  "boldOn": "\u001b[1m",
+  "boldOff": "\u001b[22m",
+  "envVars": {
+    "plainGoldens": {
+      "NO_COLOR": "1",
+      "FORCE_COLOR": null
+    },
+    "colorGoldens": {
+      "NO_COLOR": null,
+      "FORCE_COLOR": "1"
+    }
+  }
+}

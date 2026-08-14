@@ -1,0 +1,1 @@
+{"provider":"anthropic","modelId":"claude-haiku-4-5","context":{"messages":[{"role":"user","content":"Say hello.","timestamp":0}]},"options":{}}

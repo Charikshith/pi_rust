@@ -1,0 +1,36 @@
+[package]
+name = "pirust-coding-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The `pirust` coding-agent CLI — pirust port of @earendil-works/pi-coding-agent"
+
+[[bin]]
+name = "pirust"
+path = "src/main.rs"
+
+# The bootstrap is also a library so the golden suites can drive `parse_args`,
+# settings merging, migrations and print-mode without spawning the binary.
+[lib]
+name = "pirust_coding_agent"
+path = "src/lib.rs"
+
+[dependencies]
+pirust-ai = { workspace = true }
+pirust-agent-core = { workspace = true }
+pirust-tui = { workspace = true }
+pirust-tools = { workspace = true }
+serde = { workspace = true }
+# preserve_order keeps on-disk JSON (settings.json / auth.json / models.json) in Pi's
+# key order; float_roundtrip matches the byte-compat choice made in pirust-ai.
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }          # CancellationToken (= Pi's AbortSignal)
+async-trait = { workspace = true }
+futures = { workspace = true }             # event-stream consumption in print mode
+
+[dev-dependencies]
+tempfile = { workspace = true }            # migrations + session-dir golden fixtures

@@ -1,0 +1,14 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Build tooling for pirust (incl. the model-catalog generator, feat-008)"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+# gen-catalog reads the `builtinCatalogFingerprint` record out of the captured JSONL oracle;
+# `preserve_order` keeps `headers`/`compat` keys in the record's order in the emitted literals.
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }

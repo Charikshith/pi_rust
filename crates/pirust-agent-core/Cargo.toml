@@ -1,0 +1,38 @@
+[package]
+name = "pirust-agent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Agent runtime: loop, tool-calling, sessions — pirust port of @earendil-works/pi-agent-core"
+
+[dependencies]
+pirust-ai = { workspace = true }
+serde = { workspace = true }
+# preserve_order: arbitrary JSON maps (custom.data, entry `details`, header
+#   `metadata`) keep insertion/parse order so re-serialization is byte-identical to
+#   Pi's `JSON.stringify` (§1.4, §12). Transitively enabled via pirust-ai, but
+#   declared here explicitly so the byte oracle does not depend on that unification.
+# float_roundtrip: an f64 (e.g. assistant `usage.cost`) survives parse->serialize
+#   bit-for-bit, matching the pirust-ai message reused inside `message` entries.
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# feat-003 scaffolding deps (docs/analysis/07-agent-core-spec.md §13 "Crates to add").
+async-trait = { workspace = true }   # async traits: AgentTool, FileSystem/Shell/ExecutionEnv
+futures = { workspace = true }        # join_all for parallel tool execution
+getrandom = "0.3"                     # crypto entropy for UUIDv7 SystemSource (§7; ≈ crypto.getRandomValues)
+jsonschema = { workspace = true }     # tool-argument validation (≈ pi-ai validateToolArguments)
+serde_yaml = { workspace = true }     # skill/prompt-template frontmatter parsing
+
+# DEFERRED (feature-gated leaves, not wired yet — see §13):
+#   proxy SSE (feature "proxy"): reqwest + bytes + tokio-stream
+#   env/nodejs process-tree kill (feature "native"): nix / windows / taskkill
+# These land with their dedicated sub-phase subagents.
+
+[features]
+default = []
+native = []   # ExecutionEnv (harness/env/nodejs) — process spawning/kill (deferred)
+proxy = []    # stream_proxy SSE (proxy.rs) — reuses feat-002 SSE parser (deferred)

@@ -1,0 +1,27 @@
+{
+  "note": "The exact ExtensionFlag[] passed to printHelp() for the *.ext.golden files. Pi renders each as `  --${name}${type === \"string\" ? \" <value>\" : \"\"}`.padEnd(30) + (description ?? `Registered by ${extensionPath}`), joined with \"\\n\", wrapped in a leading \"\\n\" + bold \"Extension CLI Flags:\" + \"\\n\" and a trailing \"\\n\".",
+  "flags": [
+    {
+      "name": "plan",
+      "type": "boolean",
+      "description": "Enable plan mode",
+      "extensionPath": "/ext/plan-mode.ts"
+    },
+    {
+      "name": "plan-model",
+      "type": "string",
+      "description": "Model used for planning",
+      "extensionPath": "/ext/plan-mode.ts"
+    },
+    {
+      "name": "x",
+      "type": "boolean",
+      "extensionPath": "/ext/x.ts"
+    },
+    {
+      "name": "a-very-long-extension-flag-name",
+      "type": "string",
+      "extensionPath": "/ext/long.ts"
+    }
+  ]
+}

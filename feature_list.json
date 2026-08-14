@@ -1,0 +1,116 @@
+{
+  "_meta": {
+    "type": "state",
+    "title": "pirust — Pi → Rust Port Roadmap",
+    "description": "Feature/state tracker for the 1:1 Rust replica of the Pi Agent Harness. Rust crates/binaries use the pirust-* naming convention; `pi`/packages refs denote the original source being ported. Phases from docs/analysis/00-overview.md §6. Exactly one feature in-progress at a time. ACCEPTANCE RULE (user): a feature is done only when it behaves exactly like Pi, verified against Pi as the oracle (golden fixtures / behavior parity) — not against self-authored expectations.",
+    "artifact": "feature_list.json",
+    "source": "pi_space/pi (~100K LOC TS, 5 packages)",
+    "tags": ["state", "features", "tracking", "dependencies", "rust-port"]
+  },
+  "features": [
+    {
+      "id": "feat-000",
+      "name": "P0 — Cargo workspace scaffold",
+      "description": "Create the Cargo workspace with the 6 planned crates (pirust-ai, pirust-agent-core, pirust-tui, pirust-tools, pirust-coding-agent bin `pirust`, pirust-orchestrator bin) + xtask. Each crate compiles as an empty stub. Wire ./init.sh to fmt/clippy/test/build. See 00-overview §5.",
+      "dependencies": [],
+      "status": "done",
+      "evidence": "Workspace at Cargo.toml with 7 members (cargo metadata confirms). Crate stubs with dependency edges pirust-agent-core->pirust-ai, pirust-tools->pirust-agent-core, pirust-coding-agent->all. Gate green: cargo fmt --check OK, clippy -D warnings clean, tests pass. Binaries build as `pirust.exe` and `pirust-orchestrator.exe`; `pirust --help`/`--version` (0.0.1) work; xtask stub exits 2. ./init.sh green."
+    },
+    {
+      "id": "feat-011",
+      "name": "Golden-fixture harness (Pi as test oracle)",
+      "description": "Reusable verification infra so every phase is checked against REAL Pi output, not self-authored expectations. (1) Node scripts that read Pi's own fixtures/session JSONL and emit JS-canonical goldens. (2) A pirust test that deserializes each fixture AND re-serializes to a byte-identical string. Acceptance gate for feat-001 and later serde-facing features.",
+      "dependencies": ["feat-000"],
+      "status": "done",
+      "evidence": "scripts/gen-golden.mjs + scripts/gen-message-corpus.mjs (both support --check). Vendored oracle tests/fixtures/pi/: assistant-message-with-thinking-code.json + messages.corpus.jsonl (1901 real session messages, JS-canonical). crates/pirust-ai/tests/golden.rs round-trips all of them byte-identically (deserialize->serialize == JS JSON.stringify). init.sh runs cargo test (golden) + optional node --check freshness. Harness reused by all future serde-facing features."
+    },
+    {
+      "id": "feat-001",
+      "name": "P0 — pirust-ai type model",
+      "description": "Port packages/ai/src/types.ts: content-block / message / streaming-event (AssistantMessageEvent) discriminated unions as serde tagged enums; Model, Tool, Usage, Context. Shared vocabulary for all crates. ACCEPTANCE: byte-identical round-trip of real Pi fixtures (feat-011), not just internal round-trips.",
+      "dependencies": ["feat-000", "feat-011"],
+      "status": "done",
+      "evidence": "VERIFIED against authentic Pi data at 3 tiers (crates/pirust-ai/tests/golden.rs, 5 suites). BYTE-IDENTICAL (persisted formats, order matters): 1 AssistantMessage fixture + 1901 real session Messages (user/assistant/toolResult; text/toolCall/thinking content; usage w/ and w/o totalTokens; errorMessage; partialJson; toolResult.details) round-trip == Pi JSON.stringify byte-for-byte. SEMANTIC lossless (non-persisted, Pi key order non-canonical): 1062 real Models across ~35 providers (generated catalog); all 12 AssistantMessageEvent variants captured from Pi's real faux provider. TYPE-FIDELITY (shapes per types.ts, serialized by real Node, semantic round-trip): image content, user-string, textSignature, redacted, thoughtSignature, usage.reasoning/cacheWrite1h, responseModel/responseId/diagnostics, addedToolNames. Oracle-forced byte-compat fixes (not guessable): jsnum.rs ECMAScript Number::toString; serde_json float_roundtrip; errorMessage-after-timestamp order; ToolCall.partialJson + Usage.totalTokens optional; explicit role tag on message structs so standalone AssistantMessage (in events) emits role; Message untagged. crates/pirust-ai/src/types/{ids,content,usage,message,event,model}.rs + mod.rs + jsnum.rs. 26 tests, fmt+clippy clean. RESIDUAL (documented, not silent): persisted byte-ORDER of provider-gated optional fields (reasoning, cacheWrite1h, responseModel/responseId/diagnostics, thoughtSignature, redacted, image-in-session) is not canonically determinable without a real session containing them — pinned when the runtime produces+persists them (feat-002/003). DEFERRED (YAGNI, not in feat-001 scope): StreamOptions/ProviderStreams/*Function contracts, images generation types, typed compat/routing unions (Model.compat=opaque JSON), concrete AssistantMessageDiagnostic -> feat-002/008. KNOWN RESIDUAL (still open): floats inside arbitrary tool arguments/details (serde_json::Value) serialize via ryu, not jsnum; no such case exists in the 1901-message corpus, so revisit if one surfaces."
+    },
+    {
+      "id": "feat-002",
+      "name": "P1 — pirust-ai runtime: one provider end-to-end",
+      "description": "Anthropic Messages api adapter with real SSE streaming + tool-call assembly + api-key auth. Prove the streaming union and repairJson lenient-parse path. Mock/faux Api adapter for tests. Verify assembled AssistantMessage matches Pi's for the same recorded SSE stream. ORCHESTRATED: subagents write all port code; orchestrator captures Pi oracle, runs tests, delegates fixes.",
+      "dependencies": ["feat-001"],
+      "status": "done",
+      "evidence": "VERIFIED byte-identical against Pi's LITERAL captured bytes. Modules (crates/pirust-ai/src): stream (AssistantMessageEventStream = tokio mpsc+oneshot), sse (1:1 port of Pi's inline CR/LF decoder + cross-chunk UTF-8 buffering + 6-event allow-set), json_repair (repairJson + parse_streaming_json incl. hand-rolled partial-json Allow.ALL), auth (ANTHROPIC_OAUTH_TOKEN|ANTHROPIC_API_KEY precedence + sk-ant-oat->Bearer/X-Api-Key), api/anthropic_messages (SSE->event state machine §4b, calculate_cost §4d incl. 1h cache split + tiers, stop-reason map, redacted thinking, runtime-ordered final message), http (CannedTransport oracle double + ReqwestTransport). types §4e reorder (responseId after timestamp; usage cacheWrite1h/reasoning after cost) — pins feat-001's provider-gated-field residual; 1901-message corpus stayed byte-identical. ORACLE: scripts/gen-anthropic-oracle.mjs drove Pi's REAL adapter offline (fake client) across 5 authentic scenarios (text-basic, toolcall-repair, refusal-error, cache-write-1h, no-usage-in-delta); fixtures in tests/fixtures/pi/anthropic/ (.sse/.request.json/.expected.json/.final.golden). tests/anthropic_golden.rs: adapter fed same SSE -> final AssistantMessage == Pi's literal .final.golden bytes (validates cost floats 7.750625 & 0.000037000000000000005 via jsnum, key order, zero dropped/extra fields); tape type-sequence + stable payload fields; repairJson proven via {path:'A\\H',text:'col1\\tcol2'}. 65 workspace tests (leaf: stream 4/sse 11/json_repair 14/auth 5; adapter golden 5; feat-001 corpora intact), fmt+clippy -D warnings clean, ./init.sh green. Orchestrated: all Rust + the golden-hardening fix written by subagents; orchestrator captured the oracle, verified, and caught+delegated a self-referential-assertion weakness. DEFERRED: faux ProviderStreams left stub -> feat-003 (CannedTransport was the stronger feat-002 test double); outbound HTTP request build (headers/body in ReqwestTransport) implemented per spec §4a but NOT oracle-verified (oracle didn't capture the request) -> add request-shape fixture later; advanced StreamOptions (retries/websocket/onPayload) partial; other apis/providers -> feat-008."
+    },
+    {
+      "id": "feat-003",
+      "name": "P2 — pirust-agent-core",
+      "description": "Port the 3-tier runtime: loop fns (runLoop turn/outer loop), stateful Agent, AgentHarness. EventStream -> mpsc+oneshot; AbortSignal -> CancellationToken; append-only session tree (JSONL); token-based compaction; monotonic UUIDv7 with preserved bit layout; 3-stage tool pipeline. Also completes the faux ProviderStreams deferred from feat-002. ORCHESTRATED: subagents write all port code; orchestrator captures Pi oracle (session JSONL byte-identity + faux-driven loop behavior), runs tests, delegates fixes.",
+      "dependencies": ["feat-002"],
+      "status": "done",
+      "evidence": "VERIFIED against authentic Pi via 6-wave orchestration (all Rust written by subagents; orchestrator captured oracle, gated each wave, resumed a session-limit failure). Crate pirust-agent-core modules: types.rs (AgentTool/AgentEvent/AgentLoopConfig), harness/types.rs (SessionTreeEntry 11 variants + errors w/ exact code strings + async trait sigs), harness/messages.rs (AgentMessage incl bashExecution + convert_to_llm), harness/session/{uuid,memory_storage,jsonl_storage,mod} (Session + buildSessionContext), harness/compaction/mod.rs (deterministic), agent_loop.rs (runLoop 2-level + 3-stage tool pipeline), agent.rs (Agent), harness/mod.rs (AgentHarness); faux ProviderStreams completed in pirust-ai (deferred from feat-002). ORACLE (scripts/gen-agent-oracle.mjs drove real Pi offline): tests/fixtures/pi/agent/{entries.corpus.jsonl,header.golden,header.withmeta.golden,uuidv7-vectors.json,loop-echo.json,compaction.json}. PROVEN: (a) BYTE-IDENTICAL — all 17 v3 SessionTreeEntry variants + 2 headers round-trip == Pi bytes (tests/session_golden.rs); (b) UUIDv7 BYTE-EXACT — 4 Pi vectors incl monotonic sequence+1 path + slice(-8) short ids (harness/session/uuid.rs); (c) COMPACTION — 9 cases match Pi's captured numbers (estimateTokens UTF-16, calculateContextTokens, shouldCompact, findCutPoint indices, estimateContextTokens, prepareCompaction) cross-referenced to Pi's compaction.test.ts; (d) LOOP tape == filtered loop-echo.json + tool-pipeline rules (sequential/parallel order, length-fails-all, terminate-only-if-all); (e) HARNESS full tape (incl harness-own save_point/after_provider_response/settled) + session entryTypes == loop-echo.json; (f) buildSessionContext collapse structure == Pi. 111 workspace tests, fmt+clippy -D warnings clean, ./init.sh green. NOTE: loop/harness TAPE expected sequences are transcribed from loop-echo.json (structure-only: non-deterministic ids + collapsed message_update); byte-critical oracles (entries/header/uuid/compaction) are fixture-loaded+strict, so no hidden-divergence risk. DEFERRED (documented, not silent): LLM summary generation in compact()/branch-summary (model-generated, not byte-verifiable) -> stubbed; proxy.rs SSE, harness/{skills,prompt_templates,system_prompt}, real Node ExecutionEnv (process-kill, feature 'native'), SessionRepo (jsonl_repo/memory_repo create/open/list/fork), compaction/utils fileOps, v1->v3 session migration -> later coding-agent phases (feat-005/007) or when exercised."
+    },
+    {
+      "id": "feat-004",
+      "name": "P3 — pirust-tools (UI-free built-in tools)",
+      "description": "The 7 built-in tools (read, bash, edit, write, grep, find, ls) as UI-free execute logic + BYTE-IDENTICAL JSON schemas. grep/find shell out to managed rg/fd. Split from TUI rendering (highest-value refactor, 00-overview §5).",
+      "dependencies": ["feat-003"],
+      "status": "done",
+      "evidence": "VERIFIED against authentic Pi via 7-wave orchestration (all Rust written by subagents; orchestrator scaffolded shared files, captured the oracle, gated every wave, resumed 3 session-limit/API failures). Crate pirust-tools = 7 tools + 6 shared modules: truncate.rs, path_utils.rs, output_accumulator.rs, mutation_queue.rs, binaries.rs, definition.rs, edit_diff.rs, then read/write/ls/grep/find/bash/edit.rs, with lib.rs as the index.ts registry. ORACLE: scripts/gen-tools-oracle.mjs drives Pi's REAL tool modules offline (Node type-stripping + a resolve hook aliasing the workspace specifiers) into tests/fixtures/pi/tools/: schemas/*.json + strings/*.json (7 tools), truncate.cases.jsonl (71), edit.diff.corpus.jsonl (56 = 41 ok/15 err), edit.prepare.cases.jsonl (10), exec.corpus.jsonl (52 = 46 ok/6 err), exec.tree.json, path_utils.cases.jsonl (50), output_accumulator.cases.jsonl (21); --check wired into init.sh. PROVEN: (a) all 7 parameters() schemas BYTE-IDENTICAL to TypeBox's JSON.stringify incl. `required` BEFORE `properties`, `required` omitted entirely for ls, and array `description` AFTER `items`; (b) edit_diff is a literal port of jsdiff 8.0.4 (base.js Myers + line.js tokenize + create.js structuredPatch/FILE_HEADERS_ONLY) — NOT a Rust diff crate — with all 41 diff/patch/firstChangedLine byte-identical and all 15 error messages exact; (c) truncate 71/71 incl. Pi's two quirks (head maxBytes=8 reports truncatedBy 'lines'; tail maxBytes=0 gives content='' with outputLines=1/lastLinePartial=true); (d) path_utils 50/50 via literal transcriptions of Node win32/posix resolve+normalize+join and fileURLToPath, plus real NFD; (e) exec corpus green for read/write/ls/grep/find, with grep/find output order normalized by the SAME rule the oracle used; (f) output_accumulator 21/21 incl. the streaming UTF-8 decoder's incomplete-vs-invalid distinction and the snapshot global-counter override; (g) edit replays all 56 rows through the FULL tool asserting bytes-on-disk == writtenContent; (h) end-to-end loop_integration.rs drives a registry tool through pirust-agent-core + the faux provider. BUG FOUND+FIXED in agent-core: build_llm_tools sent t.label() as the provider-facing tool description; AgentTool gained description() (Pi's AgentTool extends pi-ai Tool) and the loop test pins that description(), not label(), reaches the request. MUTATION-TESTED throughout (~45 mutations); 3 surviving mutants were closed by adding oracle rows (ls limit:0/-1 proving Pi does NOT clamp; truncateHead maxBytes 4/6/7 pinning the i>0 newline charge) and one fake-LsOperations unit test (stat-failing entry skipped without consuming budget) — each re-verified to now fail under mutation. 331 workspace tests, 2 ignored, fmt+clippy -D warnings clean, ./init.sh green with no fixture drift. NAMING (user directive): pirust owns its state dir — ~/.pirust/agent/bin, PIRUST_CODING_AGENT_DIR, PIRUST_OFFLINE, temp prefix pirust-bash (file FORMATS stay Pi-compatible; one constant each). Added .gitattributes (-text on fixtures) because core.autocrlf=true would corrupt every byte-exact golden on checkout. DEFERRED (documented, not silent): rg/fd GitHub-releases downloader -> feat-005 (resolution order, offline/android gates and Pi's exact miss strings ARE ported); read's image PROCESSING (needs an image codec; MIME detection + all note strings are ported and the branch is a seam) -> later; all renderCall/renderResult/renderShell/computeEditsDiff -> feat-006/007; bash's commandPrefix/spawnHook/shellPath config plumbing -> feat-005. KNOWN RESIDUALS (each documented in-module): truncate_line's UTF-16 slice can split a surrogate pair where Pi emits a lone high surrogate — primary API returns U+FFFD (same UTF-8 byte length, so all downstream byte accounting matches; exact Vec<u16> variant retained) so persisted JSON would differ only for that one character; ls sorting approximates ICU root collation (faithful for printable ASCII + NFD-decomposable Latin, wrong for ø/æ/ß-class letters and between two accents on one base letter) — closing it needs icu_collator; grep's malformed-match-event budget quirk is reproduced but unprovable without a stub rg replayed through Pi; bash's unix spawn half (process groups, kill -9 -pid) untested on this Windows host and kill uses a shell rather than libc under #![forbid(unsafe_code)]; find's win32 empty result for '/'-containing patterns is Pi's genuine behaviour and is asserted as such."
+    },
+    {
+      "id": "feat-005",
+      "name": "P4 — headless pirust binary",
+      "description": "coding-agent CLI/args (hand-rolled parser + verbatim --help), layered config (~45 Settings fields, global+project deep merge) + 5 startup migrations, auth.json, models.json resolution (anthropic api only), session manager (coding-agent's own implementation — NOTE: the SessionRepo deferred in feat-003 is NOT part of coding-agent and stays a separate pirust-agent-core side-task), sdk wiring to Agent, and print/json run modes. First runnable `pirust` binary, no TUI. On-disk FORMATS must stay byte-compatible with Pi; the dir root is ~/.pirust/agent per the naming directive. RPC mode split out to feat-012 (user decision: land the runnable binary first). Extensions + resource-loader (skills/prompt-templates/themes/keybindings/slash-commands) are STUBBED -> feat-007. ACCEPTANCE: golden fixtures for the pure layers (parseArgs, resolveAppMode, printHelp, config paths, settings merge, migrations, session-dir encoding) PLUS a live differential — real `pi -p` vs `pirust -p` against the same Meridian endpoint, comparing the session JSONL each writes and the stdout shape.",
+      "dependencies": ["feat-004"],
+      "status": "in-progress",
+      "evidence": ""
+    },
+    {
+      "id": "feat-006",
+      "name": "P5 — pirust-tui literal port",
+      "description": "Inline line-diff ANSI renderer (NOT ratatui), StdinBuffer + keys.ts key engine (Kitty CSI-u, xterm modifyOtherKeys, legacy), keybinding registry, full Emacs line editor with UTF-16-correct cursor math, components, Kitty/iTerm image protocols. crossterm as thin syscall shim only.",
+      "dependencies": ["feat-004"],
+      "status": "not-started",
+      "evidence": ""
+    },
+    {
+      "id": "feat-007",
+      "name": "P6 — interactive pirust + built-in Rust extensions",
+      "description": "Wire pirust-tui into pirust-coding-agent interactive mode. pirust-extension-api crate (Extension trait mirroring Pi's host surface: ~30 lifecycle events + tool/command/shortcut/flag/provider registration). ExtensionRunner trait with the BUILT-IN (compile-time) loader covering bundled extensions incl. plan-mode. Extensions are Rust, not emulated TS.",
+      "dependencies": ["feat-005", "feat-006"],
+      "status": "not-started",
+      "evidence": ""
+    },
+    {
+      "id": "feat-008",
+      "name": "P7 — remaining ai providers + catalog generator",
+      "description": "Remaining 10 api adapters + ~35 providers (OpenAI-completions + compat flags, Google, Bedrock SigV4, Codex WebSocket, etc.), OAuth flows, and the model-catalog generator ported into xtask (reproduces providers/data/*.json + models catalog).",
+      "dependencies": ["feat-007"],
+      "status": "not-started",
+      "evidence": ""
+    },
+    {
+      "id": "feat-009",
+      "name": "P8 — pirust-orchestrator daemon",
+      "description": "Supervisor over `pirust --mode rpc` workers via tokio::process + piped stdio; two-layer JSONL protocol over cross-platform local socket (interprocess crate); Radius remote presence with backoff. Preserve no-auto-restart asymmetry. Requires feat-012 — the workers it supervises are `--mode rpc` processes.",
+      "dependencies": ["feat-007", "feat-012"],
+      "status": "not-started",
+      "evidence": ""
+    },
+    {
+      "id": "feat-012",
+      "name": "RPC mode (JSON-RPC over stdio)",
+      "description": "Port modes/rpc/ (~1726 LOC: rpc-mode.ts 795, rpc-client.ts, jsonl.ts, rpc-types.ts) — the `--mode rpc` run mode that lets pirust be embedded as a subprocess, with extension UI requests proxied back over RPC. Split out of feat-005 (user decision) because its only consumer is the feat-009 orchestrator; nothing in feat-006/007 needs it. Also carries `rpc-entry.ts` (prepends `--mode rpc` to argv) and the `@file args are not supported in RPC mode` guard.",
+      "dependencies": ["feat-005"],
+      "status": "not-started",
+      "evidence": ""
+    },
+    {
+      "id": "feat-010",
+      "name": "P9 — dynamic WASM extensions",
+      "description": "Runtime-loaded user extensions compiled Rust->WASM (wasmtime/extism) behind the ExtensionRunner trait. Sandboxed alternative to Pi's in-process jiti TS loading. Authors write Rust->WASM instead of .ts; host API identical.",
+      "dependencies": ["feat-008"],
+      "status": "not-started",
+      "evidence": ""
+    }
+  ]
+}

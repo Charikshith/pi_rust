@@ -1,0 +1,4 @@
+# Makes `cargo xtask <task>` work — the conventional xtask alias. Nothing else belongs here:
+# no rustflags, no target overrides, so a plain `cargo build`/`test`/`clippy` is unaffected.
+[alias]
+xtask = "run --quiet --package xtask --"

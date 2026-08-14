@@ -1,0 +1,17 @@
+[package]
+name = "pirust-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Daemon supervising headless pirust workers — pirust port of @earendil-works/pi-orchestrator"
+
+[[bin]]
+name = "pirust-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }

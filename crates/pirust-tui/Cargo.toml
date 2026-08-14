@@ -1,0 +1,11 @@
+[package]
+name = "pirust-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Inline line-diff terminal UI + editor — pirust port of @earendil-works/pi-tui"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

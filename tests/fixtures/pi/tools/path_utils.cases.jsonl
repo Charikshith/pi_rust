@@ -1,0 +1,50 @@
+{"fn":"resolveToCwd","note":"plain relative path","platform":"win32","input":"a/b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\a\\b.txt"}
+{"fn":"expandPath","note":"plain relative path","platform":"win32","input":"a/b.txt","ok":true,"result":"a/b.txt"}
+{"fn":"resolveToCwd","note":"relative path with backslashes","platform":"win32","input":"a\\b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\a\\b.txt"}
+{"fn":"expandPath","note":"relative path with backslashes","platform":"win32","input":"a\\b.txt","ok":true,"result":"a\\b.txt"}
+{"fn":"resolveToCwd","note":"dot-relative path","platform":"win32","input":"./a/b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\a\\b.txt"}
+{"fn":"expandPath","note":"dot-relative path","platform":"win32","input":"./a/b.txt","ok":true,"result":"./a/b.txt"}
+{"fn":"resolveToCwd","note":"parent traversal is collapsed by path.resolve","platform":"win32","input":"a/../b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\b.txt"}
+{"fn":"expandPath","note":"parent traversal is collapsed by path.resolve","platform":"win32","input":"a/../b.txt","ok":true,"result":"a/../b.txt"}
+{"fn":"resolveToCwd","note":"leading parent traversal","platform":"win32","input":"../sibling/x.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\sibling\\x.txt"}
+{"fn":"expandPath","note":"leading parent traversal","platform":"win32","input":"../sibling/x.txt","ok":true,"result":"../sibling/x.txt"}
+{"fn":"resolveToCwd","note":"empty string resolves to the cwd","platform":"win32","input":"","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd"}
+{"fn":"expandPath","note":"empty string resolves to the cwd","platform":"win32","input":"","ok":true,"result":""}
+{"fn":"resolveToCwd","note":"'.' resolves to the cwd","platform":"win32","input":".","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd"}
+{"fn":"expandPath","note":"'.' resolves to the cwd","platform":"win32","input":".","ok":true,"result":"."}
+{"fn":"resolveToCwd","note":"'..' resolves to the cwd's parent","platform":"win32","input":"..","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle"}
+{"fn":"expandPath","note":"'..' resolves to the cwd's parent","platform":"win32","input":"..","ok":true,"result":".."}
+{"fn":"resolveToCwd","note":"absolute path is resolved on its own, ignoring the cwd","platform":"win32","input":"C:\\oracle\\abs\\target.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\abs\\target.txt"}
+{"fn":"expandPath","note":"absolute path is resolved on its own, ignoring the cwd","platform":"win32","input":"C:\\oracle\\abs\\target.txt","ok":true,"result":"C:\\oracle\\abs\\target.txt"}
+{"fn":"resolveToCwd","note":"bare '~' expands to the home directory","platform":"win32","input":"~","cwd":"C:\\oracle\\cwd","ok":true,"result":"{HOME}"}
+{"fn":"expandPath","note":"bare '~' expands to the home directory","platform":"win32","input":"~","ok":true,"result":"{HOME}"}
+{"fn":"resolveToCwd","note":"'~/...' expands to the home directory","platform":"win32","input":"~/docs/x.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"{HOME}\\docs\\x.txt"}
+{"fn":"expandPath","note":"'~/...' expands to the home directory","platform":"win32","input":"~/docs/x.txt","ok":true,"result":"{HOME}\\docs\\x.txt"}
+{"fn":"resolveToCwd","note":"'~\\...' expands on win32 only","platform":"win32","input":"~\\docs\\x.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"{HOME}\\docs\\x.txt"}
+{"fn":"expandPath","note":"'~\\...' expands on win32 only","platform":"win32","input":"~\\docs\\x.txt","ok":true,"result":"{HOME}\\docs\\x.txt"}
+{"fn":"resolveToCwd","note":"'~user' is NOT expanded","platform":"win32","input":"~otheruser/x.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\~otheruser\\x.txt"}
+{"fn":"expandPath","note":"'~user' is NOT expanded","platform":"win32","input":"~otheruser/x.txt","ok":true,"result":"~otheruser/x.txt"}
+{"fn":"resolveToCwd","note":"'@' prefix is stripped (stripAtPrefix)","platform":"win32","input":"@src/a.ts","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\src\\a.ts"}
+{"fn":"expandPath","note":"'@' prefix is stripped (stripAtPrefix)","platform":"win32","input":"@src/a.ts","ok":true,"result":"src/a.ts"}
+{"fn":"resolveToCwd","note":"bare '@' becomes the empty string, i.e. the cwd","platform":"win32","input":"@","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd"}
+{"fn":"expandPath","note":"bare '@' becomes the empty string, i.e. the cwd","platform":"win32","input":"@","ok":true,"result":""}
+{"fn":"resolveToCwd","note":"'@' plus '~' -> '@' stripped first, then tilde expanded","platform":"win32","input":"@~/x.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"{HOME}\\x.txt"}
+{"fn":"expandPath","note":"'@' plus '~' -> '@' stripped first, then tilde expanded","platform":"win32","input":"@~/x.txt","ok":true,"result":"{HOME}\\x.txt"}
+{"fn":"resolveToCwd","note":"U+00A0 NBSP is normalized to a regular space","platform":"win32","input":"dir/a b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\dir\\a b.txt"}
+{"fn":"expandPath","note":"U+00A0 NBSP is normalized to a regular space","platform":"win32","input":"dir/a b.txt","ok":true,"result":"dir/a b.txt"}
+{"fn":"resolveToCwd","note":"U+202F narrow NBSP is normalized to a regular space","platform":"win32","input":"dir/a b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\dir\\a b.txt"}
+{"fn":"expandPath","note":"U+202F narrow NBSP is normalized to a regular space","platform":"win32","input":"dir/a b.txt","ok":true,"result":"dir/a b.txt"}
+{"fn":"resolveToCwd","note":"U+3000 ideographic space is normalized to a regular space","platform":"win32","input":"dir/a　b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\dir\\a b.txt"}
+{"fn":"expandPath","note":"U+3000 ideographic space is normalized to a regular space","platform":"win32","input":"dir/a　b.txt","ok":true,"result":"dir/a b.txt"}
+{"fn":"resolveToCwd","note":"U+2000 EN QUAD is normalized to a regular space","platform":"win32","input":"dir/a b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\dir\\a b.txt"}
+{"fn":"expandPath","note":"U+2000 EN QUAD is normalized to a regular space","platform":"win32","input":"dir/a b.txt","ok":true,"result":"dir/a b.txt"}
+{"fn":"resolveToCwd","note":"a regular space is untouched","platform":"win32","input":"dir/a b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\dir\\a b.txt"}
+{"fn":"expandPath","note":"a regular space is untouched","platform":"win32","input":"dir/a b.txt","ok":true,"result":"dir/a b.txt"}
+{"fn":"resolveToCwd","note":"file:// URL is converted with fileURLToPath","platform":"win32","input":"file:///C:/oracle/url/target.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\url\\target.txt"}
+{"fn":"expandPath","note":"file:// URL is converted with fileURLToPath","platform":"win32","input":"file:///C:/oracle/url/target.txt","ok":true,"result":"C:\\oracle\\url\\target.txt"}
+{"fn":"resolveToCwd","note":"file:// URL with a percent-escaped space","platform":"win32","input":"file:///C:/oracle/url/a%20b.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\url\\a b.txt"}
+{"fn":"expandPath","note":"file:// URL with a percent-escaped space","platform":"win32","input":"file:///C:/oracle/url/a%20b.txt","ok":true,"result":"C:\\oracle\\url\\a b.txt"}
+{"fn":"resolveToCwd","note":"trailing slash","platform":"win32","input":"dir/sub/","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\dir\\sub"}
+{"fn":"expandPath","note":"trailing slash","platform":"win32","input":"dir/sub/","ok":true,"result":"dir/sub/"}
+{"fn":"resolveToCwd","note":"non-ASCII path component","platform":"win32","input":"dir/café/naïve.txt","cwd":"C:\\oracle\\cwd","ok":true,"result":"C:\\oracle\\cwd\\dir\\café\\naïve.txt"}
+{"fn":"expandPath","note":"non-ASCII path component","platform":"win32","input":"dir/café/naïve.txt","ok":true,"result":"dir/café/naïve.txt"}

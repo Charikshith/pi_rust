@@ -1,0 +1,106 @@
+{
+  "description": "Authentic uuidv7() input->id vectors from Pi packages/agent/src/harness/session/uuid.ts. crypto.getRandomValues was patched to the given 16-byte pattern and Date.now() to nowMs, then uuidv7() called. Byte layout: bytes[0..5]=48-bit ms big-endian; bytes[6]=0x70|(seq>>>28 &0xf); bytes[8]=0x80|(seq>>>14 &0x3f); bytes[10]=((seq&0x3f)<<2)|(random[10]&0x03); bytes[11..15]=random[11..15]. shortId = id.slice(-8) (bytes 12..15).",
+  "monotonicNote": "Vectors run in array order against a single shared module. 'fresh-seq' is the first call (lastTimestamp=-Infinity). 'monotonic-same-now' reuses nowMs=1000 so it takes the sequence=(sequence+1)>>>0 path; its id differs from 'fresh-seq' only in the sequence-derived bytes and its own random tail.",
+  "vectors": [
+    {
+      "label": "fresh-seq",
+      "note": "fresh-timestamp branch (timestamp > lastTimestamp); sequence seeded from random[6..9]",
+      "nowMs": 1000,
+      "randomBytes": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "id": "00000000-03e8-7060-9c20-260b0c0d0e0f",
+      "shortId": "0c0d0e0f"
+    },
+    {
+      "label": "monotonic-same-now",
+      "note": "same nowMs as previous -> sequence = (sequence+1)>>>0; only bytes 6..9 change vs a pure-random uuid",
+      "nowMs": 1000,
+      "randomBytes": [
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "id": "00000000-03e8-7060-9c20-2a1b1c1d1e1f",
+      "shortId": "1c1d1e1f"
+    },
+    {
+      "label": "fresh-pattern-a",
+      "note": "fresh-timestamp branch, distinctive pattern",
+      "nowMs": 2000,
+      "randomBytes": [
+        222,
+        173,
+        190,
+        239,
+        1,
+        35,
+        69,
+        103,
+        137,
+        171,
+        205,
+        239,
+        17,
+        34,
+        51,
+        68
+      ],
+      "id": "00000000-07d0-7456-9e26-adef11223344",
+      "shortId": "11223344"
+    },
+    {
+      "label": "fresh-realistic-ms",
+      "note": "fresh branch; 48-bit ms 1765233665292 packed big-endian into bytes 0..5",
+      "nowMs": 1765233665292,
+      "randomBytes": [
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        170,
+        187,
+        204,
+        221
+      ],
+      "id": "019b0020-250c-7000-8000-0000aabbccdd",
+      "shortId": "aabbccdd"
+    }
+  ]
+}

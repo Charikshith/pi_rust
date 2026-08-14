@@ -1,0 +1,76 @@
+{
+  "description": "Behavioural oracle: fauxProvider + AgentHarness scripted 2-turn run (turn 1 assistant calls tool 'echo'; turn 2 assistant text 'done'). Captured via harness.subscribe wildcard listener + resulting session entries.",
+  "determinism": "STRUCTURE-ONLY. Deterministic: ordered tapeTypes, entryTypes, tool names, roles, stopReasons, message text, toolResult content. NON-deterministic (do NOT assert bytes): entry ids (uuidv7 tail), all timestamps, faux tool-call ids when unspecified, and the exact number of message_update events (delta chunking uses Math.random; pinned to one delta per block here via tokenSize min=max=1000, but still runtime-dependent in general).",
+  "tapeTypes": [
+    "agent_start",
+    "turn_start",
+    "message_start",
+    "message_end",
+    "after_provider_response",
+    "message_start",
+    "message_update",
+    "message_update",
+    "message_update",
+    "message_end",
+    "tool_execution_start",
+    "tool_execution_end",
+    "message_start",
+    "message_end",
+    "turn_end",
+    "save_point",
+    "turn_start",
+    "after_provider_response",
+    "message_start",
+    "message_update",
+    "message_update",
+    "message_update",
+    "message_end",
+    "turn_end",
+    "save_point",
+    "agent_end",
+    "settled"
+  ],
+  "tapeTypeCounts": {
+    "agent_start": 1,
+    "turn_start": 2,
+    "message_start": 4,
+    "message_end": 4,
+    "after_provider_response": 2,
+    "message_update": 6,
+    "tool_execution_start": 1,
+    "tool_execution_end": 1,
+    "turn_end": 2,
+    "save_point": 2,
+    "agent_end": 1,
+    "settled": 1
+  },
+  "entryTypes": [
+    "message:user",
+    "message:assistant",
+    "message:toolResult",
+    "message:assistant"
+  ],
+  "stableFields": {
+    "toolNames": [
+      "echo"
+    ],
+    "assistantTexts": [
+      "done"
+    ],
+    "toolResultInfo": [
+      {
+        "toolName": "echo",
+        "toolCallId": "call-1",
+        "isError": false,
+        "text": "hi"
+      }
+    ],
+    "stopReasons": [
+      "stop",
+      "stop"
+    ],
+    "finalMessageRole": "assistant",
+    "finalMessageText": "done",
+    "finalStopReason": "stop"
+  }
+}

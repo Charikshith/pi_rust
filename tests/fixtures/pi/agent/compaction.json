@@ -1,0 +1,83 @@
+{
+  "description": "Deterministic compaction numbers from packages/agent/src/harness/compaction/compaction.ts and session.ts. Token counts use UTF-16 .length then Math.ceil(chars/4); image=4800 chars (ESTIMATED_IMAGE_CHARS). Cross-references are to packages/agent/test/harness/compaction.test.ts line numbers.",
+  "DEFAULT_COMPACTION_SETTINGS": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  },
+  "estimateTokensByRole": {
+    "user 'plain user'": 3,
+    "assistant thinking+toolCall(read,{path:file.ts})": 8,
+    "custom string 'custom text'": 3,
+    "toolResult text+image": 1203,
+    "bashExecution 'npm run check'/'ok'": 4,
+    "branchSummary 'branch'": 2,
+    "compactionSummary 'compact'": 2,
+    "unknown role (test line 294)": 0
+  },
+  "calculateContextTokens": {
+    "usage(1000,500,200,100) -> 1800": 1800,
+    "usage(0,0,0,0) -> 0": 0
+  },
+  "shouldCompact": {
+    "95000/100000 -> true": true,
+    "89000/100000 -> false": false,
+    "95000/100000 disabled -> false": false
+  },
+  "cutPoints": {
+    "findCutPoint([thinking,modelChange],0,2,1) (line 187)": {
+      "firstKeptEntryIndex": 0,
+      "turnStartIndex": -1,
+      "isSplitTurn": false
+    },
+    "findTurnStartIndex([thinking,branchSummary],1,0) -> 1 (line 210)": 1,
+    "findTurnStartIndex([thinking,customMessage],1,0) -> 1 (line 211)": 1,
+    "findTurnStartIndex([thinking,modelChange],1,0) -> -1 (line 212)": -1,
+    "findCutPoint([thinking,branchSummary,customMessage],0,3,1).firstKeptEntryIndex -> 0 (line 214)": 0,
+    "findCutPoint([toolResult],0,1,1) (line 225)": {
+      "firstKeptEntryIndex": 0,
+      "turnStartIndex": -1,
+      "isSplitTurn": false
+    },
+    "findCutPoint([user,compaction,assistant],0,3,1).firstKeptEntryIndex -> 2 (line 234)": 2
+  },
+  "estimateContextTokens": {
+    "[user 'no usage']: lastUsageIndex (line 311)": null,
+    "[assistant, user 'tail'] (lines 312-315)": {
+      "usageTokens": 20,
+      "lastUsageIndex": 0,
+      "trailingTokens": 1,
+      "tokens": 21
+    },
+    "[user,assistant,user,assistant(0,0)] (lines 316-325)": {
+      "usageTokens": 20,
+      "lastUsageIndex": 1,
+      "trailingTokens": 6,
+      "tokens": 26
+    }
+  },
+  "buildSessionContext": {
+    "messages.length (expect 5, line 337)": 5,
+    "messages[0].role (expect compactionSummary, line 338)": "compactionSummary",
+    "roles": [
+      "compactionSummary",
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]
+  },
+  "prepareCompaction": {
+    "previousSummary (expect 'First summary')": "First summary",
+    "firstKeptEntryId": "entry-302",
+    "isSplitTurn": false,
+    "tokensBefore": 10000,
+    "expected tokensBefore (estimateContextTokens(...).tokens)": 10000,
+    "tokensBefore matches (line 364)": true,
+    "messagesToSummarizeRoles": []
+  },
+  "noopCases": {
+    "prepareCompaction([compaction]) returns undefined (line 428)": true,
+    "prepareCompaction([]) returns undefined (line 429)": true
+  }
+}
