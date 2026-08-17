@@ -6,6 +6,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod utils;
+
+pub use utils::{slice_by_column, truncate_to_width, visible_width, wrap_text_with_ansi};
+
 /// Returns the crate name — placeholder until the renderer (feat-006) lands.
 pub fn name() -> &'static str {
     "pirust-tui"

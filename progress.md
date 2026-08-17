@@ -11,9 +11,10 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-17
-**Active Feature:** feat-005 — headless `pirust` binary (DONE — all 6 waves complete,
-live differential run and one real bug found+fixed; see Wave 6 evidence below).
-**Next feature:** feat-006 (P5) `pirust-tui`, or feat-012 (RPC mode) — pick one.
+**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Wave 1 of 8
+done: utils.rs, oracle-verified; see plan.md for the remaining wave breakdown).
+Cadence: checkpoint per phase — one wave, verify, report, pause.
+**Next feature:** feat-006 Wave 2 (keys.rs + stdin_buffer.rs).
 **Project:** 1:1 Rust replica of the Pi Agent Harness (pi_space/pi, ~100K LOC TS).
 **Naming:** all Rust code is `pirust*`; original names kept only for on-disk/wire compat.
 
@@ -248,18 +249,47 @@ live differential run and one real bug found+fixed; see Wave 6 evidence below).
    same differential (this session used a local llama.cpp server instead — see
    evidence) would still be worth doing whenever real credentials are available, as a
    confirmation rather than a blocker.
-2. feat-006 (P5) `pirust-tui` literal port → then feat-007 wires tools+TUI together. Or
-   feat-012 (RPC mode), deferred out of feat-005 by the user's own earlier decision to
-   land the runnable binary first — either is a reasonable next pick.
+2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Wave 1/8 done — see below).
 3. Residual named in Wave 6: a real `pirust` vs `pi` timing comparison needs a built
    `pi` `dist/cli.js` (or a documented adjustment for this session's unbundled-Node
    resolve-hook overhead, ~2.1-2.7s, which is not representative of a real install).
+
+### feat-006 Wave 1 (utils.rs) — DONE
+
+Ported `packages/tui/src/utils.ts` (1209 TS lines) → `crates/pirust-tui/src/utils.rs`
+(~1360 lines incl. docs/tests): `visibleWidth`, `truncateToWidth`, `sliceByColumn`/
+`sliceWithWidth`, `extractSegments`, `wrapTextWithAnsi`, `normalizeTerminalOutput`,
+`extractAnsiCode`, `isWhitespaceChar`/`isPunctuationChar`, `applyBackgroundToLine`,
+`AnsiCodeTracker` (SGR + OSC-8 hyperlink state). New oracle `scripts/gen-tui-oracle.mjs`
+drives real `../pi/packages/tui/src/utils.ts` directly (Node 24 type-stripping, no
+alias hook needed — utils.ts has zero internal Pi-package imports) → 99 cases in
+`tests/fixtures/pi/tui/utils.cases.jsonl`, all green via `crates/pirust-tui/tests/
+utils_golden.rs`; wired into `init.sh`'s `--check` gate. New deps: `unicode-segmentation`,
+`unicode-width`, `unicode-properties` (workspace + pirust-tui). fmt+clippy -D warnings
+clean; full workspace 515+ tests green.
+
+Documented (not silent) approximation gaps — all named in `utils.rs`'s module docs,
+each with a one-line reason:
+- **RGI_Emoji matching**: TS tests `/^\p{RGI_Emoji}$/v` against Unicode's official
+  curated emoji-sequence table (thousands of entries); no Rust crate in this tree has
+  that table, so this port uses a heuristic (known emoji code-point blocks + known
+  combinators: ZWJ, VS15/16, skin-tone modifiers, keycap, emoji tags). Covers every
+  oracle case (plain/ZWJ-family/skin-tone/flag-pair/VS16 emoji) but isn't byte-exact
+  for the full Unicode corpus.
+- **`Default_Ignorable_Code_Point`**: approximated as Control ∪ Format ∪ Mark general
+  categories — covers all practical zero-width chars, not the full derived property.
+- **`cjkBreakRegex`**: TS uses `Script_Extensions` (Han/Hiragana/Katakana/Hangul/
+  Bopomofo); this port uses the standard block-range approximation instead.
+
+The perf-only `widthCache` (bounded FIFO `Map`, zero effect on any return value) was
+intentionally not ported — same-input-same-output makes it unobservable.
 
 ## Blockers / Risks
 
 - [ ] Dynamic JS extension loading (jiti) has no clean Rust 1:1 — strategy decision needed (see 00-overview §4.4 / §5).
 - [ ] Generated model catalog JSON was absent in checkout (build-time/git-ignored) — must port generator or obtain output (feat-008).
-- [ ] UTF-16 offset semantics (editor + compaction cut points) — fidelity hazard; needs golden tests.
+- [ ] UTF-16 offset semantics (editor + compaction cut points) — fidelity hazard; needs golden tests. **Confirmed NOT an issue for feat-006 Wave 1** (utils.rs operates on visible-column offsets throughout, never UTF-16 code units) — will be the central hazard in Wave 6 (editor.rs).
+- [ ] feat-006 Wave 1's three documented approximation gaps above (RGI_Emoji, Default_Ignorable, cjkBreakRegex) — safe/non-blocking, but worth a follow-up diff against the real Unicode emoji-sequences data if a suitable crate appears later.
 
 ## Decisions Made
 

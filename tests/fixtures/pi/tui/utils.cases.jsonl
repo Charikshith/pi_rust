@@ -1,0 +1,99 @@
+{"note":"ascii-plain","fn":"visibleWidth","args":["hello world"],"result":11}
+{"note":"empty-string","fn":"visibleWidth","args":[""],"result":0}
+{"note":"cjk-wide-japanese","fn":"visibleWidth","args":["日本語"],"result":6}
+{"note":"cjk-wide-chinese","fn":"visibleWidth","args":["中文测试"],"result":8}
+{"note":"emoji-single-grinning","fn":"visibleWidth","args":["😀"],"result":2}
+{"note":"emoji-vs16-warning","fn":"visibleWidth","args":["⚠️"],"result":2}
+{"note":"emoji-family-zwj","fn":"visibleWidth","args":["👨‍👩‍👧‍👦"],"result":2}
+{"note":"emoji-skin-tone","fn":"visibleWidth","args":["👍🏽"],"result":2}
+{"note":"emoji-flag-pair","fn":"visibleWidth","args":["🇺🇸"],"result":2}
+{"note":"combining-mark-alone","fn":"visibleWidth","args":["́"],"result":0}
+{"note":"combining-mark-with-base","fn":"visibleWidth","args":["é"],"result":1}
+{"note":"zwj-alone","fn":"visibleWidth","args":["‍"],"result":0}
+{"note":"thai-am-vowel","fn":"visibleWidth","args":["ำ"],"result":1}
+{"note":"lao-am-vowel","fn":"visibleWidth","args":["ຳ"],"result":1}
+{"note":"thai-base-plus-am","fn":"visibleWidth","args":["กำ"],"result":2}
+{"note":"tabs-only","fn":"visibleWidth","args":["\t\t"],"result":6}
+{"note":"ansi-sgr-only-zero-width","fn":"visibleWidth","args":["\u001b[1;31m"],"result":0}
+{"note":"ansi-sgr-plus-text","fn":"visibleWidth","args":["\u001b[1mhi\u001b[0m"],"result":2}
+{"note":"ansi-256-color","fn":"visibleWidth","args":["\u001b[38;5;200mhi"],"result":2}
+{"note":"ansi-rgb-color","fn":"visibleWidth","args":["\u001b[38;2;10;20;30mhi"],"result":2}
+{"note":"osc8-hyperlink-bel","fn":"visibleWidth","args":["\u001b]8;;http://x\u0007link\u001b]8;;\u0007"],"result":4}
+{"note":"osc8-hyperlink-st","fn":"visibleWidth","args":["\u001b]8;;http://x\u001b\\link\u001b]8;;\u001b\\"],"result":4}
+{"note":"mixed-ansi-tabs-cjk","fn":"visibleWidth","args":["\u001b[1m日\t本\u001b[0m"],"result":7}
+{"note":"halfwidth-fullwidth-form","fn":"visibleWidth","args":["ｱ"],"result":1}
+{"note":"wrap-short-line-no-wrap","fn":"wrapTextWithAnsi","args":["hello",10],"result":["hello"]}
+{"note":"wrap-simple-words","fn":"wrapTextWithAnsi","args":["the quick brown fox jumps",10],"result":["the quick","brown fox","jumps"]}
+{"note":"wrap-single-word-too-long","fn":"wrapTextWithAnsi","args":["supercalifragilisticexpialidocious",10],"result":["supercalif","ragilistic","expialidoc","ious"]}
+{"note":"wrap-ansi-preserved-across-lines","fn":"wrapTextWithAnsi","args":["\u001b[1mbold text that must wrap across multiple lines here\u001b[0m",12],"result":["\u001b[1mbold text","\u001b[1mthat must","\u001b[1mwrap across","\u001b[1mmultiple","\u001b[1mlines here\u001b[0m"]}
+{"note":"wrap-underline-reset-at-break","fn":"wrapTextWithAnsi","args":["\u001b[4munderlined text wrapping test\u001b[0m",10],"result":["\u001b[4munderlined\u001b[24m","\u001b[4mtext\u001b[24m","\u001b[4mwrapping\u001b[24m","\u001b[4mtest\u001b[0m"]}
+{"note":"wrap-cjk-forces-break","fn":"wrapTextWithAnsi","args":["日本語のテキストです長い文章",6],"result":["日本語","のテキ","ストで","す長い","文章"]}
+{"note":"wrap-embedded-newline","fn":"wrapTextWithAnsi","args":["line one\nline two is a bit longer than ten",10],"result":["line one","line two","is a bit","longer","than ten"]}
+{"note":"wrap-crlf-newline","fn":"wrapTextWithAnsi","args":["line one\r\nline two",20],"result":["line one","line two"]}
+{"note":"wrap-lone-cr-newline","fn":"wrapTextWithAnsi","args":["line one\rline two",20],"result":["line one","line two"]}
+{"note":"wrap-empty-string","fn":"wrapTextWithAnsi","args":["",10],"result":[""]}
+{"note":"wrap-hyperlink-close-reopen-at-break","fn":"wrapTextWithAnsi","args":["\u001b]8;;http://example.test\u0007click here to visit the site now\u001b]8;;\u0007",12],"result":["\u001b]8;;http://example.test\u0007click here\u001b]8;;\u0007","\u001b]8;;http://example.test\u0007to visit the\u001b]8;;\u0007","\u001b]8;;http://example.test\u0007site now\u001b]8;;\u0007"]}
+{"note":"truncate-fits-exactly","fn":"truncateToWidth","args":["hello",5,"...",false],"result":"hello"}
+{"note":"truncate-simple","fn":"truncateToWidth","args":["hello world",8,"...",false],"result":"hello\u001b[0m...\u001b[0m"}
+{"note":"truncate-with-pad","fn":"truncateToWidth","args":["hi",8,"...",true],"result":"hi      "}
+{"note":"truncate-no-ellipsis","fn":"truncateToWidth","args":["hello world",5,"",false],"result":"hello\u001b[0m"}
+{"note":"truncate-ellipsis-wider-than-max","fn":"truncateToWidth","args":["hello world",2,"...",false],"result":"\u001b[0m..\u001b[0m"}
+{"note":"truncate-ellipsis-equal-to-max","fn":"truncateToWidth","args":["hello world",3,"...",false],"result":"\u001b[0m...\u001b[0m"}
+{"note":"truncate-max-width-zero","fn":"truncateToWidth","args":["hello",0,"...",false],"result":""}
+{"note":"truncate-empty-text-padded","fn":"truncateToWidth","args":["",5,"...",true],"result":"     "}
+{"note":"truncate-empty-text-unpadded","fn":"truncateToWidth","args":["",5,"...",false],"result":""}
+{"note":"truncate-cjk-text","fn":"truncateToWidth","args":["日本語のテキスト",6,"...",false],"result":"日\u001b[0m...\u001b[0m"}
+{"note":"truncate-ansi-text","fn":"truncateToWidth","args":["\u001b[1mhello world\u001b[0m",8,"...",false],"result":"\u001b[1mhello\u001b[0m...\u001b[0m"}
+{"note":"truncate-ansi-with-pad","fn":"truncateToWidth","args":["\u001b[1mhi\u001b[0m",8,"...",true],"result":"\u001b[1mhi\u001b[0m      "}
+{"note":"truncate-tabs-text","fn":"truncateToWidth","args":["a\tb\tc\td\te",6,"...",false],"result":"a\u001b[0m...\u001b[0m"}
+{"note":"truncate-emoji-boundary","fn":"truncateToWidth","args":["a😀b😀c😀d",5,"...",false],"result":"a\u001b[0m...\u001b[0m"}
+{"note":"slice-basic-ascii","fn":"sliceByColumn","args":["hello world",6,5,false],"result":"world"}
+{"note":"slice-with-width-basic","fn":"sliceWithWidth","args":["hello world",0,5,false],"result":{"text":"hello","width":5}}
+{"note":"slice-wide-char-boundary-lenient","fn":"sliceWithWidth","args":["ab日本cd",1,3,false],"result":{"text":"b日","width":3}}
+{"note":"slice-wide-char-boundary-strict","fn":"sliceWithWidth","args":["ab日本cd",1,3,true],"result":{"text":"b日","width":3}}
+{"note":"slice-zero-length","fn":"sliceWithWidth","args":["hello",0,0,false],"result":{"text":"","width":0}}
+{"note":"slice-with-ansi","fn":"sliceWithWidth","args":["\u001b[1mhello world\u001b[0m",6,5,false],"result":{"text":"\u001b[1mworld","width":5}}
+{"note":"slice-past-end","fn":"sliceWithWidth","args":["hi",0,10,false],"result":{"text":"hi","width":2}}
+{"note":"extract-segments-basic","fn":"extractSegments","args":["hello world",5,6,5,false],"result":{"before":"hello","beforeWidth":5,"after":"world","afterWidth":5}}
+{"note":"extract-segments-inherits-style-for-after","fn":"extractSegments","args":["\u001b[1mhello\u001b[0m world",5,11,5,false],"result":{"before":"\u001b[1mhello","beforeWidth":5,"after":"","afterWidth":0}}
+{"note":"extract-segments-wide-char-strict-after","fn":"extractSegments","args":["ab日本cd",2,3,2,true],"result":{"before":"ab","beforeWidth":2,"after":"","afterWidth":0}}
+{"note":"extract-segments-no-after","fn":"extractSegments","args":["hello world",5,5,0,false],"result":{"before":"hello","beforeWidth":5,"after":"","afterWidth":0}}
+{"note":"extract-segments-ansi-straddling-before-after","fn":"extractSegments","args":["\u001b[1ma\u001b[3mb\u001b[0mc",1,2,1,false],"result":{"before":"\u001b[1ma","beforeWidth":1,"after":"c","afterWidth":1}}
+{"note":"normalize-plain-text","fn":"normalizeTerminalOutput","args":["hello"],"result":"hello"}
+{"note":"normalize-tabs","fn":"normalizeTerminalOutput","args":["a\tb"],"result":"a   b"}
+{"note":"normalize-thai-am","fn":"normalizeTerminalOutput","args":["กำข"],"result":"กําข"}
+{"note":"normalize-lao-am","fn":"normalizeTerminalOutput","args":["ຳ"],"result":"ໍາ"}
+{"note":"normalize-tabs-with-ansi","fn":"normalizeTerminalOutput","args":["\u001b[1ma\tb\u001b[0m"],"result":"\u001b[1ma   b\u001b[0m"}
+{"note":"normalize-thai-am-and-tabs","fn":"normalizeTerminalOutput","args":["กำ\tข"],"result":"กํา   ข"}
+{"note":"extract-ansi-csi-sgr","fn":"extractAnsiCode","args":["\u001b[1;31mtext",0],"result":{"code":"\u001b[1;31m","length":7}}
+{"note":"extract-ansi-csi-cursor","fn":"extractAnsiCode","args":["\u001b[2Ktext",0],"result":{"code":"\u001b[2K","length":4}}
+{"note":"extract-ansi-osc8-bel","fn":"extractAnsiCode","args":["\u001b]8;;http://x\u0007rest",0],"result":{"code":"\u001b]8;;http://x\u0007","length":14}}
+{"note":"extract-ansi-osc8-st","fn":"extractAnsiCode","args":["\u001b]8;;http://x\u001b\\rest",0],"result":{"code":"\u001b]8;;http://x\u001b\\","length":15}}
+{"note":"extract-ansi-apc-cursor-marker","fn":"extractAnsiCode","args":["\u001b_pi:c\u0007rest",0],"result":{"code":"\u001b_pi:c\u0007","length":7}}
+{"note":"extract-ansi-not-escape","fn":"extractAnsiCode","args":["hello",0],"result":null}
+{"note":"extract-ansi-mid-string","fn":"extractAnsiCode","args":["ab\u001b[1mcd",2],"result":{"code":"\u001b[1m","length":4}}
+{"note":"extract-ansi-unterminated-csi","fn":"extractAnsiCode","args":["\u001b[1;31",0],"result":null}
+{"note":"extract-ansi-unterminated-osc","fn":"extractAnsiCode","args":["\u001b]8;;http://x",0],"result":null}
+{"note":"is-whitespace-char-\" \"","fn":"isWhitespaceChar","args":[" "],"result":true}
+{"note":"is-punctuation-char-\" \"","fn":"isPunctuationChar","args":[" "],"result":false}
+{"note":"is-whitespace-char-\"\\t\"","fn":"isWhitespaceChar","args":["\t"],"result":true}
+{"note":"is-punctuation-char-\"\\t\"","fn":"isPunctuationChar","args":["\t"],"result":false}
+{"note":"is-whitespace-char-\"\\n\"","fn":"isWhitespaceChar","args":["\n"],"result":true}
+{"note":"is-punctuation-char-\"\\n\"","fn":"isPunctuationChar","args":["\n"],"result":false}
+{"note":"is-whitespace-char-\"a\"","fn":"isWhitespaceChar","args":["a"],"result":false}
+{"note":"is-punctuation-char-\"a\"","fn":"isPunctuationChar","args":["a"],"result":false}
+{"note":"is-whitespace-char-\"1\"","fn":"isWhitespaceChar","args":["1"],"result":false}
+{"note":"is-punctuation-char-\"1\"","fn":"isPunctuationChar","args":["1"],"result":false}
+{"note":"is-whitespace-char-\".\"","fn":"isWhitespaceChar","args":["."],"result":false}
+{"note":"is-punctuation-char-\".\"","fn":"isPunctuationChar","args":["."],"result":true}
+{"note":"is-whitespace-char-\"(\"","fn":"isWhitespaceChar","args":["("],"result":false}
+{"note":"is-punctuation-char-\"(\"","fn":"isPunctuationChar","args":["("],"result":true}
+{"note":"is-whitespace-char-\"@\"","fn":"isWhitespaceChar","args":["@"],"result":false}
+{"note":"is-punctuation-char-\"@\"","fn":"isPunctuationChar","args":["@"],"result":true}
+{"note":"is-whitespace-char-\"_\"","fn":"isWhitespaceChar","args":["_"],"result":false}
+{"note":"is-punctuation-char-\"_\"","fn":"isPunctuationChar","args":["_"],"result":false}
+{"note":"is-whitespace-char-\"\"","fn":"isWhitespaceChar","args":[""],"result":false}
+{"note":"is-punctuation-char-\"\"","fn":"isPunctuationChar","args":[""],"result":false}
+{"note":"apply-bg-basic-padding","fn":"applyBackgroundToLine","args":["hi",5],"result":"<bg>hi   </bg>"}
+{"note":"apply-bg-exact-width","fn":"applyBackgroundToLine","args":["hello",5],"result":"<bg>hello</bg>"}
+{"note":"apply-bg-wide-chars","fn":"applyBackgroundToLine","args":["日本",6],"result":"<bg>日本  </bg>"}

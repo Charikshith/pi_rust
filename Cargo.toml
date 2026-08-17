@@ -51,3 +51,10 @@ unicode-normalization = "0.1"
 # feat-005 Wave 4 provider-attribution: `new URL(baseUrl).hostname` (matchesHost).
 # Already resolved transitively via reqwest; declared explicitly for direct use.
 url = "2"
+# feat-006 Wave 1 utils.rs: grapheme clusters (Intl.Segmenter equivalent) and
+# East Asian Width (get-east-asian-width equivalent) for visibleWidth (docs/analysis/05-tui.md §9).
+unicode-segmentation = "1"
+unicode-width = "0.1"
+# feat-006 Wave 1 utils.rs: Unicode General_Category checks (Mark/Control/Format) for
+# zero-width-cluster detection (docs/analysis/05-tui.md §9's own suggestion).
+unicode-properties = "0.1"

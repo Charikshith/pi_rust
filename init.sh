@@ -44,6 +44,10 @@ if command -v node >/dev/null 2>&1; then
   if [ -f scripts/gen-sdk-oracle.mjs ]; then
     node scripts/gen-sdk-oracle.mjs --check || echo "WARN: sdk fixtures differ; run node scripts/gen-sdk-oracle.mjs"
   fi
+  # feat-006 Wave 1 tui fixtures: utils.rs (visibleWidth/wrapTextWithAnsi/etc).
+  if [ -f scripts/gen-tui-oracle.mjs ]; then
+    node scripts/gen-tui-oracle.mjs --check || echo "WARN: tui fixtures differ; run node scripts/gen-tui-oracle.mjs"
+  fi
   # events.corpus.jsonl is a frozen capture (non-deterministic ids) — not --check'd.
 fi
 # agent-core oracle fixtures (tests/fixtures/pi/agent/*: entries/header/uuid/loop/compaction)

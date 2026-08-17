@@ -9,3 +9,9 @@ description = "Inline line-diff terminal UI + editor — pirust port of @earendi
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+unicode-properties = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
