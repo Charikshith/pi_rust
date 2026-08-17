@@ -169,6 +169,54 @@ pub const SESSIONS_DIR_NAME: &str = "sessions";
 /// Suffix of `getDebugLogPath`: `` `${APP_NAME}-debug.log` `` (`config.ts:565`).
 pub const DEBUG_LOG_SUFFIX: &str = "-debug.log";
 
+/// Env var overriding the package dir — Pi's is `PI_PACKAGE_DIR` (`config.ts:369`).
+/// **Intentionally diverges from Pi** — see [`get_package_dir`].
+pub const ENV_PACKAGE_DIR: &str = "PIRUST_PACKAGE_DIR";
+
+// =============================================================================
+// Package dir (`config.ts:367-439`) — system-prompt's doc/readme/examples pointers
+// =============================================================================
+//
+// Pi's `getPackageDir()` walks up from the compiled JS to find `package.json`, with a
+// Bun-binary fast path returning `dirname(process.execPath)`. Neither of those has a
+// literal Rust equivalent: pirust ships as one compiled binary with no `package.json`
+// to walk to, and it lives in its own repo — Pi's README/docs/examples paths would
+// point at the wrong project even if copied byte-for-byte. The Bun-binary case
+// (`dirname(execPath)`) is the closest analogue and is what pirust uses, so these
+// functions are a faithful ADAPTATION, not a byte-compat port: system_prompt.rs's
+// golden tests hold `get_package_dir` at a fixed sentinel value (matching how the
+// oracle was captured with `PI_PACKAGE_DIR` set) rather than comparing the real
+// installed-path string, which necessarily differs between the two binaries.
+
+/// `getPackageDir()` (`config.ts:367-388`) — Bun-binary case only (`dirname(execPath)`);
+/// the Node `dist`-vs-`src` package.json walk has no pirust analogue (see module note).
+pub fn get_package_dir() -> PathBuf {
+    if let Ok(env_dir) = std::env::var(ENV_PACKAGE_DIR) {
+        if !env_dir.is_empty() {
+            return PathBuf::from(env_dir);
+        }
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from))
+        .unwrap_or_default()
+}
+
+/// `getReadmePath()` (`config.ts:427-429`).
+pub fn get_readme_path() -> PathBuf {
+    get_package_dir().join("README.md")
+}
+
+/// `getDocsPath()` (`config.ts:432-434`).
+pub fn get_docs_path() -> PathBuf {
+    get_package_dir().join("docs")
+}
+
+/// `getExamplesPath()` (`config.ts:437-439`).
+pub fn get_examples_path() -> PathBuf {
+    get_package_dir().join("examples")
+}
+
 /// The four identity strings that reach user-visible output, plus the version.
 ///
 /// In Pi these are module-level `const`s derived from `package.json` (`config.ts:488-496`),

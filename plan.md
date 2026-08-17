@@ -118,8 +118,29 @@ I/O ordering, not renderer choice. Two constraints on Wave 5/6 `main.rs`:
    (`C:\Users\me\proj` → `--C--Users-me-proj--`); a model resolves from
    `~/.pirust/agent/models.json` through to the anthropic adapter; the "no session file
    until the first assistant message" rule holds.
-5. **Wave 4 — `sdk.rs` + `print_mode.rs`.**
-   → verify: print-mode text and json output shapes match Pi's for a canned turn.
+5. **Wave 4 — `sdk.rs` + `print_mode.rs`.** `print_mode.rs` landed already
+   (1335 lines, `tests/print_mode_golden.rs` 10/10 green). `sdk.rs` itself is
+   still a doc-only stub (5 lines) — real remaining scope, now that
+   `convert_to_llm` (feat-003) and model resolution (`find_initial_model`,
+   `resolve_cli_model` in `models.rs`, feat-005 Wave 3) are already ported:
+   - 4a. `system_prompt.rs` — port `core/system-prompt.ts` (162 lines TS).
+   - 4b. `provider_attribution.rs` — port `core/provider-attribution.ts` (97 lines).
+   - 4c. `auth_guidance.rs` — port `core/auth-guidance.ts` (25 lines, one formatter).
+   - 4d. A thin **Anthropic-only** stream wrapper (`core/model-runtime.ts`'s
+     `streamSimple`, NOT the full 587-line multi-provider `ModelRuntime` class —
+     everything non-Anthropic is out of scope per feat-005's own scope note)
+     wiring settings (retry/timeout/websocket) into the existing `pirust-ai`
+     Anthropic adapter (feat-002).
+   - 4e. `sdk.rs` — assembles a `pirust_agent_core::Agent` for **one headless
+     turn**: resolved model + tools (feat-004) + system prompt + the 4d stream
+     fn. Explicitly **NOT** Pi's `AgentSession` (`agent-session.ts`, 3283 lines —
+     that's interactive event-bus/footer/subscribe machinery for the TUI,
+     already out of scope per this feature's "Interactive TUI → feat-006/007"
+     line). Extension hooks (`transformContext`/`onPayload`/`onResponse`) stay
+     no-op stubs per feat-007.
+   → verify: oracle fixtures per sub-module against real Pi; a canned turn
+   through the assembled `Agent` produces the same `AssistantMessage` shape
+   `print_mode.rs` already expects; print-mode text/json output matches Pi.
 6. **Wave 5 — `main.rs` bootstrap + mode dispatch.** First runnable binary.
    Apply speed constraints #18/#19 (paint-before-block, no TUI cost on
    non-interactive modes).
@@ -141,6 +162,37 @@ I/O ordering, not renderer choice. Two constraints on Wave 5/6 `main.rs`:
 - [x] 3 Wave 2 — settings + auth + migrations (62/62 merge, 11/11 auth, 46/46 migrations)
 - [x] 4 Wave 3 — session + models (9/9 session-dir + 22 lifecycle tests; 158/158 model
       records; 9/9 v1→v3 migration records; 477 tests green)
-- [ ] 5 Wave 4 — sdk + print mode
-- [ ] 6 Wave 5 — main bootstrap (first runnable binary)
+- [x] 5a Wave 4 — print_mode.rs (10/10 golden tests green)
+- [x] 5b Wave 4 — sdk.rs (4a system_prompt: 11/11 oracle cases; 4b
+      provider_attribution: 10/10 oracle cases; 4c auth_guidance: unit-tested,
+      no oracle per its own triviality; 4d anthropic-only stream wrapper; 4e
+      sdk.rs assembly, proven end-to-end by `tests/sdk_canned_turn.rs` running a
+      real turn through a scripted `Faux` provider). See `progress.md` for full
+      evidence + named deferrals (blockImages filter, session restore,
+      onPayload/onResponse hooks, settings-validation-error fallback).
+- [x] 6 Wave 5 — main bootstrap (first runnable binary). `main.rs` wires
+      args→config→settings→auth→migrations→session→models→sdk→print_mode per
+      spec §15's step table. New: `runtime_host.rs` (`PrintModeSession`/
+      `AgentSessionRuntimeHost` adapter over `Agent`+`SessionManager`),
+      `initial_message.rs` (`buildInitialMessage` + text-only `@file`
+      processing). Fixed a real Wave-4 gap found while wiring: `sdk.rs`'s
+      stream closure passed an empty env map instead of the real process
+      environment, silently disabling the `ANTHROPIC_API_KEY` fallback; also
+      added the missing `--api-key` runtime-override plumbing (hazard §16.30).
+      508 workspace tests green, fmt+clippy clean, `./init.sh` green.
+      Live-verified in this environment (no configured credentials): `pirust
+      --version` → `0.0.1`; `pirust --help` → full byte-identical help text,
+      exit 0; `pirust -p "hi"` with zero credentials → "No models available"
+      + exit 1 (correct — matches Pi with zero auth configured); with
+      `ANTHROPIC_API_KEY` set to a fake key → the full pipeline runs a real
+      turn, makes a genuine HTTPS request to Anthropic's API, and persists a
+      byte-plausible session JSONL (header, model_change, thinking_level_change,
+      user message, error-tail assistant message with the real `HTTP 401`
+      body) — **not a successful live call** (no real credentials available),
+      but proof the request pipeline is wired end-to-end through to Anthropic's
+      real servers. See `progress.md` for full evidence, named narrowings
+      (project trust, `--help` ordering vs hazard §16.9, no real
+      `SignalRegistry`, message-level not event-level session persistence)
+      and an open question for Wave 6 (session-file lazy-open timing vs Pi's
+      "no file until first assistant message" claim).
 - [ ] 7 Wave 6 — live differential + hardening

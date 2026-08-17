@@ -350,7 +350,7 @@ pub const DEFAULT_IMAGE_AUTO_RESIZE: bool = true;
 pub const DEFAULT_BLOCK_IMAGES: bool = false;
 /// `enableSkillCommands` default (`:1050`).
 pub const DEFAULT_ENABLE_SKILL_COMMANDS: bool = true;
-/// `enableInstallTelemetry` default (`:941`).
+/// `enableInstallTelemetry` default (`settings-manager.ts:941`).
 pub const DEFAULT_ENABLE_INSTALL_TELEMETRY: bool = true;
 /// `markdown.codeBlockIndent` default (`:1222`).
 pub const DEFAULT_CODE_BLOCK_INDENT: &str = "  ";
@@ -2271,6 +2271,14 @@ impl SettingsManager {
         nullish_bool(
             self.merged_path(&["images", "blockImages"]),
             DEFAULT_BLOCK_IMAGES,
+        )
+    }
+
+    /// `getEnableInstallTelemetry()` (`settings-manager.ts:940-942`).
+    pub fn get_enable_install_telemetry(&self) -> bool {
+        nullish_bool(
+            self.merged_path(&["enableInstallTelemetry"]),
+            DEFAULT_ENABLE_INSTALL_TELEMETRY,
         )
     }
 }

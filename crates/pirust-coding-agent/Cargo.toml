@@ -31,6 +31,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }          # CancellationToken (= Pi's AbortSignal)
 async-trait = { workspace = true }
 futures = { workspace = true }             # event-stream consumption in print mode
+url = { workspace = true }                 # provider_attribution's matchesHost (new URL().hostname)
 
 [dev-dependencies]
 tempfile = { workspace = true }            # migrations + session-dir golden fixtures

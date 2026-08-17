@@ -40,6 +40,10 @@ if command -v node >/dev/null 2>&1; then
   if [ -f scripts/gen-cli-oracle.mjs ]; then
     node scripts/gen-cli-oracle.mjs --check || echo "WARN: cli fixtures differ; run node scripts/gen-cli-oracle.mjs"
   fi
+  # feat-005 Wave 4 sdk fixtures: system-prompt + provider-attribution.
+  if [ -f scripts/gen-sdk-oracle.mjs ]; then
+    node scripts/gen-sdk-oracle.mjs --check || echo "WARN: sdk fixtures differ; run node scripts/gen-sdk-oracle.mjs"
+  fi
   # events.corpus.jsonl is a frozen capture (non-deterministic ids) — not --check'd.
 fi
 # agent-core oracle fixtures (tests/fixtures/pi/agent/*: entries/header/uuid/loop/compaction)

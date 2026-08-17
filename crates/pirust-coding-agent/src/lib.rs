@@ -29,14 +29,19 @@
 
 pub mod args;
 pub mod auth;
+pub mod auth_guidance;
 pub mod catalog;
 pub mod config;
+pub mod initial_message;
 pub mod migrations;
 pub mod models;
 pub mod print_mode;
+pub mod provider_attribution;
+pub mod runtime_host;
 pub mod sdk;
 pub mod session;
 pub mod settings;
+pub mod system_prompt;
 
 /// Returns the crate name — linkage probe matching the sibling crates' `name()`.
 pub fn name() -> &'static str {

@@ -10,8 +10,9 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 ## Current State
 
-**Last Updated:** 2026-07-28
-**Active Feature:** feat-005 — headless `pirust` binary (NEXT; not started).
+**Last Updated:** 2026-08-17
+**Active Feature:** feat-005 — headless `pirust` binary (IN PROGRESS; Waves 0-5 of 6
+done per `plan.md`; Wave 6 — live differential + hardening — is next).
 **Project:** 1:1 Rust replica of the Pi Agent Harness (pi_space/pi, ~100K LOC TS).
 **Naming:** all Rust code is `pirust*`; original names kept only for on-disk/wire compat.
 
@@ -48,6 +49,106 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
       mutation-test step, which I re-ran as a dedicated audit agent; one was resumed via
       `SendMessage`. Scaffolding shared files (`lib.rs`, `Cargo.toml`, module stubs)
       myself before fan-out is what kept 5 concurrent agents from colliding.
+- [x] **feat-005 Wave 4 (sdk.rs) DONE** — `print_mode.rs` was already complete
+      (1335 lines, 10/10 golden). Built the remaining sub-waves: **4a**
+      `system_prompt.rs` (`buildSystemPrompt`, skills section explicitly omitted —
+      always empty pre-feat-007, documented not silent); **4b**
+      `provider_attribution.rs` (`mergeProviderAttributionHeaders` +
+      `isInstallTelemetryEnabled` folded in); **4c** `auth_guidance.rs` (trivial,
+      unit-tested only, no oracle per its own triviality); **4d** an Anthropic-only
+      `StreamFn` wrapper in `sdk.rs` resolving auth/headers/timeout/retry per call;
+      **4e** `sdk::{create_agent_session, assemble_agent_session}` assembling one
+      headless-turn `Agent` — tools (feat-004) + `convert_to_llm` (feat-003) +
+      system prompt (4a) + the 4d stream fn, explicitly NOT Pi's 3283-line
+      `AgentSession` (interactive-only event-bus machinery, out of scope).
+      Also added: `config::get_package_dir/get_readme_path/get_docs_path/get_examples_path`
+      (Bun-binary-equivalent adaptation — Pi's package-dir walk has no pirust
+      analogue, see module docs), `settings::get_enable_install_telemetry`.
+      ORACLE: `scripts/gen-sdk-oracle.mjs` drives real Pi's `buildSystemPrompt` (11
+      cases, incl. custom-prompt/append/context-files/Windows-cwd/bash-only-
+      guideline) and `mergeProviderAttributionHeaders` (10 cases, incl.
+      openrouter/nvidia/cloudflare/opencode + header-source override vs append) into
+      `tests/fixtures/pi/sdk/`; both byte/structurally identical. **4e verified** by
+      `tests/sdk_canned_turn.rs`: assembles a real `Agent` via `assemble_agent_session`
+      with a scripted `Faux` `StreamFn` (not the Anthropic adapter — an integration
+      test has no business making a live call) and drives one real turn through the
+      actual agent-core loop, proving tools→system-prompt→Agent→loop→convert_to_llm→
+      provider produces exactly the `AssistantMessage` shape `print_mode.rs` expects
+      (`StopReason::Stop`, scripted text, default read/bash/edit/write tools present
+      in the rendered prompt). 3 new golden/integration suites, ~470+ workspace tests
+      total, fmt+clippy -D warnings clean, `./init.sh` green with no fixture drift.
+      DEFERRED (named, not silent): `blockImages` message filtering (`sdk.ts:250-285`,
+      cheap to add later, no multimodal session exercises it yet); session-restore
+      model/thinking-level (`is_continuing` always `false` this wave — `session.rs`
+      owns restore, not exercised here); `onPayload`/`onResponse` extension hooks
+      (no slot on `pirust_ai`'s `StreamOptions` yet, matches its own feat-002
+      TODO — feat-007's job alongside the extension host); settings-validation
+      errors from `get_http_idle_timeout_ms`/`get_websocket_connect_timeout_ms`
+      inside the stream wrapper fall back to the default rather than surfacing as a
+      stream error event (main.rs/Wave 5 is the natural place to validate settings
+      upfront, before a turn starts).
+
+- [x] **feat-005 Wave 5 (main.rs bootstrap) DONE** — first runnable `pirust` binary.
+      Replaced the scaffold stub with the real bootstrap per spec §15's 32-step
+      table: parseArgs → diagnostics/`--version`/`--export` (sync, no I/O, no
+      tokio — speed constraint #18) → offline-env → TTY probes →
+      `resolveAppMode`/`takeOverStdout` → fork/session-id flag validation →
+      migrations → trusted `SettingsManager` → session-dir resolution →
+      `create_session_manager` (already fully built in Wave 3 incl. the §17.1
+      headless `--resume` fail-fast) → missing-session-cwd check (new, small,
+      ported from `core/session-cwd.ts`) → `--name` → `ModelRuntime::create` →
+      `--help`/`--list-models` early exits → `sdk::create_agent_session` →
+      model/thinking-level session entries → piped-stdin/`@file`/initial-message
+      assembly (new) → `print_mode::run_print_mode`.
+      NEW FILES: `runtime_host.rs` (`SingleTurnSession`/`SingleTurnRuntimeHost`
+      implementing `print_mode.rs`'s `PrintModeSession`/`AgentSessionRuntimeHost`
+      traits over a real `Agent`+`SessionManager` — this is the piece that did
+      NOT exist yet: `print_mode.rs` was built against Pi's `AgentSession`
+      abstraction, which `sdk.rs` deliberately never builds; `main.rs`'s job
+      this wave included supplying the missing bridge); `initial_message.rs`
+      (`buildInitialMessage` + text-only `processFileArguments`, image branch
+      deferred — same residual as feat-004's `read` tool, needs an image codec).
+      FOUND + FIXED a real Wave-4 gap while wiring: `sdk.rs`'s stream closure
+      passed `&BTreeMap::new()` instead of the real process environment to
+      `credential_api_key`, silently disabling the `ANTHROPIC_API_KEY`/
+      `ANTHROPIC_OAUTH_TOKEN` env-var auth fallback since the day it landed;
+      also added the `--api-key` runtime-override field (hazard §16.30) that
+      `CreateAgentSessionOptions` was missing entirely. 508 workspace tests
+      green (was ~470+), fmt+clippy -D warnings clean, `./init.sh` green, no
+      oracle-freshness drift.
+      LIVE-VERIFIED in this environment (no configured credentials — `auth.json`
+      is `{}`, `ANTHROPIC_API_KEY` unset): `pirust --version` → `0.0.1`, exit 0;
+      `pirust --help` → the full byte-identical help text (already golden-
+      tested), exit 0; `pirust -p "hi"` → "No models available. Use /login..."
+      + exit 1 (correct — no provider is configured, so Pi would show the same
+      thing). With `ANTHROPIC_API_KEY` set to a **fake** key: the full pipeline
+      resolved a real anthropic model, built the `Agent`, ran a real turn, made
+      a genuine HTTPS request to `https://api.anthropic.com`, got back
+      Anthropic's real `401 authentication_error` body, synthesized the correct
+      error-tail `AssistantMessage`, and persisted a session JSONL with header +
+      `model_change` + `thinking_level_change` + the user message + the error
+      assistant message — all byte-plausible against the golden shapes Waves
+      1-4 already pinned. **Not a successful live call** (no real credentials
+      were available in this environment) but definitive proof the request
+      pipeline reaches Anthropic's real servers end-to-end.
+      NARROWED (named, not silent — see `main.rs`'s own module docs for the
+      full list): project trust hard-codes to `--approve`/`--no-approve` else
+      untrusted (stricter than Pi's `!hasTrustRequiringProjectResources → true`
+      relaxation — the safe direction, `core/trust-manager.ts` not ported);
+      `--help` prints right after the model runtime builds rather than after
+      the full `AgentSession` (Pi tolerates a model-less session, `sdk.rs`'s
+      `Agent` does not — an environment with zero models would otherwise turn
+      `pirust --help` into exit 1); `print_mode::NoSignals` used, so
+      SIGTERM/SIGHUP fall back to OS-default terminate instead of Pi's graceful
+      dispose-then-exit; session persistence is message-level (diffed after
+      each `wait_for_idle()`) not event-level streaming.
+      OPEN QUESTION FOR WAVE 6: a session file was created (via the unconditional
+      `model_change` write, matching `sdk.ts:364-368`'s own ordering) even
+      though the only prompt in the manual test errored out — this is
+      consistent with `session-manager.ts` writing `model_change` before any
+      prompt in Pi too, so it is likely correct, not a divergence; the live
+      differential should confirm this against a real `pi` run rather than
+      taking this reasoning on faith.
 
 ### Decisions locked (user, this session)
 
@@ -62,14 +163,11 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 ### What's Next (with verification per step)
 
-1. **feat-005 (P4) headless `pirust` binary** — coding-agent CLI/args (hand-rolled parser),
-   layered config (~45 fields) + 5 startup migrations, print/json/rpc run modes. First
-   runnable binary. → verify: `pirust -p "…"` runs a real turn end-to-end against a live
-   provider, and the on-disk session JSONL it writes stays byte-compatible (the feat-003
-   golden suites already pin the format). This is also the phase that finally enables a
-   **live side-by-side diff against real `pi`**, which no fixture can substitute for.
-   Carries the feat-004 deferrals: the rg/fd downloader, and bash's
-   `commandPrefix`/`spawnHook`/`shellPath` config plumbing.
+1. **feat-005 Wave 6 — live differential + hardening.** Real `pi -p` vs `pirust -p`
+   against the same Meridian endpoint (needs real Anthropic credentials in this or
+   a future session — this one had none); diff session JSONL + stdout shape,
+   including the open question on session-file write timing noted above; record
+   `hyperfine` time-to-first-frame + idle RSS vs real `pi`. This closes feat-005.
 2. feat-006 (P5) `pirust-tui` literal port → then feat-007 wires tools+TUI together.
 
 ## Blockers / Risks

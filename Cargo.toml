@@ -48,3 +48,6 @@ tempfile = "3"            # test-only: rebuild the captured exec fixture tree
 # String.prototype.normalize("NFD") for read's macOS filename fallbacks
 # (path-utils.ts:11). Hand-rolling full canonical decomposition is not viable.
 unicode-normalization = "0.1"
+# feat-005 Wave 4 provider-attribution: `new URL(baseUrl).hostname` (matchesHost).
+# Already resolved transitively via reqwest; declared explicitly for direct use.
+url = "2"
