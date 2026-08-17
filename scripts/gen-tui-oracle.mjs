@@ -45,6 +45,20 @@ const {
 	applyBackgroundToLine,
 } = await import(pathToFileURL(utilsPath).href);
 
+const keysPath = join(TUI_SRC, "keys.ts");
+const {
+	matchesKey,
+	parseKey,
+	decodeKittyPrintable,
+	decodePrintableKey,
+	isKeyRelease,
+	isKeyRepeat,
+	setKittyProtocolActive,
+} = await import(pathToFileURL(keysPath).href);
+
+const stdinBufferPath = join(TUI_SRC, "stdin-buffer.ts");
+const { StdinBuffer } = await import(pathToFileURL(stdinBufferPath).href);
+
 const bgFn = (text) => `<bg>${text}</bg>`;
 
 const records = [];
@@ -194,20 +208,417 @@ c("apply-bg-basic-padding", "applyBackgroundToLine", ["hi", 5], applyBackgroundT
 c("apply-bg-exact-width", "applyBackgroundToLine", ["hello", 5], applyBackgroundToLine("hello", 5, bgFn));
 c("apply-bg-wide-chars", "applyBackgroundToLine", ["日本", 6], applyBackgroundToLine("日本", 6, bgFn));
 
+// ===========================================================================
+// KEYS (feat-006 Wave 2)
+// ===========================================================================
+const KEYS_OUT_FILE = join(OUT_DIR, "keys.cases.jsonl");
+const keysRecords = [];
+
+const ENV_KEYS = ["WT_SESSION", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"];
+function withEnv(envOverrides, fn) {
+	const saved = {};
+	for (const k of ENV_KEYS) {
+		saved[k] = process.env[k];
+		delete process.env[k];
+	}
+	if (envOverrides) {
+		for (const [k, v] of Object.entries(envOverrides)) process.env[k] = v;
+	}
+	try {
+		return fn();
+	} finally {
+		for (const k of ENV_KEYS) {
+			if (saved[k] === undefined) delete process.env[k];
+			else process.env[k] = saved[k];
+		}
+	}
+}
+
+// mod is the 0-indexed bitmask (shift=1,alt=2,ctrl=4,super=8); wire format is 1-indexed.
+function kittyCsiU(codepoint, mod, { shifted, base, event } = {}) {
+	let keyPart = String(codepoint);
+	if (shifted !== undefined || base !== undefined) {
+		keyPart += `:${shifted !== undefined ? shifted : ""}`;
+		if (base !== undefined) keyPart += `:${base}`;
+	}
+	let modPart = "";
+	if (mod !== undefined) {
+		modPart = `;${mod + 1}`;
+		if (event !== undefined) modPart += `:${event}`;
+	}
+	return `\x1b[${keyPart}${modPart}u`;
+}
+function modifyOtherKeys(codepoint, mod) {
+	return `\x1b[27;${mod + 1};${codepoint}~`;
+}
+function kittyArrow(letter, mod, event) {
+	return `\x1b[1;${mod + 1}${event !== undefined ? `:${event}` : ""}${letter}`;
+}
+function kittyFunctional(num, mod, event) {
+	const modPart = mod !== undefined ? `;${mod + 1}` : "";
+	const evtPart = event !== undefined ? `:${event}` : "";
+	return `\x1b[${num}${modPart}${evtPart}~`;
+}
+function kittyHomeEnd(letter, mod, event) {
+	return `\x1b[1;${mod + 1}${event !== undefined ? `:${event}` : ""}${letter}`;
+}
+
+function kc(note, kittyActive, fn, args, envOverrides) {
+	const run = () => {
+		setKittyProtocolActive(kittyActive);
+		let fnImpl;
+		if (fn === "matchesKey") fnImpl = matchesKey;
+		else if (fn === "parseKey") fnImpl = parseKey;
+		else if (fn === "decodeKittyPrintable") fnImpl = decodeKittyPrintable;
+		else if (fn === "decodePrintableKey") fnImpl = decodePrintableKey;
+		else if (fn === "isKeyRelease") fnImpl = isKeyRelease;
+		else if (fn === "isKeyRepeat") fnImpl = isKeyRepeat;
+		else throw new Error(`unknown fn ${fn}`);
+		const result = fnImpl(...args) ?? null;
+		return result;
+	};
+	const result = envOverrides ? withEnv(envOverrides, run) : run();
+	keysRecords.push({ note, kittyActive, envOverrides: envOverrides ?? null, fn, args, result });
+}
+
+// --- escape / space / tab / enter / backspace, kitty active + inactive ------
+for (const kitty of [false, true]) {
+	kc(`escape-plain-esc-kitty${kitty}`, kitty, "matchesKey", ["\x1b", "escape"]);
+	kc(`escape-csiu-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(27, 0), "escape"]);
+	kc(`escape-modifyotherkeys-kitty${kitty}`, kitty, "matchesKey", [modifyOtherKeys(27, 0), "escape"]);
+	kc(`escape-with-modifier-always-false-kitty${kitty}`, kitty, "matchesKey", ["\x1b", "ctrl+escape"]);
+
+	kc(`space-plain-kitty${kitty}`, kitty, "matchesKey", [" ", "space"]);
+	kc(`space-ctrl-legacy-null-kitty${kitty}`, kitty, "matchesKey", ["\x00", "ctrl+space"]);
+	kc(`space-alt-legacy-kitty${kitty}`, kitty, "matchesKey", ["\x1b ", "alt+space"]);
+	kc(`space-csiu-ctrl-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(32, 4), "ctrl+space"]);
+
+	kc(`tab-plain-kitty${kitty}`, kitty, "matchesKey", ["\t", "tab"]);
+	kc(`tab-shift-legacy-kitty${kitty}`, kitty, "matchesKey", ["\x1b[Z", "shift+tab"]);
+	kc(`tab-shift-csiu-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(9, 1), "shift+tab"]);
+	kc(`tab-ctrl-csiu-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(9, 4), "ctrl+tab"]);
+
+	kc(`enter-plain-cr-kitty${kitty}`, kitty, "matchesKey", ["\r", "enter"]);
+	kc(`enter-plain-lf-kitty${kitty}`, kitty, "matchesKey", ["\n", "enter"]);
+	kc(`enter-shift-esc-cr-kitty${kitty}`, kitty, "matchesKey", ["\x1b\r", "shift+enter"]);
+	kc(`enter-shift-lf-kitty${kitty}`, kitty, "matchesKey", ["\n", "shift+enter"]);
+	kc(`enter-alt-esc-cr-kitty${kitty}`, kitty, "matchesKey", ["\x1b\r", "alt+enter"]);
+	kc(`enter-shift-csiu-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(13, 1), "shift+enter"]);
+	kc(`enter-alt-csiu-kpenter-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(57414, 2), "alt+enter"]);
+	kc(`enter-ctrl-csiu-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(13, 4), "ctrl+enter"]);
+	kc(`enter-ss3-numpad-kitty${kitty}`, kitty, "matchesKey", ["\x1bOM", "enter"]);
+
+	kc(`backspace-plain-del-kitty${kitty}`, kitty, "matchesKey", ["\x7f", "backspace"]);
+	kc(`backspace-alt-esc-del-kitty${kitty}`, kitty, "matchesKey", ["\x1b\x7f", "alt+backspace"]);
+	kc(`backspace-alt-esc-bs-kitty${kitty}`, kitty, "matchesKey", ["\x1b\x08", "alt+backspace"]);
+	kc(`backspace-alt-csiu-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(127, 2), "alt+backspace"]);
+	kc(`backspace-ctrl-csiu-kitty${kitty}`, kitty, "matchesKey", [kittyCsiU(127, 4), "ctrl+backspace"]);
+}
+
+// --- raw backspace / 0x08 ambiguity under every env combo -------------------
+for (const env of [
+	{},
+	{ WT_SESSION: "1" },
+	{ WT_SESSION: "1", SSH_CONNECTION: "x" },
+	{ WT_SESSION: "1", SSH_CLIENT: "x" },
+	{ WT_SESSION: "1", SSH_TTY: "x" },
+]) {
+	const label = Object.keys(env).length === 0 ? "no-env" : Object.entries(env).map(([k, v]) => `${k}=${v}`).join(",");
+	kc(`raw-0x08-backspace-matcheskey-plain-${label}`, false, "matchesKey", ["\x08", "backspace"], env);
+	kc(`raw-0x08-backspace-matcheskey-ctrl-${label}`, false, "matchesKey", ["\x08", "ctrl+backspace"], env);
+	kc(`raw-0x08-parsekey-${label}`, false, "parseKey", ["\x08"], env);
+}
+
+// --- insert / delete / clear / home / end / pageUp / pageDown ---------------
+for (const [name, legacyPlain, legacyShift, legacyCtrl, fnCode] of [
+	["insert", "\x1b[2~", "\x1b[2$", "\x1b[2^", 2],
+	["delete", "\x1b[3~", "\x1b[3$", "\x1b[3^", 3],
+	["pageUp", "\x1b[5~", "\x1b[5$", "\x1b[5^", 5],
+	["pageDown", "\x1b[6~", "\x1b[6$", "\x1b[6^", 6],
+	["home", "\x1b[H", "\x1b[7$", "\x1b[7^", 7],
+	["end", "\x1b[F", "\x1b[8$", "\x1b[8^", 8],
+]) {
+	const keyId = name.toLowerCase();
+	kc(`${name}-legacy-plain`, false, "matchesKey", [legacyPlain, keyId]);
+	kc(`${name}-legacy-shift`, false, "matchesKey", [legacyShift, `shift+${keyId}`]);
+	kc(`${name}-legacy-ctrl`, false, "matchesKey", [legacyCtrl, `ctrl+${keyId}`]);
+	kc(`${name}-csiu-plain`, false, "matchesKey", [kittyFunctional(fnCode), keyId]);
+	kc(`${name}-csiu-ctrl`, false, "matchesKey", [kittyFunctional(fnCode, 4), `ctrl+${keyId}`]);
+}
+kc("clear-legacy-plain", false, "matchesKey", ["\x1b[E", "clear"]);
+kc("clear-legacy-shift", false, "matchesKey", ["\x1b[e", "shift+clear"]);
+kc("clear-legacy-ctrl", false, "matchesKey", ["\x1bOe", "ctrl+clear"]);
+
+// --- arrows -------------------------------------------------------------
+for (const [name, letter, arrowCp] of [
+	["up", "A", -1],
+	["down", "B", -2],
+	["right", "C", -3],
+	["left", "D", -4],
+]) {
+	kc(`${name}-legacy-plain`, false, "matchesKey", [`\x1b[${letter}`, name]);
+	kc(`${name}-csiu-plain`, false, "matchesKey", [kittyCsiU(arrowCp, 0), name]);
+	kc(`${name}-legacy-shift`, false, "matchesKey", [`\x1b[${letter.toLowerCase()}`, `shift+${name}`]);
+	kc(`${name}-csiu-shift`, false, "matchesKey", [kittyArrow(letter, 1), `shift+${name}`]);
+}
+kc("up-alt-legacy", false, "matchesKey", ["\x1bp", "alt+up"]);
+kc("down-alt-legacy", false, "matchesKey", ["\x1bn", "alt+down"]);
+kc("left-alt-special", false, "matchesKey", ["\x1b[1;3D", "alt+left"]);
+kc("left-alt-legacy-b", false, "matchesKey", ["\x1bb", "alt+left"]);
+kc("left-alt-legacy-B-kitty-inactive", false, "matchesKey", ["\x1bB", "alt+left"]);
+kc("left-alt-legacy-B-kitty-active-false", true, "matchesKey", ["\x1bB", "alt+left"]);
+kc("left-ctrl-special", false, "matchesKey", ["\x1b[1;5D", "ctrl+left"]);
+kc("right-alt-special", false, "matchesKey", ["\x1b[1;3C", "alt+right"]);
+kc("right-alt-legacy-f", false, "matchesKey", ["\x1bf", "alt+right"]);
+kc("right-ctrl-special", false, "matchesKey", ["\x1b[1;5C", "ctrl+right"]);
+
+// --- f1-f12 -------------------------------------------------------------
+for (const [i, seq] of [
+	[1, "\x1bOP"],
+	[2, "\x1bOQ"],
+	[3, "\x1bOR"],
+	[4, "\x1bOS"],
+	[5, "\x1b[15~"],
+	[6, "\x1b[17~"],
+	[7, "\x1b[18~"],
+	[8, "\x1b[19~"],
+	[9, "\x1b[20~"],
+	[10, "\x1b[21~"],
+	[11, "\x1b[23~"],
+	[12, "\x1b[24~"],
+]) {
+	kc(`f${i}-legacy`, false, "matchesKey", [seq, `f${i}`]);
+	kc(`f${i}-modified-always-false`, false, "matchesKey", [seq, `ctrl+f${i}`]);
+}
+
+// --- single letter/digit/symbol keys ------------------------------------
+for (const letter of ["a", "k", "z"]) {
+	const cp = letter.charCodeAt(0);
+	kc(`letter-${letter}-plain`, false, "matchesKey", [letter, letter]);
+	kc(`letter-${letter}-plain-csiu`, false, "matchesKey", [kittyCsiU(cp, 0), letter]);
+	kc(`letter-${letter}-shift-uppercase`, false, "matchesKey", [letter.toUpperCase(), `shift+${letter}`]);
+	kc(`letter-${letter}-shift-csiu`, false, "matchesKey", [kittyCsiU(cp - 32, 1), `shift+${letter}`]);
+	kc(`letter-${letter}-ctrl-legacy`, false, "matchesKey", [String.fromCharCode(cp & 0x1f), `ctrl+${letter}`]);
+	kc(`letter-${letter}-ctrl-csiu`, false, "matchesKey", [kittyCsiU(cp, 4), `ctrl+${letter}`]);
+	kc(`letter-${letter}-ctrl-alt-legacy-kitty-inactive`, false, "matchesKey", [`\x1b${String.fromCharCode(cp & 0x1f)}`, `ctrl+alt+${letter}`]);
+	kc(`letter-${letter}-alt-legacy-kitty-inactive`, false, "matchesKey", [`\x1b${letter}`, `alt+${letter}`]);
+	kc(`letter-${letter}-shift-ctrl-csiu`, false, "matchesKey", [kittyCsiU(cp, 5), `shift+ctrl+${letter}`]);
+}
+kc("digit-1-plain", false, "matchesKey", ["1", "1"]);
+kc("digit-1-ctrl-csiu", false, "matchesKey", [kittyCsiU(49, 4), "ctrl+1"]);
+for (const sym of ["[", "\\", "]", "_", "-", "/"]) {
+	const cp = sym.charCodeAt(0);
+	kc(`symbol-${JSON.stringify(sym)}-plain`, false, "matchesKey", [sym, sym]);
+	const rawCtrl = sym === "-" ? String.fromCharCode(31) : String.fromCharCode(cp & 0x1f);
+	kc(`symbol-${JSON.stringify(sym)}-ctrl-legacy`, false, "matchesKey", [rawCtrl, `ctrl+${sym}`]);
+}
+
+// --- base-layout-key non-Latin fallback ---------------------------------
+// Cyrillic "с" (U+0441) reported with baseLayoutKey=99 ('c') — should match ctrl+c.
+kc(
+	"base-layout-fallback-cyrillic-matches",
+	false,
+	"matchesKey",
+	[kittyCsiU(0x0441, 4, { base: 99 }), "ctrl+c"],
+);
+// codepoint IS already a recognized Latin letter ('a', base='b') — must NOT fall back.
+kc(
+	"base-layout-fallback-guarded-when-codepoint-is-latin",
+	false,
+	"matchesKey",
+	[kittyCsiU(97, 4, { base: 98 }), "ctrl+b"],
+);
+
+// --- numpad / functional-key normalization ------------------------------
+kc("numpad-kp0-normalizes-to-digit-0", false, "matchesKey", [kittyCsiU(57399, 0), "0"]);
+kc("numpad-kp-add-normalizes-to-plus", false, "matchesKey", [kittyCsiU(57413, 0), "+"]);
+
+// --- decodeKittyPrintable / decodePrintableKey --------------------------
+kc("decode-kitty-printable-plain", false, "decodeKittyPrintable", [kittyCsiU(97, 0)]);
+kc("decode-kitty-printable-shifted-preferred", false, "decodeKittyPrintable", [kittyCsiU(97, 1, { shifted: 65 })]);
+kc("decode-kitty-printable-ctrl-rejected", false, "decodeKittyPrintable", [kittyCsiU(97, 4)]);
+kc("decode-kitty-printable-alt-rejected", false, "decodeKittyPrintable", [kittyCsiU(97, 2)]);
+kc("decode-kitty-printable-super-rejected", false, "decodeKittyPrintable", [kittyCsiU(97, 8)]);
+kc("decode-kitty-printable-control-codepoint-rejected", false, "decodeKittyPrintable", [kittyCsiU(9, 0)]);
+kc("decode-kitty-printable-not-csiu", false, "decodeKittyPrintable", ["a"]);
+kc("decode-modify-other-keys-printable-plain", false, "decodePrintableKey", [modifyOtherKeys(97, 1)]);
+kc("decode-modify-other-keys-printable-ctrl-rejected", false, "decodePrintableKey", [modifyOtherKeys(97, 4)]);
+kc("decode-printable-key-prefers-kitty", false, "decodePrintableKey", [kittyCsiU(98, 0)]);
+kc("decode-printable-key-neither", false, "decodePrintableKey", ["\x1b[999999"]);
+
+// --- isKeyRelease / isKeyRepeat -----------------------------------------
+for (const terminator of ["u", "~", "A", "B", "C", "D", "H", "F"]) {
+	kc(`is-key-release-:3${terminator}`, false, "isKeyRelease", [`\x1b[97;5:3${terminator}`]);
+	kc(`is-key-repeat-:2${terminator}`, false, "isKeyRepeat", [`\x1b[97;5:2${terminator}`]);
+}
+kc("is-key-release-paste-guard", false, "isKeyRelease", ["\x1b[200~90:62:3F:A5\x1b[201~"]);
+kc("is-key-repeat-paste-guard", false, "isKeyRepeat", ["\x1b[200~90:62:2F:A5\x1b[201~"]);
+kc("is-key-release-false-for-plain-key", false, "isKeyRelease", ["a"]);
+
+// --- parseKey fallback chain --------------------------------------------
+for (const kitty of [false, true]) {
+	kc(`parsekey-csiu-kitty${kitty}`, kitty, "parseKey", [kittyCsiU(97, 4)]);
+	kc(`parsekey-modifyotherkeys-kitty${kitty}`, kitty, "parseKey", [modifyOtherKeys(97, 1)]);
+	kc(`parsekey-shift-enter-esc-cr-kitty${kitty}`, kitty, "parseKey", ["\x1b\r"]);
+	kc(`parsekey-shift-enter-lf-kitty${kitty}`, kitty, "parseKey", ["\n"]);
+	kc(`parsekey-legacy-table-shift-up-kitty${kitty}`, kitty, "parseKey", ["\x1b[a"]);
+	kc(`parsekey-escape-kitty${kitty}`, kitty, "parseKey", ["\x1b"]);
+	kc(`parsekey-ctrl-backslash-kitty${kitty}`, kitty, "parseKey", ["\x1c"]);
+	kc(`parsekey-ctrl-rbracket-kitty${kitty}`, kitty, "parseKey", ["\x1d"]);
+	kc(`parsekey-ctrl-hyphen-kitty${kitty}`, kitty, "parseKey", ["\x1f"]);
+	kc(`parsekey-ctrl-alt-lbracket-kitty${kitty}`, kitty, "parseKey", ["\x1b\x1b"]);
+	kc(`parsekey-tab-kitty${kitty}`, kitty, "parseKey", ["\t"]);
+	kc(`parsekey-enter-cr-kitty${kitty}`, kitty, "parseKey", ["\r"]);
+	kc(`parsekey-ctrl-space-kitty${kitty}`, kitty, "parseKey", ["\x00"]);
+	kc(`parsekey-space-kitty${kitty}`, kitty, "parseKey", [" "]);
+	kc(`parsekey-backspace-del-kitty${kitty}`, kitty, "parseKey", ["\x7f"]);
+	kc(`parsekey-shift-tab-kitty${kitty}`, kitty, "parseKey", ["\x1b[Z"]);
+	kc(`parsekey-alt-enter-kitty${kitty}`, kitty, "parseKey", ["\x1b\r"]);
+	kc(`parsekey-alt-space-kitty${kitty}`, kitty, "parseKey", ["\x1b "]);
+	kc(`parsekey-alt-backspace-del-kitty${kitty}`, kitty, "parseKey", ["\x1b\x7f"]);
+	kc(`parsekey-alt-left-B-kitty${kitty}`, kitty, "parseKey", ["\x1bB"]);
+	kc(`parsekey-alt-right-F-kitty${kitty}`, kitty, "parseKey", ["\x1bF"]);
+	kc(`parsekey-ctrl-alt-letter-kitty${kitty}`, kitty, "parseKey", ["\x1b\x01"]);
+	kc(`parsekey-alt-letter-kitty${kitty}`, kitty, "parseKey", ["\x1bq"]);
+	kc(`parsekey-alt-digit-kitty${kitty}`, kitty, "parseKey", ["\x1b5"]);
+	kc(`parsekey-alt-symbol-kitty${kitty}`, kitty, "parseKey", ["\x1b/"]);
+	kc(`parsekey-up-kitty${kitty}`, kitty, "parseKey", ["\x1b[A"]);
+	kc(`parsekey-down-kitty${kitty}`, kitty, "parseKey", ["\x1b[B"]);
+	kc(`parsekey-right-kitty${kitty}`, kitty, "parseKey", ["\x1b[C"]);
+	kc(`parsekey-left-kitty${kitty}`, kitty, "parseKey", ["\x1b[D"]);
+	kc(`parsekey-home-kitty${kitty}`, kitty, "parseKey", ["\x1b[H"]);
+	kc(`parsekey-end-kitty${kitty}`, kitty, "parseKey", ["\x1b[F"]);
+	kc(`parsekey-delete-kitty${kitty}`, kitty, "parseKey", ["\x1b[3~"]);
+	kc(`parsekey-pageup-kitty${kitty}`, kitty, "parseKey", ["\x1b[5~"]);
+	kc(`parsekey-pagedown-kitty${kitty}`, kitty, "parseKey", ["\x1b[6~"]);
+	kc(`parsekey-raw-ctrl-letter-kitty${kitty}`, kitty, "parseKey", ["\x01"]);
+	kc(`parsekey-raw-printable-passthrough-kitty${kitty}`, kitty, "parseKey", ["q"]);
+	kc(`parsekey-unmatched-garbage-kitty${kitty}`, kitty, "parseKey", ["\x1b[999999zzz"]);
+	kc(`parsekey-ss3-numpad-kitty${kitty}`, kitty, "parseKey", ["\x1bOM"]);
+}
+kc("parsekey-numpad-normalization", false, "parseKey", [kittyCsiU(57399, 0)]);
+kc("parsekey-base-layout-non-latin-fallback", false, "parseKey", [kittyCsiU(0x0441, 4, { base: 99 })]);
+kc("parsekey-shifted-letter-identity", false, "parseKey", [kittyCsiU(65, 1)]);
+
+// --- unmatched / garbage --------------------------------------------------
+kc("matcheskey-unmatched-garbage", false, "matchesKey", ["garbage-input-\x00\x01", "ctrl+c"]);
+kc("matcheskey-unknown-keyid-empty", false, "matchesKey", ["a", ""]);
+
+// ===========================================================================
+// STDIN-BUFFER (feat-006 Wave 2)
+// ===========================================================================
+const STDIN_OUT_FILE = join(OUT_DIR, "stdin-buffer.cases.jsonl");
+const stdinRecords = [];
+
+function sb(note, calls) {
+	const buf = new StdinBuffer();
+	const events = [];
+	buf.on("data", (v) => events.push({ type: "data", value: v }));
+	buf.on("paste", (v) => events.push({ type: "paste", value: v }));
+	for (const call of calls) {
+		if (call.op === "process") {
+			const arg = Array.isArray(call.data) ? Buffer.from(call.data) : call.data;
+			buf.process(arg);
+		} else if (call.op === "flush") {
+			for (const seq of buf.flush()) events.push({ type: "data", value: seq });
+		}
+	}
+	stdinRecords.push({ note, calls, events });
+}
+
+// Canonical fragmented-mouse-SGR example from the module's own doc comment.
+sb("doc-comment-mouse-sgr-split-across-3-events", [
+	{ op: "process", data: "\x1b" },
+	{ op: "process", data: "[<35" },
+	{ op: "process", data: ";20;5m" },
+]);
+
+sb("csi-whole", [{ op: "process", data: "\x1b[1;31m" }]);
+sb("csi-byte-by-byte", "\x1b[1;31m".split("").map((ch) => ({ op: "process", data: ch })));
+sb("osc-whole-bel", [{ op: "process", data: "\x1b]8;;http://x\x07" }]);
+sb("osc-byte-by-byte-bel", "\x1b]8;;http://x\x07".split("").map((ch) => ({ op: "process", data: ch })));
+sb("dcs-whole", [{ op: "process", data: "\x1bP>|pi\x1b\\" }]);
+sb("apc-whole", [{ op: "process", data: "\x1b_Gpi:c\x1b\\" }]);
+sb("ss3-whole", [{ op: "process", data: "\x1bOP" }]);
+sb("old-mouse-whole", [{ op: "process", data: "\x1b[M\x20\x21\x22" }]);
+sb("old-mouse-split", [
+	{ op: "process", data: "\x1b[M" },
+	{ op: "process", data: "\x20" },
+	{ op: "process", data: "\x21\x22" },
+]);
+
+sb("paste-whole", [{ op: "process", data: "\x1b[200~hello world\x1b[201~" }]);
+sb("paste-start-marker-fragmented", [
+	{ op: "process", data: "\x1b[20" },
+	{ op: "process", data: "0~pasted text\x1b[201~" },
+]);
+sb("paste-content-spans-multiple-calls", [
+	{ op: "process", data: "\x1b[200~hello " },
+	{ op: "process", data: "world\x1b[201~" },
+]);
+sb("paste-end-marker-fragmented", [
+	{ op: "process", data: "\x1b[200~pasted text\x1b[20" },
+	{ op: "process", data: "1~" },
+]);
+sb("paste-content-contains-mac-address-like-3F", [
+	{ op: "process", data: "\x1b[200~90:62:3F:A5\x1b[201~" },
+]);
+sb("paste-preceded-by-plain-chars", [{ op: "process", data: "ab\x1b[200~pasted\x1b[201~" }]);
+sb("paste-followed-by-remaining-data", [{ op: "process", data: "\x1b[200~pasted\x1b[201~more" }]);
+
+// WezTerm double-escape: bare ESC (key press) immediately followed by a full
+// Kitty CSI-u release sequence for the same key (module doc comment :208-230).
+sb("wezterm-double-escape-splits-bare-esc-then-csiu", [
+	{ op: "process", data: "\x1b\x1b[27;1:3;27u" },
+]);
+
+// Duplicate-raw-codepoint-after-Kitty-CSI-u suppression (emitDataSequence).
+sb("kitty-csiu-then-duplicate-raw-codepoint-suppressed", [
+	{ op: "process", data: "\x1b[97u" },
+	{ op: "process", data: "a" },
+]);
+sb("kitty-csiu-then-different-raw-codepoint-not-suppressed", [
+	{ op: "process", data: "\x1b[97u" },
+	{ op: "process", data: "b" },
+]);
+
+// High-byte single-byte Buffer -> ESC + meta conversion.
+sb("high-byte-buffer-converts-to-esc-meta", [{ op: "process", data: [200] }]);
+
+// Unterminated sequence flushed via explicit flush() (simulating the 10ms timeout).
+sb("unterminated-csi-flushed", [
+	{ op: "process", data: "\x1b[1;3" },
+	{ op: "flush" },
+]);
+sb("empty-process-emits-empty-data", [{ op: "process", data: "" }]);
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 mkdirSync(OUT_DIR, { recursive: true });
-const contents = records.map((r) => JSON.stringify(r)).join("\n") + "\n";
-const existing = existsSync(OUT_FILE) ? readFileSync(OUT_FILE, "utf-8") : null;
 
-if (existing === contents) {
-	console.log(`ok    utils.cases.jsonl (${records.length} cases, ${Buffer.byteLength(contents)} bytes)`);
-} else if (CHECK) {
-	console.error(`DRIFT utils.cases.jsonl: ${existing === null ? "missing" : `${existing.length} -> ${contents.length} bytes`}`);
-	console.error("\nDRIFT: utils fixture is stale; run: node scripts/gen-tui-oracle.mjs");
+function writeFixture(outFile, records, label) {
+	const contents = records.map((r) => JSON.stringify(r)).join("\n") + "\n";
+	const existing = existsSync(outFile) ? readFileSync(outFile, "utf-8") : null;
+	if (existing === contents) {
+		console.log(`ok    ${label} (${records.length} cases, ${Buffer.byteLength(contents)} bytes)`);
+		return 0;
+	}
+	if (CHECK) {
+		console.error(`DRIFT ${label}: ${existing === null ? "missing" : `${existing.length} -> ${contents.length} bytes`}`);
+		return 1;
+	}
+	writeFileSync(outFile, contents, "utf-8");
+	console.log(`wrote ${label} (${records.length} cases, ${Buffer.byteLength(contents)} bytes)`);
+	return 0;
+}
+
+let drift = 0;
+drift += writeFixture(OUT_FILE, records, "utils.cases.jsonl");
+drift += writeFixture(KEYS_OUT_FILE, keysRecords, "keys.cases.jsonl");
+drift += writeFixture(STDIN_OUT_FILE, stdinRecords, "stdin-buffer.cases.jsonl");
+
+if (CHECK && drift > 0) {
+	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");
 	process.exitCode = 1;
-} else {
-	writeFileSync(OUT_FILE, contents, "utf-8");
-	console.log(`wrote utils.cases.jsonl (${records.length} cases, ${Buffer.byteLength(contents)} bytes)`);
 }

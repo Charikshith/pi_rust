@@ -6,8 +6,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod keys;
+pub mod stdin_buffer;
 pub mod utils;
 
+pub use keys::{
+    decode_kitty_printable, decode_printable_key, is_key_release, is_key_repeat,
+    is_kitty_protocol_active, matches_key, parse_key, set_kitty_protocol_active,
+};
+pub use stdin_buffer::{StdinBuffer, StdinBufferOptions, StdinEvent};
 pub use utils::{slice_by_column, truncate_to_width, visible_width, wrap_text_with_ansi};
 
 /// Returns the crate name — placeholder until the renderer (feat-006) lands.

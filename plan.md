@@ -80,7 +80,15 @@ source, standalone.
       wired into init.sh; documented gaps: RGI-emoji matching, Default_Ignorable
       property, cjkBreakRegex script property — all heuristic approximations, see
       utils.rs module docs)
-- [ ] Wave 2 — keys.rs + stdin_buffer.rs
+- [x] Wave 2 — keys.rs + stdin_buffer.rs (crates/pirust-tui/src/{keys,stdin_buffer}.rs,
+      1307/450 lines vs 1401/434 TS; 306/23 oracle cases green via
+      scripts/gen-tui-oracle.mjs's keys/stdin-buffer sections +
+      tests/{keys,stdin_buffer}_golden.rs; wired into init.sh. Scope decisions:
+      KeyId/Key builder not ported (TS-compile-time-only, zero runtime behavior);
+      Kitty protocol state as static AtomicBool; _lastEventType confirmed dead
+      state (zero readers in ../pi) and not ported; StdinBuffer::process returns
+      Vec<StdinEvent> instead of EventEmitter callbacks, timer-driven flush()
+      scheduling deferred to Wave 4 (tui.rs) as documented caller responsibility.)
 - [ ] Wave 3 — kill_ring/undo_stack/word_navigation/keybindings/fuzzy
 - [ ] Wave 4 — tui.rs + terminal.rs
 - [ ] Wave 5 — components/

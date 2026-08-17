@@ -1,0 +1,23 @@
+{"note":"doc-comment-mouse-sgr-split-across-3-events","calls":[{"op":"process","data":"\u001b"},{"op":"process","data":"[<35"},{"op":"process","data":";20;5m"}],"events":[{"type":"data","value":"\u001b[<35;20;5m"}]}
+{"note":"csi-whole","calls":[{"op":"process","data":"\u001b[1;31m"}],"events":[{"type":"data","value":"\u001b[1;31m"}]}
+{"note":"csi-byte-by-byte","calls":[{"op":"process","data":"\u001b"},{"op":"process","data":"["},{"op":"process","data":"1"},{"op":"process","data":";"},{"op":"process","data":"3"},{"op":"process","data":"1"},{"op":"process","data":"m"}],"events":[{"type":"data","value":"\u001b[1;31m"}]}
+{"note":"osc-whole-bel","calls":[{"op":"process","data":"\u001b]8;;http://x\u0007"}],"events":[{"type":"data","value":"\u001b]8;;http://x\u0007"}]}
+{"note":"osc-byte-by-byte-bel","calls":[{"op":"process","data":"\u001b"},{"op":"process","data":"]"},{"op":"process","data":"8"},{"op":"process","data":";"},{"op":"process","data":";"},{"op":"process","data":"h"},{"op":"process","data":"t"},{"op":"process","data":"t"},{"op":"process","data":"p"},{"op":"process","data":":"},{"op":"process","data":"/"},{"op":"process","data":"/"},{"op":"process","data":"x"},{"op":"process","data":"\u0007"}],"events":[{"type":"data","value":"\u001b]8;;http://x\u0007"}]}
+{"note":"dcs-whole","calls":[{"op":"process","data":"\u001bP>|pi\u001b\\"}],"events":[{"type":"data","value":"\u001bP>|pi\u001b\\"}]}
+{"note":"apc-whole","calls":[{"op":"process","data":"\u001b_Gpi:c\u001b\\"}],"events":[{"type":"data","value":"\u001b_Gpi:c\u001b\\"}]}
+{"note":"ss3-whole","calls":[{"op":"process","data":"\u001bOP"}],"events":[{"type":"data","value":"\u001bOP"}]}
+{"note":"old-mouse-whole","calls":[{"op":"process","data":"\u001b[M !\""}],"events":[{"type":"data","value":"\u001b[M !\""}]}
+{"note":"old-mouse-split","calls":[{"op":"process","data":"\u001b[M"},{"op":"process","data":" "},{"op":"process","data":"!\""}],"events":[{"type":"data","value":"\u001b[M !\""}]}
+{"note":"paste-whole","calls":[{"op":"process","data":"\u001b[200~hello world\u001b[201~"}],"events":[{"type":"paste","value":"hello world"}]}
+{"note":"paste-start-marker-fragmented","calls":[{"op":"process","data":"\u001b[20"},{"op":"process","data":"0~pasted text\u001b[201~"}],"events":[{"type":"paste","value":"pasted text"}]}
+{"note":"paste-content-spans-multiple-calls","calls":[{"op":"process","data":"\u001b[200~hello "},{"op":"process","data":"world\u001b[201~"}],"events":[{"type":"paste","value":"hello world"}]}
+{"note":"paste-end-marker-fragmented","calls":[{"op":"process","data":"\u001b[200~pasted text\u001b[20"},{"op":"process","data":"1~"}],"events":[{"type":"paste","value":"pasted text"}]}
+{"note":"paste-content-contains-mac-address-like-3F","calls":[{"op":"process","data":"\u001b[200~90:62:3F:A5\u001b[201~"}],"events":[{"type":"paste","value":"90:62:3F:A5"}]}
+{"note":"paste-preceded-by-plain-chars","calls":[{"op":"process","data":"ab\u001b[200~pasted\u001b[201~"}],"events":[{"type":"data","value":"a"},{"type":"data","value":"b"},{"type":"paste","value":"pasted"}]}
+{"note":"paste-followed-by-remaining-data","calls":[{"op":"process","data":"\u001b[200~pasted\u001b[201~more"}],"events":[{"type":"paste","value":"pasted"},{"type":"data","value":"m"},{"type":"data","value":"o"},{"type":"data","value":"r"},{"type":"data","value":"e"}]}
+{"note":"wezterm-double-escape-splits-bare-esc-then-csiu","calls":[{"op":"process","data":"\u001b\u001b[27;1:3;27u"}],"events":[{"type":"data","value":"\u001b"},{"type":"data","value":"\u001b[27;1:3;27u"}]}
+{"note":"kitty-csiu-then-duplicate-raw-codepoint-suppressed","calls":[{"op":"process","data":"\u001b[97u"},{"op":"process","data":"a"}],"events":[{"type":"data","value":"\u001b[97u"}]}
+{"note":"kitty-csiu-then-different-raw-codepoint-not-suppressed","calls":[{"op":"process","data":"\u001b[97u"},{"op":"process","data":"b"}],"events":[{"type":"data","value":"\u001b[97u"},{"type":"data","value":"b"}]}
+{"note":"high-byte-buffer-converts-to-esc-meta","calls":[{"op":"process","data":[200]}],"events":[{"type":"data","value":"\u001bH"}]}
+{"note":"unterminated-csi-flushed","calls":[{"op":"process","data":"\u001b[1;3"},{"op":"flush"}],"events":[{"type":"data","value":"\u001b[1;3"}]}
+{"note":"empty-process-emits-empty-data","calls":[{"op":"process","data":""}],"events":[{"type":"data","value":""}]}

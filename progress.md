@@ -11,10 +11,11 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-17
-**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Wave 1 of 8
-done: utils.rs, oracle-verified; see plan.md for the remaining wave breakdown).
+**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-2 of 8
+done: utils.rs, keys.rs, stdin_buffer.rs, all oracle-verified; see plan.md for the
+remaining wave breakdown).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-006 Wave 2 (keys.rs + stdin_buffer.rs).
+**Next feature:** feat-006 Wave 3 (kill_ring/undo_stack/word_navigation/keybindings/fuzzy).
 **Project:** 1:1 Rust replica of the Pi Agent Harness (pi_space/pi, ~100K LOC TS).
 **Naming:** all Rust code is `pirust*`; original names kept only for on-disk/wire compat.
 
@@ -249,7 +250,7 @@ Cadence: checkpoint per phase — one wave, verify, report, pause.
    same differential (this session used a local llama.cpp server instead — see
    evidence) would still be worth doing whenever real credentials are available, as a
    confirmation rather than a blocker.
-2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Wave 1/8 done — see below).
+2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Waves 1-2/8 done — see below).
 3. Residual named in Wave 6: a real `pirust` vs `pi` timing comparison needs a built
    `pi` `dist/cli.js` (or a documented adjustment for this session's unbundled-Node
    resolve-hook overhead, ~2.1-2.7s, which is not representative of a real install).
@@ -283,6 +284,42 @@ each with a one-line reason:
 
 The perf-only `widthCache` (bounded FIFO `Map`, zero effect on any return value) was
 intentionally not ported — same-input-same-output makes it unobservable.
+
+### feat-006 Wave 2 (keys.rs + stdin_buffer.rs) — DONE
+
+Ported `packages/tui/src/keys.ts` (1401 TS lines) → `crates/pirust-tui/src/keys.rs`
+(1307 lines) and `packages/tui/src/stdin-buffer.ts` (434 TS lines) →
+`crates/pirust-tui/src/stdin_buffer.rs` (450 lines). `keys.rs`: `matches_key`,
+`parse_key`, `decode_kitty_printable`/`decode_printable_key`, `is_key_release`/
+`is_key_repeat`, `set_kitty_protocol_active`/`is_kitty_protocol_active`, plus every
+private Kitty CSI-u / xterm modifyOtherKeys / legacy-sequence helper. `stdin_buffer.rs`:
+full escape-sequence completeness detection (CSI/OSC/DCS/APC/SS3/old-mouse/SGR-mouse),
+the bracketed-paste state machine, the WezTerm double-escape split, and Kitty-CSI-u
+duplicate-codepoint suppression. `scripts/gen-tui-oracle.mjs` extended with `keys`/
+`stdin-buffer` sections (still driving real `../pi` TS source, no reimplementation) →
+306 + 23 cases in `tests/fixtures/pi/tui/{keys,stdin-buffer}.cases.jsonl`, all green
+via new `tests/{keys,stdin_buffer}_golden.rs`; wired into `init.sh`'s existing
+`--check` gate. fmt+clippy -D warnings clean, full `./init.sh` green.
+
+Scope decisions (documented in `keys.rs`/`stdin_buffer.rs` module docs, not silent):
+- **`KeyId`/`Key` builder not ported** — TS-compile-time-only autocomplete sugar with
+  zero runtime behavior; `matches_key`/`parse_key` take/return plain `&str`/`String`.
+- **Kitty protocol state as a `static AtomicBool`** — safe under
+  `#![forbid(unsafe_code)]`, direct analogue of the TS module-level `let`.
+- **`_lastEventType`/`parseEventType`/`KeyEventType` confirmed dead state and not
+  ported** — repo-wide grep of `../pi` found zero readers outside the TS's own write
+  site; the `:<event>` suffix is still shape-parsed so malformed sequences are still
+  rejected, its value is just discarded.
+- **`StdinBuffer::process` returns `Vec<StdinEvent>` instead of firing `EventEmitter`
+  callbacks.** The TS's `setTimeout`-driven auto-flush is redesigned as
+  caller-scheduled: `flush()` itself has TS-identical semantics, but *when* to call it
+  after `timeoutMs` of inactivity is deferred to Wave 4 (`tui.rs`), which owns the
+  event loop — this crate gains no async-runtime dependency for this file.
+- One TS-side redundancy found and documented rather than duplicated:
+  `isCompleteCsiSequence`'s manual mouse-SGR fallback is behaviorally identical to the
+  regex check preceding it in the TS; implemented once in the Rust port.
+
+No other Rust/TS divergence found — all 329 new oracle cases matched on the first run.
 
 ## Blockers / Risks
 
