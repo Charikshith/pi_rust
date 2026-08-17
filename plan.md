@@ -84,6 +84,22 @@ Design + traps: `C:\Users\CharikshithPolimera\.claude\plans\swift-seeking-biscui
     `ENV_AGENT_DIR` / `OFFLINE_ENV` / `AGENT_DIR_NAME` / `BIN_DIR_NAME`. `config.rs`
     must **re-export** these, not redeclare them.
 
+## Speed constraints (bootstrap ordering — locked in, do not retrofit)
+
+`pi`'s TUI time-to-first-frame is ~590ms vs a native-CLI floor of ~14ms (bench:
+`jcode` 10.1-19.3ms, `pi` 369.6-934.8ms). That gap is almost entirely bootstrap
+I/O ordering, not renderer choice. Two constraints on Wave 5/6 `main.rs`:
+
+18. **Paint before you block.** The first frame (interactive prompt) or first
+    output (print/json mode) must not wait on config load, settings merge,
+    migrations, auth read, or model-catalog fetch. Render/emit first, hydrate
+    those after. Do not construct a `tokio::Runtime` (or use `#[tokio::main]`)
+    for `--version` / `--help` / parse-error paths — those stay fully
+    synchronous, zero async-runtime init, zero disk/network I/O.
+19. **Non-interactive modes never touch the TUI.** `resolveAppMode`'s dispatch
+    must short-circuit to print/json/rpc *before* any terminal raw-mode setup
+    or renderer init — those modes pay no TUI cost, ever.
+
 ## Steps
 
 1. **Wave 0 — spec + oracle.** Write `docs/analysis/09-cli-config-spec.md`. Write
@@ -105,12 +121,17 @@ Design + traps: `C:\Users\CharikshithPolimera\.claude\plans\swift-seeking-biscui
 5. **Wave 4 — `sdk.rs` + `print_mode.rs`.**
    → verify: print-mode text and json output shapes match Pi's for a canned turn.
 6. **Wave 5 — `main.rs` bootstrap + mode dispatch.** First runnable binary.
-   → verify: `pirust --version`, `--help`, `-p "hi"` all work end to end.
+   Apply speed constraints #18/#19 (paint-before-block, no TUI cost on
+   non-interactive modes).
+   → verify: `pirust --version`, `--help`, `-p "hi"` all work end to end;
+   `--version`/`--help` touch no disk/network and spin up no tokio runtime.
 7. **Wave 6 — live differential + hardening.** Run real `pi -p` and `pirust -p`
    against the same Meridian endpoint, same prompt; diff the session JSONL and the
-   stdout shape. Audit assertions for self-referentiality.
-   → verify: `./init.sh` green; differential documented; `feature_list.json` +
-   `progress.md` updated; delete this file.
+   stdout shape. Audit assertions for self-referentiality. Time-to-first-frame +
+   idle RSS, `pirust` (release build) vs real `pi`, via `hyperfine` (not through
+   a POSIX-shell wrapper — measure the exe directly).
+   → verify: `./init.sh` green; differential documented; startup/memory numbers
+   recorded in `progress.md`; `feature_list.json` updated; delete this file.
 
 ## Status
 

@@ -16,6 +16,11 @@ edition = "2021"
 license = "MIT"
 rust-version = "1.90"
 
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
 # Shared dependency versions. Ports mirror pi_space/pi (see docs/analysis/00-overview.md §5).
 [workspace.dependencies]
 pirust-ai = { path = "crates/pirust-ai" }
