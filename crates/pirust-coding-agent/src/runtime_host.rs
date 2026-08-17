@@ -55,6 +55,11 @@ pub struct SingleTurnSession {
     /// How many of `agent.messages()` have already been appended to the session file —
     /// the diff point for the message-level persistence the module docs describe.
     persisted: AtomicUsize,
+    /// The listener `subscribe()` registered, kept so `prompt()` can also emit the
+    /// synthetic `AgentSettled` event `to_session_event` cannot produce (see its own
+    /// docs — `AgentSettled` has no `AgentEvent` counterpart; `AgentSession` synthesizes
+    /// it itself, once per prompt, after the last `agent_end`).
+    listener: Mutex<Option<SessionEventListener>>,
 }
 
 impl SingleTurnSession {
@@ -63,6 +68,7 @@ impl SingleTurnSession {
             agent,
             session_manager: Mutex::new(session_manager),
             persisted: AtomicUsize::new(0),
+            listener: Mutex::new(None),
         })
     }
 
@@ -114,6 +120,7 @@ impl PrintModeSession for SingleTurnSession {
         // `session.prompt()` sequentially with no steering/follow-up queue in play, so
         // there is never a queued retry to report (see `sdk.rs`'s own deferral of
         // `blockImages`/session-restore for the same "no queue this wave" reason).
+        *self.listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener.clone());
         self.agent.subscribe(Arc::new(move |event, _token| {
             let mapped = to_session_event(event);
             listener(&mapped);
@@ -140,6 +147,18 @@ impl PrintModeSession for SingleTurnSession {
             .map_err(|error| ThrownValue::Error(error.to_string()))?;
         self.agent.wait_for_idle().await;
         self.persist_new_messages();
+        // `agent-session.ts:563-564` — once no automatic retry/compaction/follow-up
+        // remains. This wave's `print_mode.rs` calls `prompt()` sequentially with no
+        // queue in play (see `subscribe`'s own note on `will_retry` always being
+        // `false`), so idle here always means settled.
+        if let Some(listener) = self
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            listener(&crate::print_mode::AgentSessionEvent::AgentSettled);
+        }
         Ok(())
     }
 

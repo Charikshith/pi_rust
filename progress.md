@@ -11,8 +11,9 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-17
-**Active Feature:** feat-005 — headless `pirust` binary (IN PROGRESS; Waves 0-5 of 6
-done per `plan.md`; Wave 6 — live differential + hardening — is next).
+**Active Feature:** feat-005 — headless `pirust` binary (DONE — all 6 waves complete,
+live differential run and one real bug found+fixed; see Wave 6 evidence below).
+**Next feature:** feat-006 (P5) `pirust-tui`, or feat-012 (RPC mode) — pick one.
 **Project:** 1:1 Rust replica of the Pi Agent Harness (pi_space/pi, ~100K LOC TS).
 **Naming:** all Rust code is `pirust*`; original names kept only for on-disk/wire compat.
 
@@ -149,6 +150,86 @@ done per `plan.md`; Wave 6 — live differential + hardening — is next).
       prompt in Pi too, so it is likely correct, not a divergence; the live
       differential should confirm this against a real `pi` run rather than
       taking this reasoning on faith.
+- [x] **feat-005 (P4) DONE & ACCEPTED — Wave 6 (live differential + hardening)**. No real
+      Anthropic credentials existed in this environment, so the differential ran against a
+      local `llama-server` (llama.cpp, `Qwen3.5-0.8B`) that implements a genuine
+      Anthropic-Messages-compatible `/v1/messages` endpoint, via the SAME `models.json`
+      `baseUrl`-override mechanism already built in Wave 3 (no new code needed to point at
+      it). Real `pi` was run unmodified from its own TypeScript source (`../pi`, no `dist/`
+      build exists) via a throwaway Node ESM resolve-hook runner (same alias-mapping
+      pattern the existing oracle scripts already use for `@earendil-works/pi-*` workspace
+      specifiers) — nothing inside the `../pi` checkout was touched; `git -C ../pi status`
+      stayed clean throughout.
+  - **Scenarios run against both real `pi` and `pirust`, same cwd, same
+    `--provider anthropic --model <local model>`:** (a) text mode provoking a real `bash`
+    tool call; (b) `--mode json` provoking real `write` then `read` tool calls.
+  - **Session JSONL structure: full parity.** Entry types (`session`, `model_change`,
+    `thinking_level_change`, `message` ×N) and assistant-message field order
+    (`role,content,api,provider,model,usage,stopReason,timestamp,responseId`) are
+    byte-identical in *shape* between real `pi` and `pirust` for both scenarios (values
+    differ only in ids/timestamps/model-generated text, as expected).
+  - **`--mode json` event-type vocabulary: found ONE real gap, fixed, then verified full
+    parity.** Real `pi`'s json stream ends with `{"type":"agent_settled"}`; `pirust`'s
+    did not — a genuine missing feature, not a rendering nuance. Root cause:
+    `print_mode.rs`'s `AgentSessionEvent::AgentSettled` variant existed (Wave 4/5) and is
+    documented as "emitted once per prompt, after the last `agent_end`", and
+    `docs/analysis/09-cli-config-spec.md` §13 explicitly names `agent_settled` (and
+    `entry_appended`) as required beyond the plain agent-core `AgentEvent` subset — but
+    `runtime_host.rs`'s `SingleTurnSession` (the `AgentSession`-substitute bridge, since
+    `sdk.rs` deliberately never builds the real 3283-line `AgentSession`) never
+    *constructed* one: `to_session_event` is a pure 1:1 `AgentEvent`→`AgentSessionEvent`
+    map, and `AgentSettled` has no `AgentEvent` counterpart to map from — it must be
+    synthesized. **Fix:** `SingleTurnSession` now keeps the `subscribe()`-registered
+    listener in a stored `Mutex<Option<SessionEventListener>>`, and `prompt()` invokes it
+    once more with `AgentSettled` after `wait_for_idle()` (this wave's sequential
+    `session.prompt()` calls have no queue/retry machinery of their own — see
+    `subscribe`'s own note that `will_retry` is always `false` — so "idle" here always
+    means "settled"). Re-verified: `print_mode_golden.rs` 10/10 still green (the existing
+    fixtures already modeled `agent_settled` correctly; the fix just makes the runtime
+    honor it), and a fresh live run's json-event-type set-diff against real `pi`'s is now
+    **empty in both directions** for the write/read scenario. `entry_appended` (the other
+    §13-named event) legitimately stays deferred — it fires only through a loaded
+    extension (feat-007), which does not exist yet; correctly absent from BOTH real `pi`'s
+    and `pirust`'s output in these non-extension scenarios (confirmed, not assumed).
+  - **Self-referentiality audit:** the `agent_settled` gap above IS the audit's finding —
+    the type-level modeling (Wave 4/5) was correct and presumably oracle-informed, but the
+    runtime wiring was never exercised against a real end-to-end run, so a real, oracle-
+    verifiable gap shipped silently under "10/10 golden". Spot-checked `sdk_canned_turn.rs`
+    separately: it intentionally uses a `Faux` stream fn and asserts internal-wiring
+    correctness (tools→prompt→loop→convert_to_llm), not Pi byte-compat — correctly scoped,
+    not mislabeled as an oracle test. `system_prompt_golden.rs`/`provider_attribution_golden.rs`
+    confirmed still oracle-generated (non-trivial fixture counts from Wave 4).
+  - **Timing** (release build, `[profile.release]` lto/strip already in `Cargo.toml`; no
+    `hyperfine` installed, used PowerShell `Measure-Command` instead — 10 runs each,
+    first-run cold-cache outliers visible but ignored): `pirust --version` steady-state
+    **~8-10ms**, `--help` **~9-10ms** — squarely in the earlier-reported `jcode`
+    near-native floor (10.1-19.3ms), i.e. the LTO/paint-before-block work already done
+    this session achieved its goal. Real `pi --version` via the unbundled Node
+    resolve-hook runner: **~2.1-2.7s** — NOT a fair comparison to the original
+    benchmark's 590ms `pi` figure, since that number presumably came from a proper
+    bundled `dist/cli.js`, and this environment has none (`npm run build` was not run, to
+    avoid writing into the `../pi` checkout — `dist/` is gitignored there so it would have
+    been safe, but was judged out of scope for this wave). Flagged as a residual: a real
+    apples-to-apples `pirust` vs `pi` timing comparison needs either a built `pi` dist or
+    a documented adjustment for the resolve-hook overhead.
+  - **Memory:** `pirust`'s release binary exits in ~8-10ms, too fast to sample a
+    meaningful "idle" working set (`Get-Process`/`Measure-Command` sampling raced the
+    exit and returned nothing). Real `pi` under Node: **~125.7MB** working set sampled
+    mid-run. `pirust.exe` (release) is **127KB** on disk (from the `[profile.release]`
+    change earlier this session). Rough first data point only, per the brief — not a
+    rigorous benchmark suite.
+  - **Constraints honored:** nothing committed/pushed; `../pi` checkout untouched and
+    clean throughout; no new tooling installed (checked for `hyperfine`, absent, used the
+    PowerShell fallback instead of installing it); `pirust-tui`/extensions/feat-006/007
+    territory untouched; `./init.sh` fully green (47 suites, 0 failures, no oracle drift)
+    after the fix and a `cargo fmt` pass.
+  - **Verdict: feat-005 closes.** The acceptance bar (`AGENTS.md` "Correctness Bar" +
+    this feature's own ACCEPTANCE line: pure-layer goldens + a live differential
+    comparing session JSONL and stdout shape) is met — pure-layer goldens all green
+    (Waves 0-5), the live differential ran for real, found exactly one real gap, and that
+    gap is now fixed and re-verified with zero remaining structural divergence in either
+    tested scenario. The timing/memory numbers are a real (if rough) first data point,
+    not a blocker — they were never part of the ACCEPTANCE line's own bar.
 
 ### Decisions locked (user, this session)
 
@@ -163,12 +244,16 @@ done per `plan.md`; Wave 6 — live differential + hardening — is next).
 
 ### What's Next (with verification per step)
 
-1. **feat-005 Wave 6 — live differential + hardening.** Real `pi -p` vs `pirust -p`
-   against the same Meridian endpoint (needs real Anthropic credentials in this or
-   a future session — this one had none); diff session JSONL + stdout shape,
-   including the open question on session-file write timing noted above; record
-   `hyperfine` time-to-first-frame + idle RSS vs real `pi`. This closes feat-005.
-2. feat-006 (P5) `pirust-tui` literal port → then feat-007 wires tools+TUI together.
+1. **feat-005 is DONE** (Wave 6 evidence above). A real Anthropic-credential run of the
+   same differential (this session used a local llama.cpp server instead — see
+   evidence) would still be worth doing whenever real credentials are available, as a
+   confirmation rather than a blocker.
+2. feat-006 (P5) `pirust-tui` literal port → then feat-007 wires tools+TUI together. Or
+   feat-012 (RPC mode), deferred out of feat-005 by the user's own earlier decision to
+   land the runnable binary first — either is a reasonable next pick.
+3. Residual named in Wave 6: a real `pirust` vs `pi` timing comparison needs a built
+   `pi` `dist/cli.js` (or a documented adjustment for this session's unbundled-Node
+   resolve-hook overhead, ~2.1-2.7s, which is not representative of a real install).
 
 ## Blockers / Risks
 
