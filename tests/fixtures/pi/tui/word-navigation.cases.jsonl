@@ -1,0 +1,29 @@
+{"note":"backward-cursor-zero-short-circuits","fn":"findWordBackward","text":"hello world","cursor":0,"result":0}
+{"note":"forward-cursor-at-length-short-circuits","fn":"findWordForward","text":"hello world","cursor":11,"result":11}
+{"note":"forward-cursor-beyond-length-clamped","fn":"findWordForward","text":"hi","cursor":10,"result":2}
+{"note":"backward-mid-word","fn":"findWordBackward","text":"hello wo","cursor":8,"result":6}
+{"note":"forward-mid-word","fn":"findWordForward","text":"hello world","cursor":3,"result":5}
+{"note":"backward-mid-whitespace-run","fn":"findWordBackward","text":"hello   world","cursor":8,"result":0}
+{"note":"forward-mid-whitespace-run","fn":"findWordForward","text":"hello   world","cursor":6,"result":13}
+{"note":"backward-mid-punctuation-run","fn":"findWordBackward","text":"foo!!!bar","cursor":6,"result":3}
+{"note":"forward-mid-punctuation-run","fn":"findWordForward","text":"foo!!!bar","cursor":3,"result":6}
+{"note":"backward-word-with-trailing-punctuation","fn":"findWordBackward","text":"foo.bar","cursor":7,"result":4}
+{"note":"forward-word-with-leading-punctuation-boundary","fn":"findWordForward","text":"foo.bar","cursor":0,"result":3}
+{"note":"backward-arrow-punctuation","fn":"findWordBackward","text":"foo->bar","cursor":8,"result":5}
+{"note":"forward-arrow-punctuation","fn":"findWordForward","text":"foo->bar","cursor":0,"result":3}
+{"note":"backward-all-whitespace","fn":"findWordBackward","text":"     ","cursor":5,"result":0}
+{"note":"forward-all-whitespace","fn":"findWordForward","text":"     ","cursor":0,"result":5}
+{"note":"backward-all-punctuation","fn":"findWordBackward","text":"!!!...","cursor":6,"result":0}
+{"note":"forward-all-punctuation","fn":"findWordForward","text":"!!!...","cursor":0,"result":6}
+{"note":"backward-cjk-text","fn":"findWordBackward","text":"日本語のテキスト","cursor":8,"result":4}
+{"note":"forward-cjk-text","fn":"findWordForward","text":"日本語のテキスト","cursor":0,"result":3}
+{"note":"backward-emoji-boundary","fn":"findWordBackward","text":"hello 😀 world","cursor":8,"result":6}
+{"note":"forward-emoji-boundary","fn":"findWordForward","text":"hello 😀 world","cursor":6,"result":8}
+{"note":"backward-emoji-within-word-boundary","fn":"findWordBackward","text":"a😀b","cursor":3,"result":1}
+{"note":"forward-emoji-within-word-boundary","fn":"findWordForward","text":"a😀b","cursor":1,"result":3}
+{"note":"backward-combining-mark","fn":"findWordBackward","text":"café bar","cursor":11,"result":8}
+{"note":"forward-combining-mark","fn":"findWordForward","text":"café bar","cursor":0,"result":5}
+{"note":"backward-single-space-between-words","fn":"findWordBackward","text":"foo bar","cursor":7,"result":4}
+{"note":"forward-single-space-between-words","fn":"findWordForward","text":"foo bar","cursor":0,"result":3}
+{"note":"backward-empty-string","fn":"findWordBackward","text":"","cursor":0,"result":0}
+{"note":"forward-empty-string","fn":"findWordForward","text":"","cursor":0,"result":0}

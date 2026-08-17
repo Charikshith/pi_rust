@@ -11,11 +11,12 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-17
-**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-2 of 8
-done: utils.rs, keys.rs, stdin_buffer.rs, all oracle-verified; see plan.md for the
-remaining wave breakdown).
+**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-3 of 8
+done: utils.rs, keys.rs, stdin_buffer.rs, kill_ring.rs, undo_stack.rs,
+word_navigation.rs, keybindings.rs, fuzzy.rs; see plan.md for the remaining wave
+breakdown).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-006 Wave 3 (kill_ring/undo_stack/word_navigation/keybindings/fuzzy).
+**Next feature:** feat-006 Wave 4 (tui.rs + terminal.rs — the render engine).
 **Project:** 1:1 Rust replica of the Pi Agent Harness (pi_space/pi, ~100K LOC TS).
 **Naming:** all Rust code is `pirust*`; original names kept only for on-disk/wire compat.
 
@@ -250,7 +251,7 @@ Cadence: checkpoint per phase — one wave, verify, report, pause.
    same differential (this session used a local llama.cpp server instead — see
    evidence) would still be worth doing whenever real credentials are available, as a
    confirmation rather than a blocker.
-2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Waves 1-2/8 done — see below).
+2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Waves 1-3/8 done — see below).
 3. Residual named in Wave 6: a real `pirust` vs `pi` timing comparison needs a built
    `pi` `dist/cli.js` (or a documented adjustment for this session's unbundled-Node
    resolve-hook overhead, ~2.1-2.7s, which is not representative of a real install).
@@ -320,6 +321,39 @@ Scope decisions (documented in `keys.rs`/`stdin_buffer.rs` module docs, not sile
   regex check preceding it in the TS; implemented once in the Rust port.
 
 No other Rust/TS divergence found — all 329 new oracle cases matched on the first run.
+
+### feat-006 Wave 3 (kill_ring/undo_stack/word_navigation/keybindings/fuzzy) — DONE
+
+Ported 5 small pure modules: `kill-ring.ts` (46 TS) → `kill_ring.rs` (134), `undo-stack.ts`
+(28 TS) → `undo_stack.rs` (91) — both unit-tested only, no oracle, per the same
+proportionality precedent as feat-005's `auth_guidance.rs`. `word-navigation.ts` (117 TS)
+→ `word_navigation.rs` (300), `keybindings.ts` (244 TS) → `keybindings.rs` (472),
+`fuzzy.ts` (137 TS) → `fuzzy.rs` (260) — all three oracle-verified via new
+`scripts/gen-tui-oracle.mjs` sections (29/8/19 cases) + new `tests/{word_navigation,
+keybindings,fuzzy}_golden.rs`; wired into `init.sh`. fmt+clippy -D warnings clean,
+full `./init.sh` green (0 failed, 2 pre-existing unrelated ignored tests).
+
+Notable findings:
+- **Real port bug found+fixed**: `find_word_backward`'s cursor return-arithmetic
+  baseline must stay *unclamped* even though `text.slice(0, cursor)` clamps
+  internally in the TS — an easy mis-port that the oracle caught immediately.
+- **Documented (not silent) divergence**: `unicode-segmentation`'s plain UAX#29
+  word-break has no CJK dictionary segmentation, unlike `Intl.Segmenter`/ICU (Pi
+  groups "日本語" as one word; this port sees each Han ideograph separately). The
+  one affected oracle case (`forward-cjk-text`) is explicitly named and excluded in
+  `word_navigation_golden.rs` with a citation — not silently dropped, not asserted as
+  a false pass. Pure-katakana/hiragana runs are confirmed unaffected.
+- **`word_navigation.rs`'s cursor offsets are UTF-16 code units by design**
+  (`encode_utf16`-based arithmetic) — pre-empts `editor.rs`'s Wave 6 hazard (the
+  biggest one named in `plan.md`) with zero adaptation needed when Wave 6 calls
+  these functions.
+- **`Keybinding` ported as a closed Rust enum** (fixed 31-id set, unlike `KeyId`'s
+  open combinatorial string space from Wave 2) — real compile-time safety for a
+  fixed, load-bearing vocabulary. `TUI_KEYBINDINGS` ported verbatim; global
+  singleton via `LazyLock<Mutex<KeybindingsManager>>`, replaceable via
+  `set_keybindings` exactly like the TS.
+- `fuzzy.rs` hand-rolls word-boundary/alpha-numeric-swap classification (no `regex`
+  crate), per the Ponytail ladder precedent already set in this crate.
 
 ## Blockers / Risks
 

@@ -1,0 +1,19 @@
+{"note":"exact-match","fn":"fuzzyMatch","query":"hello","text":"hello","result":{"matches":true,"score":-184}}
+{"note":"no-match-query-longer","fn":"fuzzyMatch","query":"helloworld","text":"hi","result":{"matches":false,"score":0}}
+{"note":"no-match-missing-char","fn":"fuzzyMatch","query":"xyz","text":"hello","result":{"matches":false,"score":0}}
+{"note":"consecutive-match","fn":"fuzzyMatch","query":"abc","text":"abcxyz","result":{"matches":true,"score":-39.699999999999996}}
+{"note":"scattered-match","fn":"fuzzyMatch","query":"abc","text":"axbxcx","result":{"matches":true,"score":-10.4}}
+{"note":"word-boundary-match","fn":"fuzzyMatch","query":"foo","text":"bar_foo_baz","result":{"matches":true,"score":-23.5}}
+{"note":"mid-word-match","fn":"fuzzyMatch","query":"oo","text":"foobar","result":{"matches":true,"score":-4.7}}
+{"note":"case-insensitive","fn":"fuzzyMatch","query":"HELLO","text":"hello world","result":{"matches":true,"score":-84}}
+{"note":"gap-penalty-multiple-positions","fn":"fuzzyMatch","query":"ac","text":"a_____c","result":{"matches":true,"score":-14.4}}
+{"note":"numeric-alpha-swap-fires","fn":"fuzzyMatch","query":"2fa","text":"fa2-setup","result":{"matches":true,"score":-34.699999999999996}}
+{"note":"alpha-numeric-swap-fires","fn":"fuzzyMatch","query":"fa2","text":"2fa-setup","result":{"matches":true,"score":-34.699999999999996}}
+{"note":"swap-not-needed-when-primary-succeeds","fn":"fuzzyMatch","query":"fa2","text":"fa2-setup","result":{"matches":true,"score":-39.699999999999996}}
+{"note":"empty-query","fn":"fuzzyMatch","query":"","text":"anything","result":{"matches":true,"score":0}}
+{"note":"empty-text","fn":"fuzzyMatch","query":"abc","text":"","result":{"matches":false,"score":0}}
+{"note":"filter-multi-token-all-must-match","fn":"fuzzyFilter","items":["apple pie","apple juice","banana split"],"query":"apple pie","result":["apple pie","apple juice"]}
+{"note":"filter-empty-query-returns-unchanged","fn":"fuzzyFilter","items":["a","b","c"],"query":"   ","result":["a","b","c"]}
+{"note":"filter-one-token-no-items-match","fn":"fuzzyFilter","items":["apple","banana"],"query":"xyz","result":[]}
+{"note":"filter-ordering-by-score","fn":"fuzzyFilter","items":["zzzzza","zzazzz","zazzzz","azzzzz"],"query":"a","result":["azzzzz","zazzzz","zzazzz","zzzzza"]}
+{"note":"filter-slash-separated-tokens","fn":"fuzzyFilter","items":["src/main.rs","src/lib.rs"],"query":"src/main","result":["src/main.rs"]}

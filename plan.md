@@ -89,7 +89,17 @@ source, standalone.
       state (zero readers in ../pi) and not ported; StdinBuffer::process returns
       Vec<StdinEvent> instead of EventEmitter callbacks, timer-driven flush()
       scheduling deferred to Wave 4 (tui.rs) as documented caller responsibility.)
-- [ ] Wave 3 — kill_ring/undo_stack/word_navigation/keybindings/fuzzy
+- [x] Wave 3 — kill_ring/undo_stack/word_navigation/keybindings/fuzzy
+      (crates/pirust-tui/src/{kill_ring,undo_stack,word_navigation,keybindings,fuzzy}.rs;
+      kill_ring/undo_stack unit-tested only, per triviality; word_navigation/keybindings/
+      fuzzy oracle-verified, 29/8/19 cases green via scripts/gen-tui-oracle.mjs +
+      tests/{word_navigation,keybindings,fuzzy}_golden.rs; wired into init.sh. Real bug
+      found+fixed: find_word_backward's cursor baseline must stay unclamped, matching
+      Pi. Documented gap: unicode-segmentation lacks Intl.Segmenter's CJK dictionary
+      segmentation — one named oracle case (forward-cjk-text) explicitly excluded with
+      citation, not silently dropped. word_navigation.rs cursor offsets are UTF-16
+      code units by design, pre-empting Wave 6's editor.rs hazard. Keybinding ported as
+      a closed Rust enum (fixed 31-id set); global singleton via LazyLock<Mutex<_>>.)
 - [ ] Wave 4 — tui.rs + terminal.rs
 - [ ] Wave 5 — components/
 - [ ] Wave 6 — editor.rs

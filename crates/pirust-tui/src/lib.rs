@@ -6,10 +6,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod fuzzy;
+pub mod keybindings;
 pub mod keys;
+pub mod kill_ring;
 pub mod stdin_buffer;
+pub mod undo_stack;
 pub mod utils;
+pub mod word_navigation;
 
+pub use fuzzy::{fuzzy_filter, fuzzy_match, FuzzyMatch};
+pub use keybindings::{
+    get_keybindings, set_keybindings, Keybinding, KeybindingConflict, KeybindingDefinition,
+    KeybindingsManager, RawKeys,
+};
 pub use keys::{
     decode_kitty_printable, decode_printable_key, is_key_release, is_key_repeat,
     is_kitty_protocol_active, matches_key, parse_key, set_kitty_protocol_active,

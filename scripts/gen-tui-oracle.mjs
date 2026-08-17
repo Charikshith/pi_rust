@@ -59,6 +59,15 @@ const {
 const stdinBufferPath = join(TUI_SRC, "stdin-buffer.ts");
 const { StdinBuffer } = await import(pathToFileURL(stdinBufferPath).href);
 
+const wordNavPath = join(TUI_SRC, "word-navigation.ts");
+const { findWordBackward, findWordForward } = await import(pathToFileURL(wordNavPath).href);
+
+const keybindingsPath = join(TUI_SRC, "keybindings.ts");
+const { KeybindingsManager, TUI_KEYBINDINGS } = await import(pathToFileURL(keybindingsPath).href);
+
+const fuzzyPath = join(TUI_SRC, "fuzzy.ts");
+const { fuzzyMatch, fuzzyFilter } = await import(pathToFileURL(fuzzyPath).href);
+
 const bgFn = (text) => `<bg>${text}</bg>`;
 
 const records = [];
@@ -592,6 +601,135 @@ sb("unterminated-csi-flushed", [
 ]);
 sb("empty-process-emits-empty-data", [{ op: "process", data: "" }]);
 
+// ===========================================================================
+// WORD-NAVIGATION (feat-006 Wave 3)
+// ===========================================================================
+const WORD_NAV_OUT_FILE = join(OUT_DIR, "word-navigation.cases.jsonl");
+const wordNavRecords = [];
+function wn(note, fn, text, cursor) {
+	const impl = fn === "findWordBackward" ? findWordBackward : findWordForward;
+	wordNavRecords.push({ note, fn, text, cursor, result: impl(text, cursor) });
+}
+
+wn("backward-cursor-zero-short-circuits", "findWordBackward", "hello world", 0);
+wn("forward-cursor-at-length-short-circuits", "findWordForward", "hello world", 11);
+wn("forward-cursor-beyond-length-clamped", "findWordForward", "hi", 10);
+wn("backward-mid-word", "findWordBackward", "hello wo", 8);
+wn("forward-mid-word", "findWordForward", "hello world", 3);
+wn("backward-mid-whitespace-run", "findWordBackward", "hello   world", 8);
+wn("forward-mid-whitespace-run", "findWordForward", "hello   world", 6);
+wn("backward-mid-punctuation-run", "findWordBackward", "foo!!!bar", 6);
+wn("forward-mid-punctuation-run", "findWordForward", "foo!!!bar", 3);
+wn("backward-word-with-trailing-punctuation", "findWordBackward", "foo.bar", 7);
+wn("forward-word-with-leading-punctuation-boundary", "findWordForward", "foo.bar", 0);
+wn("backward-arrow-punctuation", "findWordBackward", "foo->bar", 8);
+wn("forward-arrow-punctuation", "findWordForward", "foo->bar", 0);
+wn("backward-all-whitespace", "findWordBackward", "     ", 5);
+wn("forward-all-whitespace", "findWordForward", "     ", 0);
+wn("backward-all-punctuation", "findWordBackward", "!!!...", 6);
+wn("forward-all-punctuation", "findWordForward", "!!!...", 0);
+wn("backward-cjk-text", "findWordBackward", "日本語のテキスト", 8);
+wn("forward-cjk-text", "findWordForward", "日本語のテキスト", 0);
+wn("backward-emoji-boundary", "findWordBackward", "hello 😀 world", 8);
+wn("forward-emoji-boundary", "findWordForward", "hello 😀 world", 6);
+wn("backward-emoji-within-word-boundary", "findWordBackward", "a😀b", 3);
+wn("forward-emoji-within-word-boundary", "findWordForward", "a😀b", 1);
+wn("backward-combining-mark", "findWordBackward", "café bar", 11);
+wn("forward-combining-mark", "findWordForward", "café bar", 0);
+wn("backward-single-space-between-words", "findWordBackward", "foo bar", 7);
+wn("forward-single-space-between-words", "findWordForward", "foo bar", 0);
+wn("backward-empty-string", "findWordBackward", "", 0);
+wn("forward-empty-string", "findWordForward", "", 0);
+
+// ===========================================================================
+// KEYBINDINGS (feat-006 Wave 3)
+// ===========================================================================
+const KEYBINDINGS_OUT_FILE = join(OUT_DIR, "keybindings.cases.jsonl");
+const keybindingsRecords = [];
+function kb(note, userBindings, calls) {
+	const mgr = new KeybindingsManager(TUI_KEYBINDINGS, userBindings ?? {});
+	const results = calls.map((call) => {
+		if (call.fn === "matches") return mgr.matches(call.args[0], call.args[1]);
+		if (call.fn === "getKeys") return mgr.getKeys(call.args[0]);
+		if (call.fn === "getConflicts") return mgr.getConflicts();
+		if (call.fn === "getResolvedBindings") return mgr.getResolvedBindings();
+		if (call.fn === "getUserBindings") return mgr.getUserBindings();
+		if (call.fn === "setUserBindings") {
+			mgr.setUserBindings(call.args[0]);
+			return null;
+		}
+		throw new Error(`unknown fn ${call.fn}`);
+	});
+	keybindingsRecords.push({ note, userBindings: userBindings ?? {}, calls, results });
+}
+
+kb("defaults-only-multi-key-binding", {}, [
+	{ fn: "getKeys", args: ["tui.editor.cursorLeft"] },
+	{ fn: "getKeys", args: ["tui.editor.cursorUp"] },
+]);
+kb("override-single-string-replaces-default", { "tui.editor.undo": "ctrl+z" }, [
+	{ fn: "getKeys", args: ["tui.editor.undo"] },
+	{ fn: "matches", args: ["\x1a", "tui.editor.undo"] },
+	{ fn: "matches", args: ["\x1f", "tui.editor.undo"] },
+]);
+kb("override-array-form", { "tui.input.copy": ["ctrl+c", "ctrl+insert"] }, [
+	{ fn: "getKeys", args: ["tui.input.copy"] },
+]);
+kb("conflict-two-bindings-claim-same-key", { "tui.editor.undo": "ctrl+x", "tui.editor.yank": "ctrl+x" }, [
+	{ fn: "getConflicts", args: [] },
+]);
+kb(
+	"unknown-binding-id-ignored-for-conflicts-but-kept-raw",
+	{ "tui.editor.undo": "ctrl+z", "tui.nonexistent.thing": "ctrl+q" },
+	[
+		{ fn: "getConflicts", args: [] },
+		{ fn: "getUserBindings", args: [] },
+		{ fn: "getKeys", args: ["tui.editor.undo"] },
+	],
+);
+kb("duplicate-keys-in-own-array-deduped", { "tui.input.copy": ["ctrl+c", "ctrl+c", "ctrl+insert"] }, [
+	{ fn: "getKeys", args: ["tui.input.copy"] },
+]);
+kb("resolved-bindings-single-vs-array-unwrap", {}, [{ fn: "getResolvedBindings", args: [] }]);
+kb("set-user-bindings-rebuilds-conflicts", {}, [
+	{ fn: "getConflicts", args: [] },
+	{ fn: "setUserBindings", args: [{ "tui.editor.undo": "ctrl+z", "tui.editor.yank": "ctrl+z" }] },
+	{ fn: "getConflicts", args: [] },
+]);
+
+// ===========================================================================
+// FUZZY (feat-006 Wave 3)
+// ===========================================================================
+const FUZZY_OUT_FILE = join(OUT_DIR, "fuzzy.cases.jsonl");
+const fuzzyRecords = [];
+function fm(note, query, text) {
+	fuzzyRecords.push({ note, fn: "fuzzyMatch", query, text, result: fuzzyMatch(query, text) });
+}
+function ff(note, items, query) {
+	fuzzyRecords.push({ note, fn: "fuzzyFilter", items, query, result: fuzzyFilter(items, query, (s) => s) });
+}
+
+fm("exact-match", "hello", "hello");
+fm("no-match-query-longer", "helloworld", "hi");
+fm("no-match-missing-char", "xyz", "hello");
+fm("consecutive-match", "abc", "abcxyz");
+fm("scattered-match", "abc", "axbxcx");
+fm("word-boundary-match", "foo", "bar_foo_baz");
+fm("mid-word-match", "oo", "foobar");
+fm("case-insensitive", "HELLO", "hello world");
+fm("gap-penalty-multiple-positions", "ac", "a_____c");
+fm("numeric-alpha-swap-fires", "2fa", "fa2-setup");
+fm("alpha-numeric-swap-fires", "fa2", "2fa-setup");
+fm("swap-not-needed-when-primary-succeeds", "fa2", "fa2-setup");
+fm("empty-query", "", "anything");
+fm("empty-text", "abc", "");
+
+ff("filter-multi-token-all-must-match", ["apple pie", "apple juice", "banana split"], "apple pie");
+ff("filter-empty-query-returns-unchanged", ["a", "b", "c"], "   ");
+ff("filter-one-token-no-items-match", ["apple", "banana"], "xyz");
+ff("filter-ordering-by-score", ["zzzzza", "zzazzz", "zazzzz", "azzzzz"], "a");
+ff("filter-slash-separated-tokens", ["src/main.rs", "src/lib.rs"], "src/main");
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -617,6 +755,9 @@ let drift = 0;
 drift += writeFixture(OUT_FILE, records, "utils.cases.jsonl");
 drift += writeFixture(KEYS_OUT_FILE, keysRecords, "keys.cases.jsonl");
 drift += writeFixture(STDIN_OUT_FILE, stdinRecords, "stdin-buffer.cases.jsonl");
+drift += writeFixture(WORD_NAV_OUT_FILE, wordNavRecords, "word-navigation.cases.jsonl");
+drift += writeFixture(KEYBINDINGS_OUT_FILE, keybindingsRecords, "keybindings.cases.jsonl");
+drift += writeFixture(FUZZY_OUT_FILE, fuzzyRecords, "fuzzy.cases.jsonl");
 
 if (CHECK && drift > 0) {
 	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");
