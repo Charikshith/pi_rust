@@ -12,6 +12,10 @@ thiserror = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 unicode-properties = { workspace = true }
+# feat-006 Wave 4 terminal_image.rs: base64-encode iTerm2 image names / decode
+# image payloads for the PNG/JPEG/GIF/WebP header parsers.
+base64 = { workspace = true }
+crossterm = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

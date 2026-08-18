@@ -11,12 +11,13 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-17
-**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-3 of 8
+**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-4 of 8
 done: utils.rs, keys.rs, stdin_buffer.rs, kill_ring.rs, undo_stack.rs,
-word_navigation.rs, keybindings.rs, fuzzy.rs; see plan.md for the remaining wave
-breakdown).
+word_navigation.rs, keybindings.rs, fuzzy.rs, terminal_colors.rs, terminal_image.rs,
+terminal.rs, tui.rs; see plan.md for the remaining wave breakdown).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-006 Wave 4 (tui.rs + terminal.rs — the render engine).
+**Next feature:** feat-006 Wave 5 (components/ — Box, Text, TruncatedText, Spacer,
+Loader, Input, SelectList, SettingsList, Image, editor_component.rs).
 **Project:** 1:1 Rust replica of the Pi Agent Harness (pi_space/pi, ~100K LOC TS).
 **Naming:** all Rust code is `pirust*`; original names kept only for on-disk/wire compat.
 
@@ -251,7 +252,7 @@ Cadence: checkpoint per phase — one wave, verify, report, pause.
    same differential (this session used a local llama.cpp server instead — see
    evidence) would still be worth doing whenever real credentials are available, as a
    confirmation rather than a blocker.
-2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Waves 1-3/8 done — see below).
+2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Waves 1-4/8 done — see below).
 3. Residual named in Wave 6: a real `pirust` vs `pi` timing comparison needs a built
    `pi` `dist/cli.js` (or a documented adjustment for this session's unbundled-Node
    resolve-hook overhead, ~2.1-2.7s, which is not representative of a real install).
@@ -354,6 +355,71 @@ Notable findings:
   `set_keybindings` exactly like the TS.
 - `fuzzy.rs` hand-rolls word-boundary/alpha-numeric-swap classification (no `regex`
   crate), per the Ponytail ladder precedent already set in this crate.
+
+### feat-006 Wave 4 (terminal_colors/terminal_image/terminal/tui) — DONE
+
+Revised scope: `terminal-colors.ts`/`terminal-image.ts` moved up from the original
+Wave 7 plan since `tui.ts` imports them directly, and splitting `terminal-image.ts`
+across two waves would have been worse than porting it once. Ported all 4 files:
+`terminal_colors.rs` (149 vs 73 TS), `terminal_image.rs` (640 vs 488 TS),
+`terminal.rs` (608 vs 531 TS), `tui.rs` (2050 vs 1714 TS). Oracle-verified via new
+`scripts/gen-tui-oracle.mjs` sections: 17/59/9/7 cases green + new
+`tests/{terminal_colors,terminal_image,terminal,tui}_golden.rs`; wired into
+`init.sh`. `crossterm` added to the workspace (raw-mode/size/write syscall shim
+only, per `05-tui.md` §8's verdict — this crate keeps its own `keys.rs`/
+`stdin_buffer.rs` from Waves 1-2 for actual input decoding, never crossterm's
+`Event` parser). fmt+clippy -D warnings clean, full `./init.sh` green.
+
+`tui.rs`'s oracle drives a REAL Pi `TUI` against a JS-side fake `Terminal` (the
+Rust analogue of `@xterm/headless`), capturing exact `write()` byte sequences —
+7 cases covering first-render, differential redraw, width/height-change full
+redraws, and overlay show/focus/hide with prior-focus restoration incl. a
+two-overlay non-topmost-hide case. This is the crate's first genuinely stateful
+render-engine port and its most structurally significant wave so far.
+
+Notable design decisions (documented in `tui.rs`'s module docs):
+- **Component tree as `Rc<RefCell<dyn Component>>`** (`SharedComponent`), compared
+  via `Rc::ptr_eq` everywhere the TS compares object references with `===`. Makes
+  `TUI`/`Container` intentionally `!Send`/`!Sync` — faithful to JS's own
+  single-threaded object-identity semantics, not a limitation to fix later.
+- **`OverlayHandle`'s TS closures become an `OverlayId` token** + `TUI` methods
+  taking it, since Rust can't return closures borrowing `&mut self` for
+  independent later calls the way a JS closure capturing `this` can.
+- **`request_render`'s debounce is synchronous and caller-polled via
+  `TUI::poll()`, not a self-owned timer.** The original plan called for `tokio`
+  here; the fork correctly identified that `Rc<RefCell<_>>`'s `!Send` makes
+  spawning an owned timer task structurally impossible, and dropped `tokio`
+  entirely rather than fighting the type system. Same category of adaptation as
+  Wave 2's `StdinBuffer::flush()` (defer real timer ownership to whoever owns
+  the actual event loop, `feat-007`) — this time for a structural reason, not a
+  scope-minimization one.
+- **Width-overflow crash path becomes `panic!`**, after writing the same crash
+  log the TS does — matches the TS's own "this is an unrecoverable programming
+  error, crash the process" intent more faithfully than a recoverable `Result`.
+- **Real bug caught by the oracle**: an early draft made `request_render(force:
+  true)` render synchronously; the oracle's very first case failed, revealing
+  the TS *never* renders synchronously even when forced (it still goes through
+  `process.nextTick`, just skipping the 16ms throttle). Fixed with a
+  `force_pending` flag consumed by the next `poll()`.
+- **`enableWindowsVTInput`/the macOS native-modifier probe are documented
+  Wave-7 stubs** (fail-closed, exactly matching today's non-Windows/non-macOS TS
+  behavior) — real FFI lands when `win_console.rs`/`native_modifiers.rs` do.
+- **Named, deferred residuals** (no oracle exists for any of these — all need a
+  real timer/event loop, `feat-007`'s job): `StdinBuffer`'s idle-flush and the
+  150ms Kitty-negotiation fragment timeout aren't wired to a real timer;
+  `queryTerminalBackgroundColor`/`queryTerminalColorScheme`'s timeout-then-
+  resolve-`undefined` half isn't either (the query/response *matching* logic
+  inside `handle_input` IS ported and IS oracle-exercised); resize detection
+  polls `crossterm::terminal::size()` every 200ms instead of a native `SIGWINCH`
+  event.
+
+**Gap found and fixed during independent verification** (not by the fork): the
+fork's `lib.rs` diff added the 4 new `pub mod` declarations but never added the
+crate-root re-exports for `TUI`/`Terminal`/`Component`/`Container`/`Focusable`/
+`CURSOR_MARKER`/overlay types that `docs/analysis/05-tui.md` §2 lists as
+`index.ts`'s public surface (the same convention every prior wave followed) —
+added directly rather than round-tripping back to a fork for a mechanical fix;
+rebuilt and re-verified clean afterward.
 
 ## Blockers / Risks
 

@@ -11,6 +11,10 @@ pub mod keybindings;
 pub mod keys;
 pub mod kill_ring;
 pub mod stdin_buffer;
+pub mod terminal;
+pub mod terminal_colors;
+pub mod terminal_image;
+pub mod tui;
 pub mod undo_stack;
 pub mod utils;
 pub mod word_navigation;
@@ -25,6 +29,12 @@ pub use keys::{
     is_kitty_protocol_active, matches_key, parse_key, set_kitty_protocol_active,
 };
 pub use stdin_buffer::{StdinBuffer, StdinBufferOptions, StdinEvent};
+pub use terminal::{ProcessTerminal, Terminal};
+pub use tui::{
+    is_focusable, Component, Container, Focusable, OverlayAnchor, OverlayId, OverlayMargin,
+    OverlayMarginValue, OverlayOptions, OverlayUnfocusOptions, SharedComponent, SizeValue,
+    CURSOR_MARKER, TUI,
+};
 pub use utils::{slice_by_column, truncate_to_width, visible_width, wrap_text_with_ansi};
 
 /// Returns the crate name — placeholder until the renderer (feat-006) lands.

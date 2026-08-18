@@ -58,3 +58,7 @@ unicode-width = "0.1"
 # feat-006 Wave 1 utils.rs: Unicode General_Category checks (Mark/Control/Format) for
 # zero-width-cluster detection (docs/analysis/05-tui.md §9's own suggestion).
 unicode-properties = "0.1"
+# feat-006 Wave 4 terminal.rs: raw-mode/size/resize/write syscall shim ONLY
+# (docs/analysis/05-tui.md §8's verdict — NOT crossterm's Event/KeyEvent parser;
+# this crate has its own keys.rs/stdin_buffer.rs, Waves 1-2, for that).
+crossterm = "0.28"

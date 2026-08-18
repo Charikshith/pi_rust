@@ -68,6 +68,42 @@ const { KeybindingsManager, TUI_KEYBINDINGS } = await import(pathToFileURL(keybi
 const fuzzyPath = join(TUI_SRC, "fuzzy.ts");
 const { fuzzyMatch, fuzzyFilter } = await import(pathToFileURL(fuzzyPath).href);
 
+const terminalColorsPath = join(TUI_SRC, "terminal-colors.ts");
+const { isOsc11BackgroundColorResponse, parseOsc11BackgroundColor, parseTerminalColorSchemeReport } = await import(
+	pathToFileURL(terminalColorsPath).href,
+);
+
+const terminalImagePath = join(TUI_SRC, "terminal-image.ts");
+const {
+	detectCapabilities,
+	getCapabilities,
+	resetCapabilitiesCache,
+	setCapabilities,
+	isImageLine,
+	encodeKitty,
+	deleteKittyImage,
+	deleteAllKittyImages,
+	encodeITerm2,
+	calculateImageCellSize,
+	calculateImageRows,
+	getPngDimensions,
+	getJpegDimensions,
+	getGifDimensions,
+	getWebpDimensions,
+	getImageDimensions,
+	renderImage,
+	hyperlink,
+	imageFallback,
+} = await import(pathToFileURL(terminalImagePath).href);
+
+const terminalPath = join(TUI_SRC, "terminal.ts");
+const { parseKeyboardProtocolNegotiationSequence, normalizeAppleTerminalInput } = await import(
+	pathToFileURL(terminalPath).href,
+);
+
+const tuiPath = join(TUI_SRC, "tui.ts");
+const { TUI, Container } = await import(pathToFileURL(tuiPath).href);
+
 const bgFn = (text) => `<bg>${text}</bg>`;
 
 const records = [];
@@ -730,6 +766,477 @@ ff("filter-one-token-no-items-match", ["apple", "banana"], "xyz");
 ff("filter-ordering-by-score", ["zzzzza", "zzazzz", "zazzzz", "azzzzz"], "a");
 ff("filter-slash-separated-tokens", ["src/main.rs", "src/lib.rs"], "src/main");
 
+// ===========================================================================
+// TERMINAL-COLORS (feat-006 Wave 4)
+// ===========================================================================
+const TERMINAL_COLORS_OUT_FILE = join(OUT_DIR, "terminal-colors.cases.jsonl");
+const terminalColorsRecords = [];
+function tc(note, fn, args) {
+	const impl =
+		fn === "isOsc11BackgroundColorResponse"
+			? isOsc11BackgroundColorResponse
+			: fn === "parseOsc11BackgroundColor"
+				? parseOsc11BackgroundColor
+				: parseTerminalColorSchemeReport;
+	terminalColorsRecords.push({ note, fn, args, result: impl(...args) ?? null });
+}
+
+tc("osc11-hex6-bel", "parseOsc11BackgroundColor", ["\x1b]11;#1a2b3c\x07"]);
+tc("osc11-hex6-st", "parseOsc11BackgroundColor", ["\x1b]11;#1a2b3c\x1b\\"]);
+tc("osc11-hex12", "parseOsc11BackgroundColor", ["\x1b]11;#1111222233334444\x07".replace("4444", "3333")]);
+tc("osc11-hex12-exact", "parseOsc11BackgroundColor", ["\x1b]11;#aaaa bbbb cccc".replaceAll(" ", "") + "\x07"]);
+tc("osc11-rgb-4hex-channels", "parseOsc11BackgroundColor", ["\x1b]11;rgb:1a1a/2b2b/3c3c\x07"]);
+tc("osc11-rgb-2hex-channels", "parseOsc11BackgroundColor", ["\x1b]11;rgb:1a/2b/3c\x07"]);
+tc("osc11-rgb-1hex-channel", "parseOsc11BackgroundColor", ["\x1b]11;rgb:a/b/c\x07"]);
+tc("osc11-rgba-prefix", "parseOsc11BackgroundColor", ["\x1b]11;rgba:1a/2b/3c\x07"]);
+tc("osc11-malformed-channel", "parseOsc11BackgroundColor", ["\x1b]11;rgb:zz/2b/3c\x07"]);
+tc("osc11-missing-terminator", "parseOsc11BackgroundColor", ["\x1b]11;#1a2b3c"]);
+tc("osc11-not-a-response", "isOsc11BackgroundColorResponse", ["hello"]);
+tc("osc11-is-response-bel", "isOsc11BackgroundColorResponse", ["\x1b]11;#1a2b3c\x07"]);
+tc("osc11-is-response-st", "isOsc11BackgroundColorResponse", ["\x1b]11;#1a2b3c\x1b\\"]);
+tc("color-scheme-dark", "parseTerminalColorSchemeReport", ["\x1b[?997;1n"]);
+tc("color-scheme-light", "parseTerminalColorSchemeReport", ["\x1b[?997;2n"]);
+tc("color-scheme-non-matching", "parseTerminalColorSchemeReport", ["\x1b[?997;3n"]);
+tc("color-scheme-garbage", "parseTerminalColorSchemeReport", ["not-a-sequence"]);
+
+// ===========================================================================
+// TERMINAL-IMAGE (feat-006 Wave 4)
+// ===========================================================================
+const TERMINAL_IMAGE_OUT_FILE = join(OUT_DIR, "terminal-image.cases.jsonl");
+const terminalImageRecords = [];
+function ti(note, fn, args, result) {
+	terminalImageRecords.push({ note, fn, args, result: result === undefined ? null : result });
+}
+
+const ENV_IMAGE_KEYS = [
+	"TERM_PROGRAM",
+	"TERMINAL_EMULATOR",
+	"TERM",
+	"COLORTERM",
+	"KITTY_WINDOW_ID",
+	"GHOSTTY_RESOURCES_DIR",
+	"WEZTERM_PANE",
+	"WARP_SESSION_ID",
+	"WARP_TERMINAL_SESSION_UUID",
+	"ITERM_SESSION_ID",
+	"WT_SESSION",
+	"TMUX",
+];
+function withImageEnv(overrides, fn) {
+	const saved = {};
+	for (const k of ENV_IMAGE_KEYS) saved[k] = process.env[k];
+	for (const k of ENV_IMAGE_KEYS) delete process.env[k];
+	Object.assign(process.env, overrides);
+	try {
+		return fn();
+	} finally {
+		for (const k of ENV_IMAGE_KEYS) delete process.env[k];
+		for (const k of ENV_IMAGE_KEYS) if (saved[k] !== undefined) process.env[k] = saved[k];
+	}
+}
+function detect(note, envOverrides, tmuxForwards) {
+	const effectiveTmuxForwards = tmuxForwards ?? (() => false);
+	const result = withImageEnv(envOverrides, () => detectCapabilities(effectiveTmuxForwards));
+	terminalImageRecords.push({
+		note,
+		fn: "detectCapabilities",
+		args: [envOverrides, effectiveTmuxForwards() ? "true" : "false"],
+		result,
+	});
+}
+
+detect("kitty-window-id", { KITTY_WINDOW_ID: "1" });
+detect("ghostty-term-program", { TERM_PROGRAM: "ghostty" });
+detect("ghostty-resources-dir", { GHOSTTY_RESOURCES_DIR: "/x" });
+detect("wezterm-pane", { WEZTERM_PANE: "1" });
+detect("warp-session-id", { WARP_SESSION_ID: "1" });
+detect("warp-terminal-session-uuid", { WARP_TERMINAL_SESSION_UUID: "1" });
+detect("iterm-session-id", { ITERM_SESSION_ID: "1" });
+detect("iterm-term-program", { TERM_PROGRAM: "iTerm.app" });
+detect("wt-session", { WT_SESSION: "1" });
+detect("vscode-term-program", { TERM_PROGRAM: "vscode" });
+detect("alacritty-term-program", { TERM_PROGRAM: "alacritty" });
+detect("jetbrains-jediterm", { TERMINAL_EMULATOR: "JetBrains-JediTerm" });
+detect("tmux-no-hyperlink-forward", { TMUX: "1" }, () => false);
+detect("tmux-with-hyperlink-forward", { TMUX: "1" }, () => true);
+detect("tmux-via-term-prefix", { TERM: "tmux-256color" }, () => false);
+detect("screen-term-prefix", { TERM: "screen" });
+detect("unknown-conservative-fallback", {});
+detect("truecolor-hint-unknown-terminal", { COLORTERM: "truecolor" });
+
+withImageEnv({}, () => {
+	resetCapabilitiesCache();
+	setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+	terminalImageRecords.push({ note: "get-capabilities-uses-override", fn: "getCapabilities", args: [], result: getCapabilities() });
+	resetCapabilitiesCache();
+});
+
+ti("is-image-line-kitty-prefix", "isImageLine", ["\x1b_Gsome-data"], isImageLine("\x1b_Gsome-data"));
+ti("is-image-line-iterm2-prefix", "isImageLine", ["\x1b]1337;File=data"], isImageLine("\x1b]1337;File=data"));
+ti("is-image-line-mid-line", "isImageLine", ["\x1b[1A\x1b_Gsome-data"], isImageLine("\x1b[1A\x1b_Gsome-data"));
+ti("is-image-line-none", "isImageLine", ["plain text"], isImageLine("plain text"));
+
+ti("encode-kitty-basic", "encodeKitty", ["aGVsbG8=", {}], encodeKitty("aGVsbG8=", {}));
+ti(
+	"encode-kitty-full-options",
+	"encodeKitty",
+	["aGVsbG8=", { columns: 10, rows: 5, imageId: 42, moveCursor: false }],
+	encodeKitty("aGVsbG8=", { columns: 10, rows: 5, imageId: 42, moveCursor: false }),
+);
+const bigBase64 = "A".repeat(5000);
+ti("encode-kitty-chunked", "encodeKitty", [bigBase64, { imageId: 1 }], encodeKitty(bigBase64, { imageId: 1 }));
+ti("delete-kitty-image", "deleteKittyImage", [42], deleteKittyImage(42));
+ti("delete-all-kitty-images", "deleteAllKittyImages", [], deleteAllKittyImages());
+
+ti("encode-iterm2-basic", "encodeITerm2", ["aGVsbG8=", {}], encodeITerm2("aGVsbG8=", {}));
+ti(
+	"encode-iterm2-full-options",
+	"encodeITerm2",
+	["aGVsbG8=", { width: 10, height: "auto", name: "pic.png", preserveAspectRatio: false, inline: true }],
+	encodeITerm2("aGVsbG8=", { width: 10, height: "auto", name: "pic.png", preserveAspectRatio: false, inline: true }),
+);
+
+ti(
+	"calc-cell-size-width-constrained",
+	"calculateImageCellSize",
+	[{ widthPx: 1000, heightPx: 200 }, 20, undefined, { widthPx: 9, heightPx: 18 }],
+	calculateImageCellSize({ widthPx: 1000, heightPx: 200 }, 20, undefined, { widthPx: 9, heightPx: 18 }),
+);
+ti(
+	"calc-cell-size-height-constrained",
+	"calculateImageCellSize",
+	[{ widthPx: 200, heightPx: 1000 }, 40, 10, { widthPx: 9, heightPx: 18 }],
+	calculateImageCellSize({ widthPx: 200, heightPx: 1000 }, 40, 10, { widthPx: 9, heightPx: 18 }),
+);
+ti(
+	"calc-image-rows",
+	"calculateImageRows",
+	[{ widthPx: 400, heightPx: 300 }, 20, { widthPx: 9, heightPx: 18 }],
+	calculateImageRows({ widthPx: 400, heightPx: 300 }, 20, { widthPx: 9, heightPx: 18 }),
+);
+
+function pngHeader(width, height) {
+	const buf = Buffer.alloc(24);
+	buf[0] = 0x89;
+	buf[1] = 0x50;
+	buf[2] = 0x4e;
+	buf[3] = 0x47;
+	buf.writeUInt32BE(width, 16);
+	buf.writeUInt32BE(height, 20);
+	return buf.toString("base64");
+}
+function jpegHeader(width, height) {
+	const buf = Buffer.alloc(12);
+	buf[0] = 0xff;
+	buf[1] = 0xd8;
+	buf[2] = 0xff;
+	buf[3] = 0xc0;
+	buf[4] = 0x08;
+	buf.writeUInt16BE(height, 5);
+	buf.writeUInt16BE(width, 7);
+	return buf.toString("base64");
+}
+function gifHeader(width, height, sig = "GIF89a") {
+	const buf = Buffer.alloc(10);
+	buf.write(sig, 0, "ascii");
+	buf.writeUInt16LE(width, 6);
+	buf.writeUInt16LE(height, 8);
+	return buf.toString("base64");
+}
+function webpVp8Header(width, height) {
+	const buf = Buffer.alloc(30);
+	buf.write("RIFF", 0, "ascii");
+	buf.write("WEBP", 8, "ascii");
+	buf.write("VP8 ", 12, "ascii");
+	buf.writeUInt16LE(width & 0x3fff, 26);
+	buf.writeUInt16LE(height & 0x3fff, 28);
+	return buf.toString("base64");
+}
+function webpVp8lHeader(width, height) {
+	const buf = Buffer.alloc(30);
+	buf.write("RIFF", 0, "ascii");
+	buf.write("WEBP", 8, "ascii");
+	buf.write("VP8L", 12, "ascii");
+	const w = width - 1;
+	const h = height - 1;
+	const bits = (w & 0x3fff) | ((h & 0x3fff) << 14);
+	buf.writeUInt32LE(bits >>> 0, 21);
+	return buf.toString("base64");
+}
+function webpVp8xHeader(width, height) {
+	const buf = Buffer.alloc(30);
+	buf.write("RIFF", 0, "ascii");
+	buf.write("WEBP", 8, "ascii");
+	buf.write("VP8X", 12, "ascii");
+	const w = width - 1;
+	const h = height - 1;
+	buf[24] = w & 0xff;
+	buf[25] = (w >> 8) & 0xff;
+	buf[26] = (w >> 16) & 0xff;
+	buf[27] = h & 0xff;
+	buf[28] = (h >> 8) & 0xff;
+	buf[29] = (h >> 16) & 0xff;
+	return buf.toString("base64");
+}
+
+ti("png-valid", "getPngDimensions", [pngHeader(64, 32)], getPngDimensions(pngHeader(64, 32)));
+ti("png-too-short", "getPngDimensions", [Buffer.alloc(10).toString("base64")], getPngDimensions(Buffer.alloc(10).toString("base64")));
+ti("png-wrong-magic", "getPngDimensions", [Buffer.alloc(24).toString("base64")], getPngDimensions(Buffer.alloc(24).toString("base64")));
+ti("jpeg-valid", "getJpegDimensions", [jpegHeader(800, 600)], getJpegDimensions(jpegHeader(800, 600)));
+ti("jpeg-too-short", "getJpegDimensions", ["AA=="], getJpegDimensions("AA=="));
+ti("jpeg-wrong-magic", "getJpegDimensions", [Buffer.alloc(12).toString("base64")], getJpegDimensions(Buffer.alloc(12).toString("base64")));
+ti("gif-valid-89a", "getGifDimensions", [gifHeader(320, 240)], getGifDimensions(gifHeader(320, 240)));
+ti("gif-valid-87a", "getGifDimensions", [gifHeader(16, 16, "GIF87a")], getGifDimensions(gifHeader(16, 16, "GIF87a")));
+ti("gif-too-short", "getGifDimensions", [Buffer.alloc(4).toString("base64")], getGifDimensions(Buffer.alloc(4).toString("base64")));
+ti("gif-wrong-signature", "getGifDimensions", [Buffer.alloc(10).toString("base64")], getGifDimensions(Buffer.alloc(10).toString("base64")));
+ti("webp-vp8-valid", "getWebpDimensions", [webpVp8Header(100, 50)], getWebpDimensions(webpVp8Header(100, 50)));
+ti("webp-vp8l-valid", "getWebpDimensions", [webpVp8lHeader(100, 50)], getWebpDimensions(webpVp8lHeader(100, 50)));
+ti("webp-vp8x-valid", "getWebpDimensions", [webpVp8xHeader(100, 50)], getWebpDimensions(webpVp8xHeader(100, 50)));
+ti("webp-too-short", "getWebpDimensions", [Buffer.alloc(10).toString("base64")], getWebpDimensions(Buffer.alloc(10).toString("base64")));
+ti(
+	"webp-wrong-riff",
+	"getWebpDimensions",
+	[Buffer.alloc(30).toString("base64")],
+	getWebpDimensions(Buffer.alloc(30).toString("base64")),
+);
+
+ti("image-dimensions-png", "getImageDimensions", [pngHeader(10, 10), "image/png"], getImageDimensions(pngHeader(10, 10), "image/png"));
+ti(
+	"image-dimensions-jpeg",
+	"getImageDimensions",
+	[jpegHeader(10, 10), "image/jpeg"],
+	getImageDimensions(jpegHeader(10, 10), "image/jpeg"),
+);
+ti("image-dimensions-gif", "getImageDimensions", [gifHeader(10, 10), "image/gif"], getImageDimensions(gifHeader(10, 10), "image/gif"));
+ti(
+	"image-dimensions-webp",
+	"getImageDimensions",
+	[webpVp8Header(10, 10), "image/webp"],
+	getImageDimensions(webpVp8Header(10, 10), "image/webp"),
+);
+ti("image-dimensions-unknown-mime", "getImageDimensions", [pngHeader(10, 10), "image/bmp"], getImageDimensions(pngHeader(10, 10), "image/bmp"));
+
+withImageEnv({}, () => {
+	resetCapabilitiesCache();
+	setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+	terminalImageRecords.push({
+		note: "render-image-kitty",
+		fn: "renderImage",
+		args: ["aGVsbG8=", { widthPx: 100, heightPx: 50 }, { maxWidthCells: 20 }],
+		result: renderImage("aGVsbG8=", { widthPx: 100, heightPx: 50 }, { maxWidthCells: 20 }),
+	});
+	setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
+	terminalImageRecords.push({
+		note: "render-image-iterm2",
+		fn: "renderImage",
+		args: ["aGVsbG8=", { widthPx: 100, heightPx: 50 }, { maxWidthCells: 20 }],
+		result: renderImage("aGVsbG8=", { widthPx: 100, heightPx: 50 }, { maxWidthCells: 20 }),
+	});
+	setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+	terminalImageRecords.push({
+		note: "render-image-no-protocol",
+		fn: "renderImage",
+		args: ["aGVsbG8=", { widthPx: 100, heightPx: 50 }, { maxWidthCells: 20 }],
+		result: renderImage("aGVsbG8=", { widthPx: 100, heightPx: 50 }, { maxWidthCells: 20 }),
+	});
+	resetCapabilitiesCache();
+});
+
+ti("hyperlink-basic", "hyperlink", ["click here", "http://example.test"], hyperlink("click here", "http://example.test"));
+ti("image-fallback-full", "imageFallback", ["image/png", { widthPx: 10, heightPx: 20 }, "pic.png"], imageFallback("image/png", { widthPx: 10, heightPx: 20 }, "pic.png"));
+ti("image-fallback-minimal", "imageFallback", ["image/png", undefined, undefined], imageFallback("image/png", undefined, undefined));
+
+// ===========================================================================
+// TERMINAL (feat-006 Wave 4 — pure helpers only; ProcessTerminal's live I/O
+// has no oracle, see terminal.rs's module docs)
+// ===========================================================================
+const TERMINAL_OUT_FILE = join(OUT_DIR, "terminal.cases.jsonl");
+const terminalRecords = [];
+function tn(note, fn, args, result) {
+	terminalRecords.push({ note, fn, args, result: result === undefined ? null : result });
+}
+
+tn("kitty-flags-nonzero", "parseKeyboardProtocolNegotiationSequence", ["\x1b[?7u"], parseKeyboardProtocolNegotiationSequence("\x1b[?7u"));
+tn("kitty-flags-zero", "parseKeyboardProtocolNegotiationSequence", ["\x1b[?0u"], parseKeyboardProtocolNegotiationSequence("\x1b[?0u"));
+tn(
+	"device-attributes",
+	"parseKeyboardProtocolNegotiationSequence",
+	["\x1b[?1;2c"],
+	parseKeyboardProtocolNegotiationSequence("\x1b[?1;2c"),
+);
+tn(
+	"device-attributes-no-params",
+	"parseKeyboardProtocolNegotiationSequence",
+	["\x1b[?c"],
+	parseKeyboardProtocolNegotiationSequence("\x1b[?c"),
+);
+tn("not-a-negotiation-sequence", "parseKeyboardProtocolNegotiationSequence", ["\x1b[31m"], parseKeyboardProtocolNegotiationSequence("\x1b[31m"));
+tn(
+	"apple-terminal-shift-enter",
+	"normalizeAppleTerminalInput",
+	["\r", true, true],
+	normalizeAppleTerminalInput("\r", true, true),
+);
+tn(
+	"apple-terminal-no-shift",
+	"normalizeAppleTerminalInput",
+	["\r", true, false],
+	normalizeAppleTerminalInput("\r", true, false),
+);
+tn(
+	"not-apple-terminal",
+	"normalizeAppleTerminalInput",
+	["\r", false, true],
+	normalizeAppleTerminalInput("\r", false, true),
+);
+tn(
+	"apple-terminal-different-key",
+	"normalizeAppleTerminalInput",
+	["a", true, true],
+	normalizeAppleTerminalInput("a", true, true),
+);
+
+// ===========================================================================
+// TUI (feat-006 Wave 4) — real Pi `TUI` driven against a fake `Terminal`.
+// Modest coverage (see tui.rs's module docs on this wave's scope): first
+// render, no-op re-render, single-line diff, append growth, width change,
+// overlay show/focus/hide. Full exhaustive coverage of doRender's branch
+// count is not attempted in this wave.
+// ===========================================================================
+const TUI_OUT_FILE = join(OUT_DIR, "tui.cases.jsonl");
+const tuiRecords = [];
+
+function makeFakeTerminal(columns, rows) {
+	return {
+		columns,
+		rows,
+		kittyProtocolActive: false,
+		writes: [],
+		start() {},
+		stop() {},
+		async drainInput() {},
+		write(data) {
+			this.writes.push(data);
+		},
+		moveBy() {},
+		hideCursor() {},
+		showCursor() {},
+		clearLine() {},
+		clearFromCursor() {},
+		clearScreen() {},
+		setTitle() {},
+		setProgress() {},
+	};
+}
+
+function makeFakeComponent(id, linesFn) {
+	return {
+		id,
+		render(width) {
+			return linesFn(width);
+		},
+		invalidate() {},
+	};
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function tuiCase(note, columns, rows, script) {
+	const terminal = makeFakeTerminal(columns, rows);
+	const tui = new TUI(terminal, false);
+	const events = [];
+	await script(tui, terminal, events);
+	tuiRecords.push({ note, columns, rows, writes: terminal.writes, events });
+}
+
+await tuiCase("first-render-then-noop", 20, 5, async (tui, terminal) => {
+	tui.addChild(makeFakeComponent("a", () => ["hello", "world"]));
+	tui.requestRender(true);
+	terminal.writes.length = 0;
+	tui.requestRender(false);
+	await sleep(20);
+	// second requestRender with no content change -> no writes expected beyond
+	// what the throttled render loop already emitted before this snapshot.
+});
+
+await tuiCase("single-line-diff", 20, 5, async (tui, terminal) => {
+	let line2 = "world";
+	tui.addChild(makeFakeComponent("a", () => ["hello", line2]));
+	tui.requestRender(true);
+	await sleep(20);
+	terminal.writes.length = 0;
+	line2 = "WORLD!";
+	tui.requestRender(false);
+	await sleep(20);
+});
+
+await tuiCase("append-growth", 20, 5, async (tui, terminal) => {
+	let extra = [];
+	tui.addChild(makeFakeComponent("a", () => ["hello", ...extra]));
+	tui.requestRender(true);
+	await sleep(20);
+	terminal.writes.length = 0;
+	extra = ["more"];
+	tui.requestRender(false);
+	await sleep(20);
+});
+
+await tuiCase("width-change-forces-full-redraw", 20, 5, async (tui, terminal) => {
+	tui.addChild(makeFakeComponent("a", () => ["hello", "world"]));
+	tui.requestRender(true);
+	await sleep(20);
+	terminal.writes.length = 0;
+	terminal.columns = 30;
+	tui.requestRender(false);
+	await sleep(20);
+});
+
+await tuiCase("overlay-show-focus-hide-restores-prior-focus", 20, 10, async (tui, terminal, events) => {
+	const base = makeFakeComponent("base", () => ["base-line"]);
+	base.focused = false;
+	tui.addChild(base);
+	tui.setFocus(base);
+	tui.requestRender(true);
+	await sleep(20);
+	terminal.writes.length = 0;
+
+	const overlayComponent = makeFakeComponent("overlay", () => ["overlay-line"]);
+	overlayComponent.focused = false;
+	const handle = tui.showOverlay(overlayComponent, {});
+	events.push({ afterShow_focusedIsOverlay: tui.focusedComponent === overlayComponent, hasOverlay: tui.hasOverlay() });
+	await sleep(20);
+
+	handle.hide();
+	events.push({ afterHide_focusedIsBase: tui.focusedComponent === base, hasOverlay: tui.hasOverlay() });
+	await sleep(20);
+});
+
+await tuiCase("two-overlays-hide-non-topmost-does-not-move-focus", 20, 10, async (tui, terminal, events) => {
+	const overlayA = makeFakeComponent("overlayA", () => ["a"]);
+	const overlayB = makeFakeComponent("overlayB", () => ["b"]);
+	tui.requestRender(true);
+	await sleep(20);
+	const handleA = tui.showOverlay(overlayA, {});
+	await sleep(20);
+	const handleB = tui.showOverlay(overlayB, {});
+	await sleep(20);
+	events.push({ focusedIsB: tui.focusedComponent === overlayB });
+	handleA.hide();
+	await sleep(20);
+	events.push({ stillFocusedIsB: tui.focusedComponent === overlayB, hasOverlay: tui.hasOverlay() });
+	handleB.hide();
+});
+
+await tuiCase("cursor-marker-extracted-and-stripped", 20, 5, async (tui, terminal) => {
+	const CURSOR_MARKER = "\x1b_pi:c\x07";
+	const editorLike = makeFakeComponent("editor", () => [`abc${CURSOR_MARKER}def`]);
+	editorLike.focused = true;
+	tui.addChild(editorLike);
+	tui.setFocus(editorLike);
+	tui.requestRender(true);
+	await sleep(20);
+});
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -758,6 +1265,10 @@ drift += writeFixture(STDIN_OUT_FILE, stdinRecords, "stdin-buffer.cases.jsonl");
 drift += writeFixture(WORD_NAV_OUT_FILE, wordNavRecords, "word-navigation.cases.jsonl");
 drift += writeFixture(KEYBINDINGS_OUT_FILE, keybindingsRecords, "keybindings.cases.jsonl");
 drift += writeFixture(FUZZY_OUT_FILE, fuzzyRecords, "fuzzy.cases.jsonl");
+drift += writeFixture(TERMINAL_COLORS_OUT_FILE, terminalColorsRecords, "terminal-colors.cases.jsonl");
+drift += writeFixture(TERMINAL_IMAGE_OUT_FILE, terminalImageRecords, "terminal-image.cases.jsonl");
+drift += writeFixture(TERMINAL_OUT_FILE, terminalRecords, "terminal.cases.jsonl");
+drift += writeFixture(TUI_OUT_FILE, tuiRecords, "tui.cases.jsonl");
 
 if (CHECK && drift > 0) {
 	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");

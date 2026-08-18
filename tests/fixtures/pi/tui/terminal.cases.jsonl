@@ -1,0 +1,9 @@
+{"note":"kitty-flags-nonzero","fn":"parseKeyboardProtocolNegotiationSequence","args":["\u001b[?7u"],"result":{"type":"kitty-flags","flags":7}}
+{"note":"kitty-flags-zero","fn":"parseKeyboardProtocolNegotiationSequence","args":["\u001b[?0u"],"result":{"type":"kitty-flags","flags":0}}
+{"note":"device-attributes","fn":"parseKeyboardProtocolNegotiationSequence","args":["\u001b[?1;2c"],"result":{"type":"device-attributes"}}
+{"note":"device-attributes-no-params","fn":"parseKeyboardProtocolNegotiationSequence","args":["\u001b[?c"],"result":{"type":"device-attributes"}}
+{"note":"not-a-negotiation-sequence","fn":"parseKeyboardProtocolNegotiationSequence","args":["\u001b[31m"],"result":null}
+{"note":"apple-terminal-shift-enter","fn":"normalizeAppleTerminalInput","args":["\r",true,true],"result":"\u001b[13;2u"}
+{"note":"apple-terminal-no-shift","fn":"normalizeAppleTerminalInput","args":["\r",true,false],"result":"\r"}
+{"note":"not-apple-terminal","fn":"normalizeAppleTerminalInput","args":["\r",false,true],"result":"\r"}
+{"note":"apple-terminal-different-key","fn":"normalizeAppleTerminalInput","args":["a",true,true],"result":"a"}

@@ -1,0 +1,17 @@
+{"note":"osc11-hex6-bel","fn":"parseOsc11BackgroundColor","args":["\u001b]11;#1a2b3c\u0007"],"result":{"r":26,"g":43,"b":60}}
+{"note":"osc11-hex6-st","fn":"parseOsc11BackgroundColor","args":["\u001b]11;#1a2b3c\u001b\\"],"result":{"r":26,"g":43,"b":60}}
+{"note":"osc11-hex12","fn":"parseOsc11BackgroundColor","args":["\u001b]11;#1111222233333333\u0007"],"result":null}
+{"note":"osc11-hex12-exact","fn":"parseOsc11BackgroundColor","args":["\u001b]11;#aaaabbbbcccc\u0007"],"result":{"r":170,"g":187,"b":204}}
+{"note":"osc11-rgb-4hex-channels","fn":"parseOsc11BackgroundColor","args":["\u001b]11;rgb:1a1a/2b2b/3c3c\u0007"],"result":{"r":26,"g":43,"b":60}}
+{"note":"osc11-rgb-2hex-channels","fn":"parseOsc11BackgroundColor","args":["\u001b]11;rgb:1a/2b/3c\u0007"],"result":{"r":26,"g":43,"b":60}}
+{"note":"osc11-rgb-1hex-channel","fn":"parseOsc11BackgroundColor","args":["\u001b]11;rgb:a/b/c\u0007"],"result":{"r":170,"g":187,"b":204}}
+{"note":"osc11-rgba-prefix","fn":"parseOsc11BackgroundColor","args":["\u001b]11;rgba:1a/2b/3c\u0007"],"result":{"r":26,"g":43,"b":60}}
+{"note":"osc11-malformed-channel","fn":"parseOsc11BackgroundColor","args":["\u001b]11;rgb:zz/2b/3c\u0007"],"result":null}
+{"note":"osc11-missing-terminator","fn":"parseOsc11BackgroundColor","args":["\u001b]11;#1a2b3c"],"result":null}
+{"note":"osc11-not-a-response","fn":"isOsc11BackgroundColorResponse","args":["hello"],"result":false}
+{"note":"osc11-is-response-bel","fn":"isOsc11BackgroundColorResponse","args":["\u001b]11;#1a2b3c\u0007"],"result":true}
+{"note":"osc11-is-response-st","fn":"isOsc11BackgroundColorResponse","args":["\u001b]11;#1a2b3c\u001b\\"],"result":true}
+{"note":"color-scheme-dark","fn":"parseTerminalColorSchemeReport","args":["\u001b[?997;1n"],"result":"dark"}
+{"note":"color-scheme-light","fn":"parseTerminalColorSchemeReport","args":["\u001b[?997;2n"],"result":"light"}
+{"note":"color-scheme-non-matching","fn":"parseTerminalColorSchemeReport","args":["\u001b[?997;3n"],"result":null}
+{"note":"color-scheme-garbage","fn":"parseTerminalColorSchemeReport","args":["not-a-sequence"],"result":null}
