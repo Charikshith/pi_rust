@@ -10,7 +10,7 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 ## Current State
 
-**Last Updated:** 2026-08-17
+**Last Updated:** 2026-08-18 (session close)
 **Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-4 of 8
 done: utils.rs, keys.rs, stdin_buffer.rs, kill_ring.rs, undo_stack.rs,
 word_navigation.rs, keybindings.rs, fuzzy.rs, terminal_colors.rs, terminal_image.rs,
@@ -427,6 +427,8 @@ rebuilt and re-verified clean afterward.
 - [ ] Generated model catalog JSON was absent in checkout (build-time/git-ignored) — must port generator or obtain output (feat-008).
 - [ ] UTF-16 offset semantics (editor + compaction cut points) — fidelity hazard; needs golden tests. **Confirmed NOT an issue for feat-006 Wave 1** (utils.rs operates on visible-column offsets throughout, never UTF-16 code units) — will be the central hazard in Wave 6 (editor.rs).
 - [ ] feat-006 Wave 1's three documented approximation gaps above (RGI_Emoji, Default_Ignorable, cjkBreakRegex) — safe/non-blocking, but worth a follow-up diff against the real Unicode emoji-sequences data if a suitable crate appears later.
+- [ ] feat-006 Wave 4's timer-dependent residuals — `StdinBuffer`'s idle-flush and 150ms Kitty-negotiation fragment timeout, `queryTerminalBackgroundColor`/`queryTerminalColorScheme`'s timeout-then-`None` half, and `crossterm::terminal::size()` polling instead of native `SIGWINCH` — all need a real owned event loop, which doesn't exist until `feat-007` wires `pirust-tui` into the interactive binary. Not blocking Wave 5 (components) or Wave 6 (editor).
+- [ ] feat-006 Wave 4's Wave-7 stubs (`enableWindowsVTInput`, macOS native-modifier probe) — fail-closed today, exactly matching non-Windows/non-macOS TS behavior; real FFI is `win_console.rs`/`native_modifiers.rs`'s job.
 
 ## Decisions Made
 
@@ -452,3 +454,26 @@ rebuilt and re-verified clean afterward.
 The whole port is P0–P9 (feature_list.json). P0 landed. Before feat-001, get the user
 to settle the extension strategy — it materially changes the coding-agent architecture.
 Read `docs/analysis/00-overview.md` first each session; it routes to per-package detail.
+
+## Session Close — 2026-08-18
+
+`./init.sh` green (0 failed, 2 pre-existing unrelated ignored tests), `cargo fmt
+--check`/`cargo clippy --all-targets -- -D warnings` clean, `git status` clean —
+repo is immediately restartable.
+
+**This session's commits** (all local, none pushed — `master` is 6 commits ahead
+of `origin/master`; push only if/when asked):
+- `9733baf`, `3d9faf3` — feat-005 Waves 4-6 (headless `pirust` binary — DONE)
+- `7bcfed1`, `1c2aa28`, `67f38dc`, `e1edbb4` — feat-006 (`pirust-tui`) Waves 1-4
+
+**feat-006 status**: `in-progress`, Waves 1-4 of 8 done (utils, keys/stdin_buffer,
+kill_ring/undo_stack/word_navigation/keybindings/fuzzy, terminal_colors/
+terminal_image/terminal/tui). `plan.md` has the full remaining wave breakdown and
+per-wave evidence; do not delete it until feat-006 reaches `done`.
+
+**Next session starts with**: feat-006 Wave 5 (`components/` — `Box`, `Text`,
+`TruncatedText`, `Spacer`, `Loader`/`CancellableLoader`, `Input`, `SelectList`,
+`SettingsList`, `Image`, `editor_component.rs`). These are mostly pure
+`render(width) -> Vec<String>` producers using Wave 1's `utils.rs` — should be
+lighter than Wave 4. Cadence stays checkpoint-per-phase (one wave, verify, report,
+pause) per the user's locked decision.
