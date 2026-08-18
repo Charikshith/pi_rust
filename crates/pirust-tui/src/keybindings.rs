@@ -55,6 +55,8 @@ use crate::keys::matches_key;
 pub enum Keybinding {
     EditorCursorUp,
     EditorCursorDown,
+    EditorHistoryPrevious,
+    EditorHistoryNext,
     EditorCursorLeft,
     EditorCursorRight,
     EditorCursorWordLeft,
@@ -84,6 +86,20 @@ pub enum Keybinding {
     SelectPageDown,
     SelectConfirm,
     SelectCancel,
+    AltScreenPageUp,
+    AltScreenPageDown,
+    AltScreenHalfPageUp,
+    AltScreenHalfPageDown,
+    AltScreenLineUp,
+    AltScreenLineDown,
+    AltScreenPreviousPrompt,
+    AltScreenNextPrompt,
+    AltScreenSearch,
+    AltScreenSearchNext,
+    AltScreenSearchPrevious,
+    AltScreenSearchClose,
+    AltScreenTop,
+    AltScreenBottom,
 }
 
 impl Keybinding {
@@ -92,6 +108,8 @@ impl Keybinding {
     pub const ALL: &'static [Keybinding] = &[
         Keybinding::EditorCursorUp,
         Keybinding::EditorCursorDown,
+        Keybinding::EditorHistoryPrevious,
+        Keybinding::EditorHistoryNext,
         Keybinding::EditorCursorLeft,
         Keybinding::EditorCursorRight,
         Keybinding::EditorCursorWordLeft,
@@ -121,6 +139,20 @@ impl Keybinding {
         Keybinding::SelectPageDown,
         Keybinding::SelectConfirm,
         Keybinding::SelectCancel,
+        Keybinding::AltScreenPageUp,
+        Keybinding::AltScreenPageDown,
+        Keybinding::AltScreenHalfPageUp,
+        Keybinding::AltScreenHalfPageDown,
+        Keybinding::AltScreenLineUp,
+        Keybinding::AltScreenLineDown,
+        Keybinding::AltScreenPreviousPrompt,
+        Keybinding::AltScreenNextPrompt,
+        Keybinding::AltScreenSearch,
+        Keybinding::AltScreenSearchNext,
+        Keybinding::AltScreenSearchPrevious,
+        Keybinding::AltScreenSearchClose,
+        Keybinding::AltScreenTop,
+        Keybinding::AltScreenBottom,
     ];
 
     /// The TS string id (e.g. `"tui.editor.cursorUp"`).
@@ -128,6 +160,8 @@ impl Keybinding {
         match self {
             Keybinding::EditorCursorUp => "tui.editor.cursorUp",
             Keybinding::EditorCursorDown => "tui.editor.cursorDown",
+            Keybinding::EditorHistoryPrevious => "tui.editor.historyPrevious",
+            Keybinding::EditorHistoryNext => "tui.editor.historyNext",
             Keybinding::EditorCursorLeft => "tui.editor.cursorLeft",
             Keybinding::EditorCursorRight => "tui.editor.cursorRight",
             Keybinding::EditorCursorWordLeft => "tui.editor.cursorWordLeft",
@@ -157,6 +191,20 @@ impl Keybinding {
             Keybinding::SelectPageDown => "tui.select.pageDown",
             Keybinding::SelectConfirm => "tui.select.confirm",
             Keybinding::SelectCancel => "tui.select.cancel",
+            Keybinding::AltScreenPageUp => "tui.altScreen.pageUp",
+            Keybinding::AltScreenPageDown => "tui.altScreen.pageDown",
+            Keybinding::AltScreenHalfPageUp => "tui.altScreen.halfPageUp",
+            Keybinding::AltScreenHalfPageDown => "tui.altScreen.halfPageDown",
+            Keybinding::AltScreenLineUp => "tui.altScreen.lineUp",
+            Keybinding::AltScreenLineDown => "tui.altScreen.lineDown",
+            Keybinding::AltScreenPreviousPrompt => "tui.altScreen.previousPrompt",
+            Keybinding::AltScreenNextPrompt => "tui.altScreen.nextPrompt",
+            Keybinding::AltScreenSearch => "tui.altScreen.search",
+            Keybinding::AltScreenSearchNext => "tui.altScreen.searchNext",
+            Keybinding::AltScreenSearchPrevious => "tui.altScreen.searchPrevious",
+            Keybinding::AltScreenSearchClose => "tui.altScreen.searchClose",
+            Keybinding::AltScreenTop => "tui.altScreen.top",
+            Keybinding::AltScreenBottom => "tui.altScreen.bottom",
         }
     }
 
@@ -171,6 +219,8 @@ impl Keybinding {
         let (default_keys, description): (&'static [&'static str], &'static str) = match self {
             Keybinding::EditorCursorUp => (&["up"], "Move cursor up"),
             Keybinding::EditorCursorDown => (&["down"], "Move cursor down"),
+            Keybinding::EditorHistoryPrevious => (&[], "Select previous prompt history entry"),
+            Keybinding::EditorHistoryNext => (&[], "Select next prompt history entry"),
             Keybinding::EditorCursorLeft => (&["left", "ctrl+b"], "Move cursor left"),
             Keybinding::EditorCursorRight => (&["right", "ctrl+f"], "Move cursor right"),
             Keybinding::EditorCursorWordLeft => {
@@ -180,12 +230,14 @@ impl Keybinding {
                 &["alt+right", "ctrl+right", "alt+f"],
                 "Move cursor word right",
             ),
-            Keybinding::EditorCursorLineStart => (&["home", "ctrl+a"], "Move to line start"),
-            Keybinding::EditorCursorLineEnd => (&["end", "ctrl+e"], "Move to line end"),
+            Keybinding::EditorCursorLineStart => {
+                (&["home", "ctrl+home", "ctrl+a"], "Move to line start")
+            }
+            Keybinding::EditorCursorLineEnd => (&["end", "ctrl+end", "ctrl+e"], "Move to line end"),
             Keybinding::EditorJumpForward => (&["ctrl+]"], "Jump forward to character"),
             Keybinding::EditorJumpBackward => (&["ctrl+alt+]"], "Jump backward to character"),
-            Keybinding::EditorPageUp => (&["pageUp"], "Page up"),
-            Keybinding::EditorPageDown => (&["pageDown"], "Page down"),
+            Keybinding::EditorPageUp => (&["pageUp", "ctrl+pageUp"], "Page up"),
+            Keybinding::EditorPageDown => (&["pageDown", "ctrl+pageDown"], "Page down"),
             Keybinding::EditorDeleteCharBackward => (&["backspace"], "Delete character backward"),
             Keybinding::EditorDeleteCharForward => {
                 (&["delete", "ctrl+d"], "Delete character forward")
@@ -211,6 +263,29 @@ impl Keybinding {
             Keybinding::SelectPageDown => (&["pageDown"], "Selection page down"),
             Keybinding::SelectConfirm => (&["enter"], "Confirm selection"),
             Keybinding::SelectCancel => (&["escape", "ctrl+c"], "Cancel selection"),
+            Keybinding::AltScreenPageUp => (&["pageUp"], "Scroll viewport up one page"),
+            Keybinding::AltScreenPageDown => (&["pageDown"], "Scroll viewport down one page"),
+            Keybinding::AltScreenHalfPageUp => (&[], "Scroll viewport up half a page"),
+            Keybinding::AltScreenHalfPageDown => (&[], "Scroll viewport down half a page"),
+            Keybinding::AltScreenLineUp => (&[], "Scroll viewport up one line"),
+            Keybinding::AltScreenLineDown => (&[], "Scroll viewport down one line"),
+            Keybinding::AltScreenPreviousPrompt => {
+                (&["ctrl+shift+up"], "Jump to previous semantic prompt")
+            }
+            Keybinding::AltScreenNextPrompt => {
+                (&["ctrl+shift+down"], "Jump to next semantic prompt")
+            }
+            Keybinding::AltScreenSearch => (&["ctrl+shift+f"], "Search the primary scroll view"),
+            Keybinding::AltScreenSearchNext => {
+                (&["enter", "ctrl+g"], "Select the next search match")
+            }
+            Keybinding::AltScreenSearchPrevious => (
+                &["shift+enter", "ctrl+shift+g"],
+                "Select the previous search match",
+            ),
+            Keybinding::AltScreenSearchClose => (&["escape"], "Close transcript search"),
+            Keybinding::AltScreenTop => (&["home"], "Scroll viewport to top"),
+            Keybinding::AltScreenBottom => (&["end"], "Scroll viewport to bottom"),
         };
         KeybindingDefinition {
             default_keys,

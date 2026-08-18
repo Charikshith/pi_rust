@@ -153,6 +153,36 @@ source, standalone.
       TUI/Terminal/Component/etc. added by the coordinator after independent
       verification (fork's lib.rs diff had left them out).
 - [ ] Wave 5 — components/
-- [ ] Wave 6 — editor.rs
+- [x] Wave 6 — editor.rs
+  **(ORACLE RE-ESTABLISHED — this session):** the `../pi` sibling checkout is now
+  at `D:\Code\AI\Agents\pi` (user-provided, `npm install` ran). The oracle script
+  was fixed for two upstream drifts: `TUI`→`TuiBase`/`TuiMainScreen` class rename
+  (concrete main-screen TUI) and regenerated fixtures (`keybindings` gained
+  `tui.editor.historyPrevious/Next` + 9 `tui.altScreen.*` + `ctrl+home/end` +
+  `ctrl+pageUp/Down`; `terminal-image` `encodeITerm2` emits `size=`,
+  `renderImage` returns `columns`, unknown terminals default `trueColor:true`).
+  Rust `keybindings.rs` + `terminal_image.rs` updated to match; both goldens green.
+  Editor port plan: `editor.rs` mirrors `components/editor.ts` (2,333 TS lines,
+  61 methods): state (`lines/cursorLine/cursorCol`), `render(width)` incl.
+  `layoutText`/visual-line map + `buildVisualLineMap`/`findCurrentVisualLine`,
+  `handleInput` key dispatch via `getKeybindings()`, paste-marker segmentation
+  (`segmentWithMarkers` + `PASTE_MARKER_REGEX`), kill-ring/undo/history, char-jump,
+  autocomplete integration (embedded `SelectList`). UTF-16 code-unit cursor math is
+  the central hazard — reuse `word_navigation.rs`'s UTF-16 offsets. Oracle:
+  new `editor` section in `scripts/gen-tui-oracle.mjs` driving real Pi `Editor`
+  against a fake `TUI` (same pattern as `Input`), `tests/editor_golden.rs`.
+
+  **DONE:** `crates/pirust-tui/src/editor.rs` (2,562 lines incl. docs vs 2,333 TS)
+  — full literal port. 25-case oracle (`editor.cases.jsonl`, 18,410 bytes) green
+  on first full run after fixing the bracketed-paste recursion hang (the TS
+  *falls through* into the `isInPaste` block with the stripped data rather than
+  recursing). New `tests/editor_golden.rs` (25 cases: typing, grapheme backspace
+  incl. astral-plane, kill-ring/yank, undo, history, word-wrap layout,
+  paste-markers + large-paste marker creation/expansion, char-jump, scroll
+  indicators, padding). Exposed `utils::is_cjk_break_char` (editor's
+  `wordWrapLine` needs it) + `TUI::terminal_rows()` accessor. Synchronous
+  autocomplete (debounce timer + AbortController elided — caller-owns-the-timer,
+  documented). All 118 pirust-tui tests green, clippy/fmt clean, oracle fresh.
+
 - [ ] Wave 7 — autocomplete/terminal_colors/terminal_image/native_modifiers/win_console/markdown
 - [ ] Wave 8 — lib.rs re-exports + integration smoke test + evidence

@@ -8,6 +8,7 @@
 
 pub mod autocomplete;
 pub mod components;
+pub mod editor;
 pub mod editor_component;
 pub mod fuzzy;
 pub mod keybindings;
@@ -58,7 +59,10 @@ pub use tui::{
     OverlayMarginValue, OverlayOptions, OverlayUnfocusOptions, SharedComponent, SizeValue,
     CURSOR_MARKER, TUI,
 };
-pub use utils::{slice_by_column, truncate_to_width, visible_width, wrap_text_with_ansi};
+pub use utils::{
+    is_cjk_break_char, is_whitespace_char, slice_by_column, truncate_to_width, visible_width,
+    wrap_text_with_ansi,
+};
 
 /// Returns the crate name — placeholder until the renderer (feat-006) lands.
 pub fn name() -> &'static str {

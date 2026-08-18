@@ -71,7 +71,12 @@ fn every_select_list_record_matches_pi() {
         let ops = record["ops"].as_array().unwrap();
         let expected_events = record["events"].as_array().unwrap();
 
-        let mut list = SelectList::new(items, max_visible, identity_theme(), SelectListLayoutOptions::default());
+        let mut list = SelectList::new(
+            items,
+            max_visible,
+            identity_theme(),
+            SelectListLayoutOptions::default(),
+        );
 
         for (op, expected) in ops.iter().zip(expected_events.iter()) {
             match op["op"].as_str().unwrap() {

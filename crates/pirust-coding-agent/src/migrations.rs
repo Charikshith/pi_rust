@@ -647,7 +647,7 @@ fn migrate_commands_to_prompts(
     let commands_dir = join(env, base_dir, COMMANDS_DIR_NAME);
     let prompts_dir = join(env, base_dir, PROMPTS_DIR_NAME);
 
-    if !(exists(&commands_dir) && !exists(&prompts_dir)) {
+    if !exists(&commands_dir) || exists(&prompts_dir) {
         return false;
     }
     match fs::rename(&commands_dir, &prompts_dir) {

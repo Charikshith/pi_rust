@@ -102,7 +102,12 @@ const { parseKeyboardProtocolNegotiationSequence, normalizeAppleTerminalInput } 
 );
 
 const tuiPath = join(TUI_SRC, "tui.ts");
-const { TUI, Container } = await import(pathToFileURL(tuiPath).href);
+const mainScreenPath = join(TUI_SRC, "tui-main-screen.ts");
+// Upstream Pi renamed the class `TuiBase` and made it abstract (older Pi exported
+// the concrete `TUI` from tui.ts). The Wave-4 fixture was captured against the
+// concrete main-screen TUI — import that so `new TUI(terminal, false)` (and the
+// abstract `doRender`) resolves.
+const { TuiMainScreen: TUI, Container } = await import(pathToFileURL(mainScreenPath).href);
 
 // feat-006 Wave 5 components
 const COMPONENTS_SRC = join(TUI_SRC, "components");
@@ -111,6 +116,7 @@ const { TruncatedText } = await import(pathToFileURL(join(COMPONENTS_SRC, "trunc
 const { Spacer } = await import(pathToFileURL(join(COMPONENTS_SRC, "spacer.ts")).href);
 const { SelectList } = await import(pathToFileURL(join(COMPONENTS_SRC, "select-list.ts")).href);
 const { Input } = await import(pathToFileURL(join(COMPONENTS_SRC, "input.ts")).href);
+const { Editor } = await import(pathToFileURL(join(COMPONENTS_SRC, "editor.ts")).href);
 
 const bgFn = (text) => `<bg>${text}</bg>`;
 
@@ -1399,6 +1405,157 @@ ip("render_scrolls_when_value_exceeds_width", [{ op: "setValue", value: "this is
 ip("render_shows_hardware_cursor_marker_when_focused", [{ op: "setValue", value: "hi" }]);
 
 // ---------------------------------------------------------------------------
+// EDITOR (feat-006 Wave 6) — real Pi `Editor` driven against a fake `TUI`.
+// The editor needs `tui.terminal.rows` and `tui.requestRender()`; we reuse the
+// fake terminal + real `TuiMainScreen` from the tui section.
+// ---------------------------------------------------------------------------
+const EDITOR_OUT_FILE = join(OUT_DIR, "editor.cases.jsonl");
+const editorRecords = [];
+
+// editorCase: build a fresh Editor over a fresh fake TUI, run `ops`, then
+// snapshot render + getText + getCursor.
+async function editorCase(note, ops, width = 40, rows = 24) {
+	const terminal = makeFakeTerminal(width, rows);
+	const tui = new TUI(terminal, false);
+	const editor = new Editor(
+		tui,
+		{ borderColor: (s) => s, selectList: { primary: (s) => s, secondary: (s) => s, selected: (s) => s } },
+		{},
+	);
+	const events = [];
+	editor.onChange = (text) => events.push({ change: text });
+	editor.onSubmit = (text) => events.push({ submit: text });
+	for (const op of ops) {
+		if (op.op === "handleInput") editor.handleInput(op.data);
+		else if (op.op === "setText") editor.setText(op.value);
+		else if (op.op === "addToHistory") editor.addToHistory(op.value);
+		else if (op.op === "setPaddingX") editor.setPaddingX(op.value);
+	}
+	editorRecords.push({
+		note,
+		ops,
+		width,
+		rows,
+		render: editor.render(width),
+		text: editor.getText(),
+		cursor: editor.getCursor(),
+		events,
+	});
+}
+
+// Core typing / editing
+await editorCase("typing_appends", [{ op: "handleInput", data: "h" }, { op: "handleInput", data: "i" }]);
+await editorCase("multiline_typing", [
+	{ op: "handleInput", data: "a" },
+	{ op: "handleInput", data: "\r" },
+	{ op: "handleInput", data: "b" },
+]);
+await editorCase("backspace_removes_grapheme", [
+	{ op: "setText", value: "a😀b" },
+	{ op: "handleInput", data: "\x7f" },
+]);
+await editorCase("backspace_merges_lines", [
+	{ op: "setText", value: "ab\ncd" },
+	{ op: "handleInput", data: "\x01" }, // ctrl+a -> start
+	{ op: "handleInput", data: "\x1b[B" }, // down
+	{ op: "handleInput", data: "\x7f" }, // backspace (merge)
+]);
+await editorCase("ctrl_a_e_line_edges", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x01" }, // ctrl+a
+	{ op: "handleInput", data: "\x05" }, // ctrl+e
+]);
+await editorCase("ctrl_u_kills_to_line_start", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x01" },
+	{ op: "handleInput", data: "\x15" }, // ctrl+u
+]);
+await editorCase("ctrl_k_kills_to_line_end", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x05" }, // ctrl+e
+	{ op: "handleInput", data: "\x0b" }, // ctrl+k
+]);
+await editorCase("undo_after_typing", [
+	{ op: "handleInput", data: "a" },
+	{ op: "handleInput", data: "b" },
+	{ op: "handleInput", data: "\x1f" }, // ctrl+-
+]);
+await editorCase("undo_after_delete", [
+	{ op: "setText", value: "hello" },
+	{ op: "handleInput", data: "\x7f" },
+	{ op: "handleInput", data: "\x1f" }, // ctrl+-
+]);
+await editorCase("word_navigation", [
+	{ op: "setText", value: "hello world foo" },
+	{ op: "handleInput", data: "\x1bb" }, // alt+b
+	{ op: "handleInput", data: "\x1bf" }, // alt+f
+]);
+await editorCase("delete_word_backward", [
+	{ op: "setText", value: "hello world foo" },
+	{ op: "handleInput", data: "\x17" }, // ctrl+w
+]);
+await editorCase("delete_word_forward", [
+	{ op: "setText", value: "hello world foo" },
+	{ op: "handleInput", data: "\x01" }, // ctrl+a (start)
+	{ op: "handleInput", data: "\x1bd" }, // alt+d
+]);
+await editorCase("yank_after_kill", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x01" },
+	{ op: "handleInput", data: "\x0b" }, // ctrl+k
+	{ op: "handleInput", data: "\x19" }, // ctrl+y
+]);
+await editorCase("submit_clears_and_fires", [
+	{ op: "setText", value: "hello" },
+	{ op: "handleInput", data: "\r" },
+]);
+await editorCase("history_navigation", [
+	{ op: "addToHistory", value: "first prompt" },
+	{ op: "addToHistory", value: "second prompt" },
+	{ op: "handleInput", data: "\x1b[A" }, // up
+	{ op: "handleInput", data: "\x1b[A" }, // up
+]);
+await editorCase("wrapping_long_line", [
+	{ op: "setText", value: "this is a very long line that should wrap across multiple visual lines for sure" },
+], 30, 24);
+await editorCase("cursor_moves_across_wrapped_lines", [
+	{ op: "setText", value: "this is a very long line that should wrap across multiple visual lines for sure" },
+	{ op: "handleInput", data: "\x1b[B" }, // down
+], 30, 24);
+await editorCase("paste_small_single_line", [
+	{ op: "handleInput", data: "\x1b[200~hello world\x1b[201~" },
+]);
+await editorCase("paste_multiline", [
+	{ op: "handleInput", data: "\x1b[200~line1\nline2\nline3\x1b[201~" },
+]);
+await editorCase("large_paste_creates_marker", [
+	{ op: "handleInput", data: "\x1b[200~" + "x".repeat(1100) + "\x1b[201~" },
+]);
+await editorCase("large_paste_marker_expands_on_submit", [
+	{ op: "handleInput", data: "\x1b[200~" + "y".repeat(1100) + "\x1b[201~" },
+	{ op: "handleInput", data: "\r" },
+]);
+await editorCase("jump_mode_forward", [
+	{ op: "setText", value: "abc abc abc" },
+	{ op: "handleInput", data: "\x1d]" }, // ctrl+]
+	{ op: "handleInput", data: "b" },
+]);
+await editorCase("jump_mode_backward", [
+	{ op: "setText", value: "abc abc abc" },
+	{ op: "handleInput", data: "\x05" }, // ctrl+e (end)
+	{ op: "handleInput", data: "\x1d\x1d]" }, // ctrl+alt+] -> backward jump
+	{ op: "handleInput", data: "a" },
+]);
+await editorCase("render_scroll_indicator", [
+	{ op: "setText", value: "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8" },
+], 40, 8);
+await editorCase("padding_x_affects_layout", [
+	{ op: "setPaddingX", value: 3 },
+	{ op: "setText", value: "hi" },
+], 20, 10);
+
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 mkdirSync(OUT_DIR, { recursive: true });
@@ -1435,6 +1592,7 @@ drift += writeFixture(TRUNCATED_TEXT_OUT_FILE, truncatedTextRecords, "truncated-
 drift += writeFixture(SPACER_OUT_FILE, spacerRecords, "spacer.cases.jsonl");
 drift += writeFixture(SELECT_LIST_OUT_FILE, selectListRecords, "select-list.cases.jsonl");
 drift += writeFixture(INPUT_OUT_FILE, inputRecords, "input.cases.jsonl");
+drift += writeFixture(EDITOR_OUT_FILE, editorRecords, "editor.cases.jsonl");
 
 if (CHECK && drift > 0) {
 	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");

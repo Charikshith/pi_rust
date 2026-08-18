@@ -80,7 +80,10 @@ pub fn is_punctuation_char(ch: &str) -> bool {
 
 /// `cjkBreakRegex` (utils.ts:48-49) approximated via Unicode block ranges for
 /// Han / Hiragana / Katakana / Hangul / Bopomofo. See module docs for the gap.
-fn is_cjk_break_char(c: char) -> bool {
+/// `cjkBreakRegex` (utils.ts) — block-range approximation. Public so
+/// `editor.rs`'s `wordWrapLine` can reuse it (the TS `cjkBreakRegex.test`
+/// on a single grapheme maps to `any(is_cjk_break_char)`).
+pub fn is_cjk_break_char(c: char) -> bool {
     matches!(c as u32,
         0x4e00..=0x9fff | 0x3400..=0x4dbf | 0xf900..=0xfaff | 0x20000..=0x2fa1f
         | 0x3041..=0x3096 | 0x309d..=0x309f

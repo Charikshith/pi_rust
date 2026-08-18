@@ -429,6 +429,8 @@ rebuilt and re-verified clean afterward.
 - [ ] feat-006 Wave 1's three documented approximation gaps above (RGI_Emoji, Default_Ignorable, cjkBreakRegex) — safe/non-blocking, but worth a follow-up diff against the real Unicode emoji-sequences data if a suitable crate appears later.
 - [ ] feat-006 Wave 4's timer-dependent residuals — `StdinBuffer`'s idle-flush and 150ms Kitty-negotiation fragment timeout, `queryTerminalBackgroundColor`/`queryTerminalColorScheme`'s timeout-then-`None` half, and `crossterm::terminal::size()` polling instead of native `SIGWINCH` — all need a real owned event loop, which doesn't exist until `feat-007` wires `pirust-tui` into the interactive binary. Not blocking Wave 5 (components) or Wave 6 (editor).
 - [ ] feat-006 Wave 4's Wave-7 stubs (`enableWindowsVTInput`, macOS native-modifier probe) — fail-closed today, exactly matching non-Windows/non-macOS TS behavior; real FFI is `win_console.rs`/`native_modifiers.rs`'s job.
+- [ ] **Environment pollution on this host (NOT port bugs): 3 pirust-tools `find` tests fail** (`fd_argv_matches_the_ts_order`, `no_require_git_is_dropped_inside_a_repo`, `git_ancestor_walk_finds_a_dot_git_above_the_search_path`). Root cause: Pi's `find.ts:230-239` ancestor walk finds ANY `.git` above the search path, and this machine has a real git repo at `C:\Users\Chakri` (created 2026-06-28), so every tempdir under `AppData\Local\Temp` inherits it. The port is faithful; the tests' "a tempdir has no `.git` ancestor" premise is false here. They were already failing on Aug 18 (the session-close note claiming 0 failed was inaccurate). Not fixing in feat-006's diff per editing discipline — flagged for whoever works on pirust-tools next.
+- [ ] **Windows `Instant` underflow (FIXED 2026-08-18)**: `TUI::new` seeded `last_render_at: Instant::now() - Duration::from_secs(3600)` (mirroring TS `Date.now() - 3600_000`), which panics with "overflow when subtracting duration from instant" on Windows' boot-time-based counter — `tui_golden.rs` failed deterministically. Fixed to `Instant::now()`: the force path bypasses the throttle via `force_pending`, and every non-force first render in the oracle corpus waits past the 16ms interval anyway. This was also failing on Aug 18.
 
 ## Decisions Made
 
@@ -455,7 +457,88 @@ The whole port is P0–P9 (feature_list.json). P0 landed. Before feat-001, get t
 to settle the extension strategy — it materially changes the coding-agent architecture.
 Read `docs/analysis/00-overview.md` first each session; it routes to per-package detail.
 
-## Session Close — 2026-08-18
+## Session Close — 2026-08-18 (analysis + 2 fixes)
+
+**WAVE 6 (editor.rs) DONE — the TUI library is now complete.** This session:
+1. Re-established the oracle: user provided `D:\Code\AI\Agents\pi` (the real Pi
+   checkout, `npm install` ran). Fixed `gen-tui-oracle.mjs` for two upstream
+   drifts (`TUI`→`TuiBase`/`TuiMainScreen` class rename; regenerated
+   `keybindings` + `terminal-image` fixtures with new bindings/`size=`/`columns`/
+   `trueColor` default). Updated Rust `keybindings.rs` (+13 variants incl.
+   `historyPrevious/Next`, 9 `altScreen.*`) and `terminal_image.rs` to match.
+2. Ported `crates/pirust-tui/src/editor.rs` (2,562 lines vs 2,333 TS) — the
+   crown-jewel line editor. 25-case oracle green (typing, grapheme backspace,
+   kill/yank, undo, history, word-wrap layout, paste markers, char-jump, scroll,
+   padding). One real hang fixed: bracketed-paste handling must *fall through*
+   into the `isInPaste` block (TS does not recurse after stripping `\x1b[200~`).
+3. Exposed `utils::is_cjk_break_char` + `TUI::terminal_rows()`; editor implements
+   `Component`+`Focusable`+`EditorComponent`.
+
+**Verified**: 118/118 pirust-tui tests (incl. new `editor_golden.rs`), clippy/fmt
+clean, oracle `--check` fresh, workspace green except the 3 pre-existing
+environment-polluted pirust-tools `find` tests (C:\Users\Chakri git repo —
+unchanged, still flagged). `pirust -p` against local Qwen still works.
+
+**Remaining for feat-006**: Wave 7 (`native_modifiers.rs` FFI stubs,
+`win_console.rs`, `markdown.rs` via pulldown-cmark) + Wave 8 (lib.rs re-exports +
+integration smoke test + evidence). Then feat-007 wires it into interactive
+`pirust`.
+
+**Live test against a local model — PIRUST IS WORKING END-TO-END** (this session):
+configured `~/.pirust/agent/models.json` + `auth.json` to point the anthropic
+adapter at a local `llama-server` (Qwen3.5-0.8B-Q8_0.gguf, http://127.0.0.1:8080,
+Anthropic-Messages-compatible `/v1/messages`). Verified:
+- `pirust -p "..." --model anthropic/Qwen3.5-0.8B-Q8_0.gguf` → real assistant reply (text mode)
+- `--mode json` → full streaming event vocabulary (`session`/`turn_start`/`message_*`/
+  `thinking_delta` chunks/`turn_end`/`agent_end`/`agent_settled`), cost accounting,
+  `responseId` — the Wave-6 agent_settled parity holds
+- **Tools**: agent wrote `hello.txt`, read it back, answered (2 toolCall entries in
+  session JSONL: `write` + `read`); bash tool returned output correctly
+- Session JSONL persisted under the encoded-cwd dir, v3 format, correct tree
+  parentIds — matches Pi's format
+
+Config recipe (reproducible):
+```
+~/.pirust/agent/models.json:
+{ "providers": { "anthropic": {
+    "baseUrl": "http://127.0.0.1:8080", "apiKey": "local-test-key",
+    "models": [ { "id": "Qwen3.5-0.8B-Q8_0.gguf", "name": "...", "api": "anthropic" } ] } } }
+~/.pirust/agent/auth.json:
+{ "anthropic": { "type": "api_key", "key": "local-test-key" } }
+```
+NOTE: the sdk builds the stream key from stored credentials/auth.json or
+`ANTHROPIC_API_KEY` env — NOT from models.json's apiKey (which only feeds model
+resolution). That's why auth.json was needed.
+
+
+`cargo fmt --check`/`cargo clippy --all-targets -- -D warnings` clean, `cargo build`
+clean, `cargo test --workspace` green EXCEPT the 3 pre-existing
+environment-polluted pirust-tools `find` tests (see Blockers). All 16 pirust-tui
+test binaries (102 unit + 15 golden suites incl. input/select-list/text/spacer/
+truncated-text) green.
+
+**This session**: analysis of the harness found the repo mid-feat-006 (Waves 1-5
+of 8 done, `autocomplete.rs` + `components/` committed but unverified, Wave 5
+partially wired). Two real bugs found + fixed:
+
+1. `tui.rs` Windows `Instant` underflow — `tui_golden.rs` failed deterministically
+   (see Blockers).
+2. `clippy -D warnings` was broken by two `nonminimal_bool` lints in the
+   unverified commits (`autocomplete.rs:982`, `migrations.rs:650`) — simplified
+   both, clippy clean again. (These were also uncommitted-regression-masking:
+   the Aug 18 close note said clippy clean, but the latest commits had broken it.)
+
+**Not touched** (out of feat-006 scope, per editing discipline): the 3 find tests
+above — flagged for the pirust-tools owner.
+
+**Oracle note**: `../pi` sibling checkout is NOT present on this machine, so
+`scripts/gen-*.mjs` cannot regenerate fixtures; committed goldens are the gate
+(passing). `tui_golden.rs`'s 7 cases are the render-engine oracle.
+
+**Next session starts with**: feat-006 Wave 6 (`editor.rs`, the 2333-line line
+editor) — the UTF-16 code-unit cursor arithmetic hazard named in `plan.md`;
+`word_navigation.rs` already uses UTF-16 offsets, so the editor can reuse it.
+Cadence stays checkpoint-per-phase.
 
 `./init.sh` green (0 failed, 2 pre-existing unrelated ignored tests), `cargo fmt
 --check`/`cargo clippy --all-targets -- -D warnings` clean, `git status` clean —
