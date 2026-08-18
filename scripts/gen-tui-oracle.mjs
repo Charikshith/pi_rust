@@ -117,6 +117,7 @@ const { Spacer } = await import(pathToFileURL(join(COMPONENTS_SRC, "spacer.ts"))
 const { SelectList } = await import(pathToFileURL(join(COMPONENTS_SRC, "select-list.ts")).href);
 const { Input } = await import(pathToFileURL(join(COMPONENTS_SRC, "input.ts")).href);
 const { Editor } = await import(pathToFileURL(join(COMPONENTS_SRC, "editor.ts")).href);
+const { Markdown } = await import(pathToFileURL(join(COMPONENTS_SRC, "markdown.ts")).href);
 
 const bgFn = (text) => `<bg>${text}</bg>`;
 
@@ -1556,6 +1557,86 @@ await editorCase("padding_x_affects_layout", [
 
 
 // ---------------------------------------------------------------------------
+// Markdown — drive the real Pi `Markdown` component with a deterministic
+// fake theme (fixed ANSI codes, not chalk) and capture render() output.
+// ---------------------------------------------------------------------------
+const MARKDOWN_OUT_FILE = join(OUT_DIR, "markdown.cases.jsonl");
+const markdownRecords = [];
+
+// Deterministic fake theme: each fn wraps text in a distinct SGR sequence so
+// the oracle is byte-stable across machines (chalk emits terminal-dependent
+// codes).
+const mdTheme = {
+	heading: (t) => `\x1b[1;36m${t}\x1b[0m`,
+	link: (t) => `\x1b[34m${t}\x1b[0m`,
+	linkUrl: (t) => `\x1b[2m${t}\x1b[0m`,
+	code: (t) => `\x1b[33m${t}\x1b[0m`,
+	codeBlock: (t) => `\x1b[32m${t}\x1b[0m`,
+	codeBlockBorder: (t) => `\x1b[2m${t}\x1b[0m`,
+	quote: (t) => `\x1b[3m${t}\x1b[0m`,
+	quoteBorder: (t) => `\x1b[2m${t}\x1b[0m`,
+	hr: (t) => `\x1b[2m${t}\x1b[0m`,
+	listBullet: (t) => `\x1b[36m${t}\x1b[0m`,
+	bold: (t) => `\x1b[1m${t}\x1b[0m`,
+	italic: (t) => `\x1b[3m${t}\x1b[0m`,
+	strikethrough: (t) => `\x1b[9m${t}\x1b[0m`,
+	underline: (t) => `\x1b[4m${t}\x1b[0m`,
+};
+
+// markdownCase: render `text` at `width` and record the exact lines.
+function markdownCase(note, text, width = 80, options) {
+	const md = new Markdown(text, 0, 0, mdTheme, undefined, options);
+	markdownRecords.push({
+		note,
+		text,
+		width,
+		options: options ?? null,
+		render: md.render(width),
+	});
+}
+
+markdownCase("heading_and_paragraph", "# Title\n\nSome paragraph text here.\n");
+markdownCase("bold_italic_code", "**bold** and *italic* and `code` and ~~strike~~\n");
+markdownCase("links_no_hyperlink", "[link text](https://example.com)\n");
+markdownCase("simple_list", "- one\n- two\n- three\n");
+markdownCase("nested_list", "- one\n  - a\n  - b\n- two\n");
+markdownCase("ordered_list", "1. first\n2. second\n3. third\n");
+markdownCase("code_block", "```js\nconst x = 1;\nconsole.log(x);\n```\n");
+markdownCase("blockquote", "> quoted line\n> second line\n");
+markdownCase("hr", "---\n");
+markdownCase("table", "| a | b |\n|---| --- |\n| 1 | 2 |\n");
+markdownCase("strikethrough", "~~gone~~ stays\n");
+markdownCase("autolink_email", "<foo@bar.com>\n");
+markdownCase("image_line_skip", "![alt](img.png)\n");
+markdownCase("latex_inline", "The value is $x^2 + 1$.\n");
+markdownCase("wrapped_long", "This is a very long paragraph that should wrap across multiple lines at width 30. It has several words and keeps going.\n", 30);
+markdownCase("padding", "hello\n", 20);
+markdownCase("html_tag", "<div>plain</div>\n");
+markdownCase("task_list", "- [ ] todo\n- [x] done\n");
+markdownCase("trailing_space_paragraph", "para with trailing space  \nnext\n");
+markdownCase("nested_blockquote", "> outer\n> > inner\n");
+markdownCase("list_with_code", "- item\n  ```\n  code\n  ```\n");
+
+
+markdownCase("heading_levels", "## Sub\n### Subsub\n");
+markdownCase("table_align", "| L | C | R |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n");
+markdownCase("table_varying", "| short | longcellcontent |\n|-------|-----------------|\n| a | b |\n", 30);
+markdownCase("table_narrow", "| a | b |\n|---| --- |\n| 1 | 2 |\n", 10);
+markdownCase("br_and_escape", "line1\\nline2 and \\*not emph*\n");
+markdownCase("lazy_blockquote", "> lazy\ncontinuation\n");
+markdownCase("nested_list_ordered", "1. one\n   1. a\n   2. b\n2. two\n");
+markdownCase("loose_list", "- a\n\n- b\n");
+markdownCase("start_numbered_list", "3. three\n4. four\n");
+markdownCase("list_paragraph_code", "- first\n\n  para\n- second\n");
+markdownCase("multiline_code", "\`\`\`python\ndef f():\n    return 1\n\`\`\`\n");
+markdownCase("latex_block_display", "$$\\sum_{i=1}^{n} i$$\n");
+markdownCase("latex_pending_dollar", "The cost is $5 and $10 total.\n");
+markdownCase("heading_no_space_after", "# H1\n");
+markdownCase("code_without_lang", "\`\`\`\nplain code\n\`\`\`\n");
+markdownCase("escape_asterisk", "not \\*emph* here\n");
+markdownCase("autolink_url", "<https://example.com>\n");
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 mkdirSync(OUT_DIR, { recursive: true });
@@ -1593,6 +1674,7 @@ drift += writeFixture(SPACER_OUT_FILE, spacerRecords, "spacer.cases.jsonl");
 drift += writeFixture(SELECT_LIST_OUT_FILE, selectListRecords, "select-list.cases.jsonl");
 drift += writeFixture(INPUT_OUT_FILE, inputRecords, "input.cases.jsonl");
 drift += writeFixture(EDITOR_OUT_FILE, editorRecords, "editor.cases.jsonl");
+drift += writeFixture(MARKDOWN_OUT_FILE, markdownRecords, "markdown.cases.jsonl");
 
 if (CHECK && drift > 0) {
 	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");

@@ -157,8 +157,7 @@ source, standalone.
   **(ORACLE RE-ESTABLISHED — this session):** the `../pi` sibling checkout is now
   at `D:\Code\AI\Agents\pi` (user-provided, `npm install` ran). The oracle script
   was fixed for two upstream drifts: `TUI`→`TuiBase`/`TuiMainScreen` class rename
-  (concrete main-screen TUI) and regenerated fixtures (`keybindings` gained
-  `tui.editor.historyPrevious/Next` + 9 `tui.altScreen.*` + `ctrl+home/end` +
+  (concrete main-screen TUI) and regenerated fixtures (`keybindings` gained  `tui.editor.historyPrevious/Next` + 9 `tui.altScreen.*` + `ctrl+home/end` +
   `ctrl+pageUp/Down`; `terminal-image` `encodeITerm2` emits `size=`,
   `renderImage` returns `columns`, unknown terminals default `trueColor:true`).
   Rust `keybindings.rs` + `terminal_image.rs` updated to match; both goldens green.
@@ -184,5 +183,33 @@ source, standalone.
   autocomplete (debounce timer + AbortController elided — caller-owns-the-timer,
   documented). All 118 pirust-tui tests green, clippy/fmt clean, oracle fresh.
 
-- [ ] Wave 7 — autocomplete/terminal_colors/terminal_image/native_modifiers/win_console/markdown
+- [x] Wave 7 — autocomplete/terminal_colors/terminal_image/native_modifiers/win_console/markdown
+  **DONE this session.** Added 4 new modules to `pirust-tui`:
+  - `native_modifiers.rs` — `isNativeModifierPressed` port with raw FFI
+    (Win32 `GetAsyncKeyState` via user32 / macOS `CGEventSourceFlagsState` via
+    dlsym), fail-closed like the TS's dynamic `require`. Wired into
+    `terminal.rs::forward` (`shouldDetectNativeShiftEnter` now probes Shift on
+    macOS/Win32 exactly like terminal.ts:343).
+  - `win_console.rs` — `enableWindowsVTInput` (Win32 `GetConsoleMode`/
+    `SetConsoleMode` + `ENABLE_VIRTUAL_TERMINAL_INPUT`), fail-closed no-op on
+    other platforms; wired into `ProcessTerminal::start`.
+  - `latex.rs` (1,380 TS lines → ~1,300 Rust) — full `renderLatex` port:
+    symbol tables, `LatexParser` (commands/scripts/fractions/sqrt/envs:
+    matrix/pmatrix/bmatrix/cases/align), layout-node stacking for display
+    math (∑ with limits, stacked fractions). 6 unit tests + oracle cases
+    (`latex_inline`, `latex_block_display`, `latex_pending_dollar`).
+  - `markdown.rs` (1,010 TS lines → ~1,600 Rust) — full `Markdown` component
+    port: hand-rolled marked-equivalent lexer (heading/hr/code-fence/list
+    incl. nested+loose+task/table/blockquote/latexBlock/html/space) + inline
+    lexer (strong/em/del/codespan/link/autolink/escape/br/latex/image) +
+    `renderToken`/`renderInlineTokens`/`renderList`/`renderTable` with exact
+    Pi spacing rules (heading prefix `# `, code-block border+2-space indent,
+    blockquote `│ ` + double-italic reapplication, table border `┌─┬─┐` with
+    width-aware cell wrapping, OSC-8 hyperlinks). 38-case oracle
+    (`markdown.cases.jsonl`) byte-exact; 4 unit tests.
+  - `#![deny(unsafe_code)]` at crate root + `#![allow]` for the two FFI
+    modules (documented, the one deliberate exception to the no-unsafe rule).
+  - lib.rs exposes `latex`, `markdown`, `native_modifiers`, `win_console`.
+  All 129 pirust-tui tests green (118 → 129), clippy/fmt clean, oracle
+  `--check` fresh.
 - [ ] Wave 8 — lib.rs re-exports + integration smoke test + evidence

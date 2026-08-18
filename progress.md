@@ -560,3 +560,36 @@ per-wave evidence; do not delete it until feat-006 reaches `done`.
 `render(width) -> Vec<String>` producers using Wave 1's `utils.rs` — should be
 lighter than Wave 4. Cadence stays checkpoint-per-phase (one wave, verify, report,
 pause) per the user's locked decision.
+
+## Session Close — 2026-08-18 (Wave 7: FFI + latex + markdown)
+
+**Wave 7 (native_modifiers/win_console/latex/markdown) DONE — feat-006 fully
+ported except Wave 8 (lib.rs re-exports + integration smoke + evidence).**
+
+1. **`native_modifiers.rs` + `win_console.rs`** — the two FFI shims the plan
+   promised. Wired the real macOS/Win32 native-modifier probe into
+   `terminal.rs::forward` (Shift+Enter normalization now probes Shift exactly
+   like terminal.ts:343) and `enableWindowsVTInput` into `ProcessTerminal::start`.
+   Both fail-closed on unsupported platforms (TS parity). Crate root changed
+   `#![forbid(unsafe_code)]` → `#![deny(unsafe_code)]` + module-level allow for
+   the two FFI modules (the one deliberate, documented unsafe exception).
+2. **`latex.rs`** — full 1,380-line `renderLatex` port (symbols, parser,
+   display-math layout stacking). Oracle-verified via markdown.cases.jsonl
+   (inline `$x^2+1$`, display `$$\sum_{i=1}^n i$$` stacked ∑, currency guard
+   `$5 and $10`).
+3. **`markdown.rs`** — full `Markdown` component: hand-rolled marked-equiv
+   lexer + exact renderer. 38-case oracle `markdown.cases.jsonl` (new fixture,
+   deterministic fake theme) byte-exact after iterating: trailing-Space drop,
+   loose-list blank semantics, nested-list dedent, paragraph-break on list
+   markers, autolink-vs-html disambiguation (`<foo@bar.com>` autolink,
+   `<div>` html), image → plain alt, table trailing-`|` fix, currency-guard
+   latex. Duplicate-Paragraph list bug (double "one") caught by oracle.
+4. **Oracle**: added `markdown` section to `gen-tui-oracle.mjs` (38 cases).
+   All fixtures fresh on `--check`.
+
+**Verified**: 129/129 pirust-tui tests (was 118), clippy/fmt clean, workspace
+382 passed / 3 failed (the same pre-existing env-polluted find tests).
+
+**Remaining**: Wave 8 (lib.rs re-exports mirroring index.ts + integration smoke
+test + feature_list.json evidence), then feat-007 (wire TUI into interactive
+`pirust`).

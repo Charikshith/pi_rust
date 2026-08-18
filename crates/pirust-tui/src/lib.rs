@@ -4,7 +4,15 @@
 //! `docs/analysis/05-tui.md`. Ported literally (NOT ratatui); `crossterm` is a
 //! thin syscall shim only. Renderer + editor land in feat-006.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+// FFI shims (Wave 7): `native_modifiers.rs` (macOS CGEventFlags / Win32
+// GetAsyncKeyState) and `win_console.rs` (Win32 console mode) need raw
+// extern calls the TS makes through dynamic `require` of a .node addon.
+// The unsafe is tightly scoped, cfg-gated, and fail-closed (see each
+// module's docs) — the one deliberate, documented exception to the crate's
+// no-unsafe rule (`deny` so modules must explicitly `allow`; `forbid` would
+// reject even the allow).
+#![allow(unsafe_code)]
 
 pub mod autocomplete;
 pub mod components;
@@ -14,6 +22,9 @@ pub mod fuzzy;
 pub mod keybindings;
 pub mod keys;
 pub mod kill_ring;
+pub mod latex;
+pub mod markdown;
+pub mod native_modifiers;
 pub mod stdin_buffer;
 pub mod terminal;
 pub mod terminal_colors;
@@ -21,6 +32,7 @@ pub mod terminal_image;
 pub mod tui;
 pub mod undo_stack;
 pub mod utils;
+pub mod win_console;
 pub mod word_navigation;
 
 pub use autocomplete::{

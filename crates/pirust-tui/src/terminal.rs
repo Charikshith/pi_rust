@@ -277,8 +277,11 @@ impl ProcessTerminal {
         emit_bytes(&self.shared, data);
     }
 
-    /// `enableWindowsVTInput` (terminal.ts:338) — Wave-7 stub, see module docs.
-    fn enable_windows_vt_input(&self) {}
+    /// `enableWindowsVTInput` (terminal.ts:338) — real FFI in
+    /// `win_console.rs` (Wave 7); fails closed on non-Windows.
+    fn enable_windows_vt_input(&self) {
+        let _ = crate::win_console::enable_windows_vt_input();
+    }
 }
 
 fn chrono_like_timestamp() -> String {
@@ -555,10 +558,21 @@ fn apply_negotiation(shared: &Arc<SharedState>, parsed: KeyboardProtocolNegotiat
 
 fn forward(shared: &Arc<SharedState>, sequence: &str) {
     // `forwardInputSequence` (terminal.ts:309): Apple Terminal Shift+Enter
-    // normalization. `is_shift_pressed` is always `false` here — the macOS
-    // native-modifier probe is a Wave-7 stub (see module docs).
-    let is_apple_terminal = sequence == "\r" && is_apple_terminal_session();
-    let input = normalize_apple_terminal_input(sequence, is_apple_terminal, false);
+    // normalization. On macOS the native-modifier probe is wired for real in
+    // `native_modifiers.rs` (Wave 7) — `is_shift_pressed` is `false` only on
+    // platforms where the probe is unavailable (same fail-closed path as the
+    // TS's `isNativeModifierPressed` returning false).
+    let should_detect_native_shift_enter =
+        sequence == "\r" && (is_apple_terminal_session() || cfg!(target_os = "windows"));
+    let is_shift_pressed = should_detect_native_shift_enter
+        && crate::native_modifiers::is_native_modifier_pressed(
+            crate::native_modifiers::ModifierKey::Shift,
+        );
+    let input = normalize_apple_terminal_input(
+        sequence,
+        should_detect_native_shift_enter,
+        is_shift_pressed,
+    );
     if let Some(handler) = shared
         .input_handler
         .lock()
