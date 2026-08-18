@@ -1,0 +1,6 @@
+{"note":"short-text-padded-to-width","text":"hi","paddingX":0,"paddingY":0,"width":10,"result":["hi        "]}
+{"note":"stops-at-first-newline","text":"first\nsecond","paddingX":0,"paddingY":0,"width":20,"result":["first               "]}
+{"note":"truncates-with-ellipsis","text":"this is a very long string indeed","paddingX":0,"paddingY":0,"width":15,"result":["this is a ve\u001b[0m...\u001b[0m"]}
+{"note":"horizontal-padding","text":"hi","paddingX":2,"paddingY":0,"width":10,"result":["  hi      "]}
+{"note":"vertical-padding","text":"hi","paddingX":0,"paddingY":2,"width":10,"result":["          ","          ","hi        ","          ","          "]}
+{"note":"empty-text","text":"","paddingX":0,"paddingY":0,"width":10,"result":["          "]}

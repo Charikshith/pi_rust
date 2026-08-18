@@ -1,0 +1,8 @@
+{"note":"empty-text-renders-nothing","text":"","paddingX":1,"paddingY":1,"width":20,"result":[]}
+{"note":"whitespace-only-renders-nothing","text":"   ","paddingX":1,"paddingY":1,"width":20,"result":[]}
+{"note":"simple-text-default-padding","text":"hi","paddingX":1,"paddingY":1,"width":20,"result":["                    "," hi                 ","                    "]}
+{"note":"no-horizontal-padding","text":"hello world","paddingX":0,"paddingY":0,"width":20,"result":["hello world         "]}
+{"note":"wraps-long-text","text":"the quick brown fox jumps over the lazy dog","paddingX":1,"paddingY":0,"width":15,"result":[" the quick     "," brown fox     "," jumps over    "," the lazy dog  "]}
+{"note":"tabs-become-three-spaces","text":"a\tb","paddingX":0,"paddingY":0,"width":10,"result":["a   b     "]}
+{"note":"vertical-padding-two","text":"x","paddingX":0,"paddingY":2,"width":10,"result":["          ","          ","x         ","          ","          "]}
+{"note":"multiline-input-preserved","text":"line1\nline2","paddingX":0,"paddingY":0,"width":10,"result":["line1     ","line2     "]}

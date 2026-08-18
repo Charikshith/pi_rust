@@ -1,0 +1,3 @@
+{"note":"default-one-line","lines":1,"width":20,"result":[""]}
+{"note":"three-lines","lines":3,"width":20,"result":["","",""]}
+{"note":"zero-lines","lines":0,"width":20,"result":[]}
