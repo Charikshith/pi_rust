@@ -104,6 +104,14 @@ const { parseKeyboardProtocolNegotiationSequence, normalizeAppleTerminalInput } 
 const tuiPath = join(TUI_SRC, "tui.ts");
 const { TUI, Container } = await import(pathToFileURL(tuiPath).href);
 
+// feat-006 Wave 5 components
+const COMPONENTS_SRC = join(TUI_SRC, "components");
+const { Text } = await import(pathToFileURL(join(COMPONENTS_SRC, "text.ts")).href);
+const { TruncatedText } = await import(pathToFileURL(join(COMPONENTS_SRC, "truncated-text.ts")).href);
+const { Spacer } = await import(pathToFileURL(join(COMPONENTS_SRC, "spacer.ts")).href);
+const { SelectList } = await import(pathToFileURL(join(COMPONENTS_SRC, "select-list.ts")).href);
+const { Input } = await import(pathToFileURL(join(COMPONENTS_SRC, "input.ts")).href);
+
 const bgFn = (text) => `<bg>${text}</bg>`;
 
 const records = [];
@@ -1237,6 +1245,159 @@ await tuiCase("cursor-marker-extracted-and-stripped", 20, 5, async (tui, termina
 	await sleep(20);
 });
 
+// ===========================================================================
+// TEXT (feat-006 Wave 5)
+// ===========================================================================
+const TEXT_OUT_FILE = join(OUT_DIR, "text.cases.jsonl");
+const textRecords = [];
+function tx(note, text, paddingX, paddingY, width) {
+	const t = new Text(text, paddingX, paddingY);
+	textRecords.push({ note, text, paddingX, paddingY, width, result: t.render(width) });
+}
+tx("empty-text-renders-nothing", "", 1, 1, 20);
+tx("whitespace-only-renders-nothing", "   ", 1, 1, 20);
+tx("simple-text-default-padding", "hi", 1, 1, 20);
+tx("no-horizontal-padding", "hello world", 0, 0, 20);
+tx("wraps-long-text", "the quick brown fox jumps over the lazy dog", 1, 0, 15);
+tx("tabs-become-three-spaces", "a\tb", 0, 0, 10);
+tx("vertical-padding-two", "x", 0, 2, 10);
+tx("multiline-input-preserved", "line1\nline2", 0, 0, 10);
+
+// ===========================================================================
+// TRUNCATED TEXT (feat-006 Wave 5)
+// ===========================================================================
+const TRUNCATED_TEXT_OUT_FILE = join(OUT_DIR, "truncated-text.cases.jsonl");
+const truncatedTextRecords = [];
+function tt(note, text, paddingX, paddingY, width) {
+	const t = new TruncatedText(text, paddingX, paddingY);
+	truncatedTextRecords.push({ note, text, paddingX, paddingY, width, result: t.render(width) });
+}
+tt("short-text-padded-to-width", "hi", 0, 0, 10);
+tt("stops-at-first-newline", "first\nsecond", 0, 0, 20);
+tt("truncates-with-ellipsis", "this is a very long string indeed", 0, 0, 15);
+tt("horizontal-padding", "hi", 2, 0, 10);
+tt("vertical-padding", "hi", 0, 2, 10);
+tt("empty-text", "", 0, 0, 10);
+
+// ===========================================================================
+// SPACER (feat-006 Wave 5)
+// ===========================================================================
+const SPACER_OUT_FILE = join(OUT_DIR, "spacer.cases.jsonl");
+const spacerRecords = [];
+function sp(note, lines, width) {
+	const s = new Spacer(lines);
+	spacerRecords.push({ note, lines, width, result: s.render(width) });
+}
+sp("default-one-line", 1, 20);
+sp("three-lines", 3, 20);
+sp("zero-lines", 0, 20);
+
+// ===========================================================================
+// SELECT LIST (feat-006 Wave 5)
+// ===========================================================================
+const SELECT_LIST_OUT_FILE = join(OUT_DIR, "select-list.cases.jsonl");
+const selectListRecords = [];
+const identityTheme = () => ({
+	selectedPrefix: (s) => s,
+	selectedText: (s) => s,
+	description: (s) => s,
+	scrollInfo: (s) => s,
+	noMatch: (s) => s,
+});
+function sl(note, items, maxVisible, layout, ops) {
+	const list = new SelectList(items, maxVisible, identityTheme(), layout ?? {});
+	const events = [];
+	for (const op of ops) {
+		if (op.op === "render") {
+			events.push({ render: list.render(op.width) });
+		} else if (op.op === "handleInput") {
+			list.handleInput(op.data);
+			events.push({ selectedIndex: list.selectedIndex });
+		} else if (op.op === "setFilter") {
+			list.setFilter(op.filter);
+			events.push({ filteredLength: list.filteredItems.length, selectedIndex: list.selectedIndex });
+		}
+	}
+	selectListRecords.push({ note, items, maxVisible, ops, events });
+}
+const items3 = [
+	{ value: "alpha", label: "Alpha", description: undefined },
+	{ value: "beta", label: "Beta", description: undefined },
+	{ value: "gamma", label: "Gamma", description: undefined },
+];
+sl("empty-list-shows-no-match", [], 5, undefined, [{ op: "render", width: 40 }]);
+sl("basic-render-and-down", items3, 5, undefined, [
+	{ op: "render", width: 40 },
+	{ op: "handleInput", data: "\x1b[B" },
+	{ op: "render", width: 40 },
+]);
+sl("up-wraps-to-bottom", items3, 5, undefined, [{ op: "handleInput", data: "\x1b[A" }]);
+sl("down-wraps-to-top-from-last", items3, 5, undefined, [
+	{ op: "handleInput", data: "\x1b[B" },
+	{ op: "handleInput", data: "\x1b[B" },
+	{ op: "handleInput", data: "\x1b[B" },
+]);
+sl("set-filter-narrows-list", items3, 5, undefined, [
+	{ op: "setFilter", filter: "al" },
+	{ op: "render", width: 40 },
+]);
+sl("with-description-wide-terminal", [{ value: "a", label: "Alpha", description: "A test description here" }], 5, undefined, [
+	{ op: "render", width: 60 },
+]);
+sl("scroll-indicator-with-many-items", Array.from({ length: 10 }, (_, i) => ({ value: `i${i}`, label: `Item ${i}` })), 3, undefined, [
+	{ op: "render", width: 40 },
+]);
+
+// ===========================================================================
+// INPUT (feat-006 Wave 5)
+// ===========================================================================
+const INPUT_OUT_FILE = join(OUT_DIR, "input.cases.jsonl");
+const inputRecords = [];
+function ip(note, ops, width) {
+	const input = new Input();
+	const events = [];
+	for (const op of ops) {
+		if (op.op === "handleInput") {
+			input.handleInput(op.data);
+		} else if (op.op === "setValue") {
+			input.setValue(op.value);
+		}
+	}
+	events.push({ value: input.getValue(), render: input.render(width ?? 20) });
+	inputRecords.push({ note, ops, width: width ?? 20, events });
+}
+ip("typing_appends", [{ op: "handleInput", data: "h" }, { op: "handleInput", data: "i" }]);
+ip("backspace_removes_last_char", [
+	{ op: "setValue", value: "hi" },
+	{ op: "handleInput", data: "\x7f" },
+]);
+ip("ctrl_a_moves_to_line_start_then_k_kills_to_end", [
+	{ op: "setValue", value: "hello world" },
+	{ op: "handleInput", data: "\x01" }, // ctrl+a
+	{ op: "handleInput", data: "\x0b" }, // ctrl+k
+]);
+ip("ctrl_u_kills_to_line_start", [
+	{ op: "setValue", value: "hello world" },
+	{ op: "handleInput", data: "\x01" },
+	{ op: "handleInput", data: "\x05" }, // ctrl+e (end)
+	{ op: "handleInput", data: "\x15" }, // ctrl+u
+]);
+ip("undo_after_typing", [
+	{ op: "handleInput", data: "a" },
+	{ op: "handleInput", data: "b" },
+	{ op: "handleInput", data: "\x1f" }, // ctrl+-
+]);
+ip("astral_plane_backspace", [
+	{ op: "setValue", value: "a😀b" },
+	{ op: "handleInput", data: "\x7f" },
+	{ op: "handleInput", data: "\x7f" },
+]);
+ip("bracketed_paste_strips_newlines", [
+	{ op: "handleInput", data: "\x1b[200~line1\nline2\t\x1b[201~" },
+]);
+ip("render_scrolls_when_value_exceeds_width", [{ op: "setValue", value: "this is a very long input value that overflows" }], 20);
+ip("render_shows_hardware_cursor_marker_when_focused", [{ op: "setValue", value: "hi" }]);
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1269,6 +1430,11 @@ drift += writeFixture(TERMINAL_COLORS_OUT_FILE, terminalColorsRecords, "terminal
 drift += writeFixture(TERMINAL_IMAGE_OUT_FILE, terminalImageRecords, "terminal-image.cases.jsonl");
 drift += writeFixture(TERMINAL_OUT_FILE, terminalRecords, "terminal.cases.jsonl");
 drift += writeFixture(TUI_OUT_FILE, tuiRecords, "tui.cases.jsonl");
+drift += writeFixture(TEXT_OUT_FILE, textRecords, "text.cases.jsonl");
+drift += writeFixture(TRUNCATED_TEXT_OUT_FILE, truncatedTextRecords, "truncated-text.cases.jsonl");
+drift += writeFixture(SPACER_OUT_FILE, spacerRecords, "spacer.cases.jsonl");
+drift += writeFixture(SELECT_LIST_OUT_FILE, selectListRecords, "select-list.cases.jsonl");
+drift += writeFixture(INPUT_OUT_FILE, inputRecords, "input.cases.jsonl");
 
 if (CHECK && drift > 0) {
 	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");

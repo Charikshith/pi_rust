@@ -55,11 +55,25 @@ the real functions — no server, no offline env vars needed.
    section that constructs a real Pi `TUI` against a JS-side fake `Terminal`,
    capturing the exact `write()` byte sequences for render/overlay/resize
    scenarios.
-5. **components/** — `Box`, `Text`, `TruncatedText`, `Spacer`, `Loader` /
-   `CancellableLoader`, `Input`, `SelectList`, `SettingsList`, `Image`,
-   `editor_component.rs` (the `EditorComponent` seam trait). Each is a pure
-   `render(width) -> Vec<String>` producer; golden-test rendered output against
-   real Pi components at representative widths/states.
+5. **components/ + autocomplete.rs + editor_component.rs** — REVISED: `editor-
+   component.ts` imports `AutocompleteProvider` from `autocomplete.ts`, and
+   `autocomplete.ts` turns out to have ZERO dependency on `tui.ts`/rendering
+   (it only imports `fuzzy.ts`, Wave 3, plus Node `fs`/`child_process`/`path`/
+   `os`) — so it moves up from Wave 7 to this wave rather than leaving a
+   forward reference. `Box`, `Text`, `TruncatedText`, `Spacer`, `Loader` /
+   `CancellableLoader`, `Input`, `SelectList`, `SettingsList`, `Image` are
+   pure `render(width) -> Vec<String>` producers (`Input`'s cursor/grapheme
+   arithmetic is UTF-16-code-unit-based, same family as Wave 3's
+   `word_navigation.rs` — reuse `find_word_backward`/`find_word_forward`
+   directly rather than re-deriving); `Loader`'s animation timer and
+   `autocomplete.rs`'s `fd`-subprocess-based fuzzy file search are both
+   timer/async-shaped in the TS with no owned event loop here yet (same
+   caller-owns-the-timer story as Waves 2/4) — implement synchronously
+   (blocking subprocess call, no `AbortSignal`-equivalent cancellation yet)
+   and document the real async/debounce wiring as Wave 6's integration job.
+   `editor_component.rs` is the `EditorComponent` seam trait. Golden-test
+   rendered output against real Pi components at representative widths/
+   states.
 6. **editor.rs** — the 2333-line line editor (crown jewel): grapheme/word
    segmentation with atomic paste-marker segments, word-wrap + `layoutText`,
    cursor movement (sticky preferred column, 7-case vertical-move table),
@@ -68,11 +82,11 @@ the real functions — no server, no offline env vars needed.
    cursor-column arithmetic is the single biggest hazard here** (05-tui.md
    §9) — decide once, up front: operate on `Vec<u16>` offsets to match JS
    `.length`/`.slice`/`charCodeAt` exactly, not `char`/byte indices.
-7. **autocomplete.rs, native_modifiers.rs (macOS FFI), win_console.rs (Windows
-   FFI), markdown.rs** — REVISED: `terminal_colors.rs`/`terminal_image.rs`
-   moved to Wave 4 (see above). Remaining: async autocomplete integration,
-   the two native-modifier FFI shims (wiring Wave 4's stubs for real), and
-   the heaviest component (`Markdown`, 858 lines, via `pulldown-cmark`). FFI
+7. **native_modifiers.rs (macOS FFI), win_console.rs (Windows FFI),
+   markdown.rs** — REVISED TWICE: `terminal_colors.rs`/`terminal_image.rs`
+   moved to Wave 4, `autocomplete.rs` moved to Wave 5 (see above). Remaining:
+   the two native-modifier FFI shims (wiring Wave 4's stubs for real) and the
+   heaviest component (`Markdown`, 858 lines, via `pulldown-cmark`). FFI
    modules fail-closed on unsupported platforms exactly like the TS.
 8. **lib.rs re-exports + final integration** — mirror `index.ts`'s public
    surface; a smoke test wiring `TUI` + a couple of components through a mock

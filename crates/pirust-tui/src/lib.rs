@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod autocomplete;
+pub mod components;
+pub mod editor_component;
 pub mod fuzzy;
 pub mod keybindings;
 pub mod keys;
@@ -19,6 +22,26 @@ pub mod undo_stack;
 pub mod utils;
 pub mod word_navigation;
 
+pub use autocomplete::{
+    AppliedCompletion, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
+    CombinedAutocompleteProvider, CommandOrItem, CompletionContext, SlashCommand,
+};
+pub use components::box_component::BoxComponent;
+pub use components::cancellable_loader::CancellableLoader;
+pub use components::image::{Image, ImageOptions, ImageTheme};
+pub use components::input::Input;
+pub use components::loader::{Loader, LoaderIndicatorOptions};
+pub use components::select_list::{
+    SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme,
+    SelectListTruncatePrimaryContext,
+};
+pub use components::settings_list::{
+    SettingItem, SettingsList, SettingsListOptions, SettingsListTheme, SubmenuDone, SubmenuFactory,
+};
+pub use components::spacer::Spacer;
+pub use components::text::Text;
+pub use components::truncated_text::TruncatedText;
+pub use editor_component::EditorComponent;
 pub use fuzzy::{fuzzy_filter, fuzzy_match, FuzzyMatch};
 pub use keybindings::{
     get_keybindings, set_keybindings, Keybinding, KeybindingConflict, KeybindingDefinition,
