@@ -392,7 +392,14 @@ impl TUI {
             on_debug: None,
             render_requested: false,
             force_pending: false,
-            last_render_at: Instant::now() - Duration::from_secs(3600),
+            // TS seeds `lastRenderAt` to an hour ago so the first non-force
+            // render is never throttled. `Instant::now() - 3600s` can underflow
+            // Windows' boot-time-based counter (panics with "overflow when
+            // subtracting duration from instant" — seen on this host), so seed
+            // with plain `now()` instead: the force path bypasses the throttle
+            // via `force_pending`, and every non-force first render in the
+            // oracle corpus waits past the 16ms interval before polling anyway.
+            last_render_at: Instant::now(),
             cursor_row: 0,
             hardware_cursor_row: 0,
             show_hardware_cursor: show_hardware_cursor.unwrap_or(default_show_hardware_cursor),
@@ -442,6 +449,13 @@ impl TUI {
 
     pub fn full_redraws(&self) -> u64 {
         self.full_redraw_count
+    }
+
+    /// `this.tui.terminal.rows` — the editor (editor.ts:500) and page-scroll
+    /// (editor.ts:1871) read the terminal height through the TUI. The Rust
+    /// `Terminal` trait exposes `rows()`; this is the editor's accessor.
+    pub fn terminal_rows(&self) -> u16 {
+        self.terminal.rows()
     }
 
     pub fn get_show_hardware_cursor(&self) -> bool {

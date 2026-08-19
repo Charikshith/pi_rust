@@ -5,3 +5,6 @@ Cargo.lock
 .tokensave/
 .claude/
 .agents/
+
+# local harness artifact
+.pi/

@@ -979,7 +979,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         let line = current_line(ctx.lines, ctx.cursor_line);
         let text_before_cursor = slice_utf16(line, 0, ctx.cursor_col);
         let trimmed = text_before_cursor.trim();
-        !(trimmed.starts_with('/') && !trimmed.contains(' '))
+        !trimmed.starts_with('/') || trimmed.contains(' ')
     }
 }
 

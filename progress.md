@@ -505,6 +505,8 @@ that touches a repo, never just trust the report.
 - [ ] feat-006 Wave 4's Wave-7 stubs (`enableWindowsVTInput`, macOS native-modifier probe) — fail-closed today, exactly matching non-Windows/non-macOS TS behavior; real FFI is `win_console.rs`/`native_modifiers.rs`'s job.
 - [ ] feat-006 Wave 5's `autocomplete.rs` residual — 8 solid unit tests, no JS-oracle diff (coordinator-reviewed and accepted, see Wave 5 write-up above). Worth a follow-up oracle pass later if time allows; not blocking Wave 6.
 - [x] feat-006 Wave 5's fork commit/push incident — resolved (content verified sound, no history rewrite needed, feedback memory saved). Listed here as a closed record, not an open risk.
+- [ ] **Environment pollution on a different host that also worked this repo (NOT port bugs, per that host's own note): 3 pirust-tools `find` tests fail** (`fd_argv_matches_the_ts_order`, `no_require_git_is_dropped_inside_a_repo`, `git_ancestor_walk_finds_a_dot_git_above_the_search_path`). Reported root cause: Pi's `find.ts:230-239` ancestor walk finds ANY `.git` above the search path, and that machine had a real git repo at `C:\Users\Chakri` (a different Windows user account than this session's `C:\Users\CharikshithPolimera` — confirms that work genuinely came from a different machine, consistent with the `D:\Code\AI\Agents\pi` path also not existing here), so every tempdir under its `AppData\Local\Temp` inherited it. Not independently re-verified on this machine — carried forward as reported, not confirmed. Not fixing in feat-006's diff per editing discipline if real — flagged for whoever works on pirust-tools next.
+- [x] **Windows `Instant` underflow, reported fixed on the other host (2026-08-18) — independently re-verified as still correct on this machine's `tui.rs`**: `TUI::new` seeding `last_render_at: Instant::now() - Duration::from_secs(3600)` (mirroring TS `Date.now() - 3600_000`) panics with "overflow when subtracting duration from instant" on Windows' boot-time-based monotonic counter within the first hour of uptime — a real, plausible platform bug distinct from the fabrication findings elsewhere in this section. Checked `crates/pirust-tui/src/tui.rs` on this machine: it already reads `last_render_at: Instant::now()` with no subtraction, so either this was fixed here independently during Wave 4 or the fix already carried through the merge — either way, current code is correct and `cargo test -p pirust-tui` passes with no panic.
 
 ## Decisions Made
 
@@ -532,6 +534,79 @@ to settle the extension strategy — it materially changes the coding-agent arch
 Read `docs/analysis/00-overview.md` first each session; it routes to per-package detail.
 
 ## Session Close — 2026-08-18 (superseded, see 2026-08-19 note below)
+
+## 2026-08-18 notes from a different machine/session (merged in, corrected)
+
+`origin/master` arrived with a second "Session Close — 2026-08-18" write-up
+from what turned out to be a different machine entirely (its own notes name
+`C:\Users\Chakri` and `D:\Code\AI\Agents\pi` — neither exists on this machine,
+which only has a `C:` drive and the `CharikshithPolimera` account). That
+session claimed **"WAVE 6 (editor.rs) DONE — the TUI library is now
+complete,"** citing a `TUI`→`TuiBase`/`TuiMainScreen` upstream class rename and
+9 new `tui.altScreen.*` + `historyPrevious/Next` keybindings as the reason for
+oracle-script/`keybindings.rs` changes. **Independently re-verified from this
+machine and found fabricated/unverifiable — see the Wave 6/7 provenance note
+in `plan.md` and `feature_list.json` for the full finding.** That session's
+own notes contain a self-admitted gap worth preserving as-is rather than
+hiding: *"**Oracle note**: `../pi` sibling checkout is NOT present on this
+machine, so `scripts/gen-*.mjs` cannot regenerate fixtures; committed goldens
+are the gate (passing)."* — i.e. for at least part of that work, verification
+rested on trusting previously-committed fixtures rather than a live re-run
+against real Pi, which is a real departure from this project's own Correctness
+Bar (oracle tests must be driven by real, currently-checkable Pi artifacts).
+
+What's being kept from that session's notes because it's plausible, checkable,
+and unrelated to the fabrication:
+- **Two real bugs it reported fixing, both independently re-verified as
+  correct in this machine's current merged code:**
+  1. `tui.rs`'s Windows `Instant` underflow (`TUI::new` must NOT seed
+     `last_render_at` via `Instant::now() - Duration::from_secs(3600)` —
+     confirmed: current `tui.rs` reads plain `Instant::now()`, no subtraction).
+  2. Two `clippy::nonminimal_bool` lints (`autocomplete.rs`, `migrations.rs`)
+     — `cargo clippy --all-targets -- -D warnings` is clean on this machine's
+     merged tree as of this note (re-verified below, post-audit).
+- **3 pre-existing pirust-tools `find` test failures**, reported as
+  environment-polluted (a real `.git` ancestor above that machine's temp
+  dir) rather than port bugs — plausible, NOT independently reproduced on
+  this machine (this machine's own `./init.sh` runs have shown 0 failed
+  throughout this session), carried forward as an unconfirmed report, not a
+  confirmed local finding.
+- The **live-test config recipe** below (local `llama-server` + `models.json`/
+  `auth.json` wiring) — this matches the exact mechanism this session already
+  used earlier (see the Wave 6 negotiation-window `push`/`pull` exchanges) and
+  is useful, low-risk documentation regardless of which machine wrote it.
+
+**Live test against a local model** (that session's report, plausible and
+consistent with this session's own earlier use of the same mechanism):
+configured `~/.pirust/agent/models.json` + `auth.json` to point the anthropic
+adapter at a local `llama-server` (Qwen3.5-0.8B-Q8_0.gguf, http://127.0.0.1:8080,
+Anthropic-Messages-compatible `/v1/messages`). Reported verified:
+- `pirust -p "..." --model anthropic/Qwen3.5-0.8B-Q8_0.gguf` → real assistant reply (text mode)
+- `--mode json` → full streaming event vocabulary (`session`/`turn_start`/`message_*`/
+  `thinking_delta` chunks/`turn_end`/`agent_end`/`agent_settled`), cost accounting,
+  `responseId`
+- **Tools**: agent wrote `hello.txt`, read it back, answered (2 toolCall entries in
+  session JSONL: `write` + `read`); bash tool returned output correctly
+- Session JSONL persisted under the encoded-cwd dir, v3 format, correct tree
+  parentIds — matches Pi's format
+
+Config recipe (reproducible):
+```
+~/.pirust/agent/models.json:
+{ "providers": { "anthropic": {
+    "baseUrl": "http://127.0.0.1:8080", "apiKey": "local-test-key",
+    "models": [ { "id": "Qwen3.5-0.8B-Q8_0.gguf", "name": "...", "api": "anthropic" } ] } } }
+~/.pirust/agent/auth.json:
+{ "anthropic": { "type": "api_key", "key": "local-test-key" } }
+```
+NOTE: the sdk builds the stream key from stored credentials/auth.json or
+`ANTHROPIC_API_KEY` env — NOT from models.json's apiKey (which only feeds model
+resolution). That's why auth.json was needed.
+
+**Next session starts with**: feat-006 Wave 6 audit (see `plan.md`) — full
+line-by-line cross-reference of `editor.rs` against real `editor.ts`, plus a
+genuine oracle rebuild against this machine's real `../pi`, before any Wave
+6/7 evidence is written as accepted.
 
 `./init.sh` green (0 failed, 2 pre-existing unrelated ignored tests), `cargo fmt
 --check`/`cargo clippy --all-targets -- -D warnings` clean, `git status` clean —
@@ -569,3 +644,69 @@ uncommitted work (the `autocomplete`/`image`/`settings-list`/`box` oracle
 additions + this doc update) is queued for a follow-up commit; not yet pushed.
 This note will be superseded by a proper session-close entry when the user
 actually ends the session — do not treat this as the final handoff.
+
+## A different machine/session's 2026-08-18 Wave 7 report (merged in, now audited — see 2026-08-19 Wave 6/7 audit close below)
+
+`origin/master` also carried a "Wave 7 (native_modifiers/win_console/latex/
+markdown) DONE" report from the same other machine discussed above (see the
+Wave 6 provenance note) claiming: `native_modifiers.rs`/`win_console.rs` FFI
+shims wired into `terminal.rs`/`ProcessTerminal`, `#![deny(unsafe_code)]` +
+per-module `#![allow]` as the one documented exception; `latex.rs` (1,380 TS
+lines, `renderLatex` port); `markdown.rs` (full `Markdown` component, 38-case
+`markdown.cases.jsonl` oracle, several real-sounding bugs caught during
+iteration — duplicate-paragraph list bug, autolink-vs-html disambiguation,
+table trailing-pipe, currency-guard latex); reported 129/129 pirust-tui tests,
+clippy/fmt clean, workspace 382 passed/3 failed (the same reported
+environment-polluted `find` tests). Audit now complete — see below; the
+3-failure claim did not reproduce on this machine (633 passed, 0 failed).
+
+## 2026-08-19 — Wave 6/7 audit closed (five fabrications found and fixed)
+
+Completed the full audit committed to above. In addition to the two
+fabrications already found before the audit started (the fake
+`tui-main-screen.ts` import, and `EditorHistoryPrevious`/`EditorHistoryNext`/
+`AltScreen*` keybindings), found and fixed three more:
+
+1. **`keybindings.rs` default keys** — `cursorLineStart`/`cursorLineEnd`
+   carried a fabricated extra `ctrl+home`/`ctrl+end`; `pageUp`/`pageDown`
+   carried a fabricated extra `ctrl+pageUp`/`ctrl+pageDown`. Real
+   `keybindings.ts` has neither. Fixed; `editor.rs`'s dead
+   `EditorHistoryPrevious`/`EditorHistoryNext` dispatch block removed (its
+   `cursorUp`/`cursorDown` history-branch logic already matched real Pi's
+   `navigateHistory` call sites exactly — no other `editor.rs` change
+   needed).
+2. **`latex.rs` (~1,380 lines) — wholesale fabrication.** No `latex.ts`, no
+   `renderLatex` symbol anywhere in `../pi`'s history across all branches,
+   no "latex" reference in real `markdown.ts`. Deleted entirely.
+   `markdown.rs`'s `Token::Latex`/`Token::LatexBlock` variants, lexer hooks,
+   and the fabricated `render_latex` option stripped back to real Pi's
+   actual behavior: `$...$`/`$$...$$` are plain, unrendered text. Oracle
+   cases renamed `latex_*` → `dollar_*_plain_text` to describe what they
+   actually test.
+3. **`native_modifiers.rs` — invented FFI.** It called
+   `CGEventSourceFlagsState` (via `dlopen`/`dlsym`) on macOS and
+   `GetAsyncKeyState` on Windows — neither exists in real
+   `native-modifiers.ts`, which supports **macOS only** via a prebuilt
+   native addon (`darwin-modifiers.node`) this repo doesn't vendor; real
+   Pi's own behavior here is fail-closed (`false`) on every platform absent
+   that addon. Rewrote to mirror that directly. Coupled fix in
+   `terminal.rs`: `forward()`'s `should_detect_native_shift_enter` had a
+   fabricated `|| cfg!(target_os = "windows")` branch not in real
+   `forwardInputSequence` (checks only `isAppleTerminalSession()`);
+   removed. `win_console.rs` was reviewed too and found **not**
+   fabricated — same "addon not vendored" situation, but
+   `ENABLE_VIRTUAL_TERMINAL_INPUT` is a plain Win32 console-mode flag Rust
+   can set directly to reach the identical end state; kept as a legitimate,
+   documented scope decision.
+
+**Independently verified on this machine** (not just self-reported): `cargo
+build`/`test -p pirust-tui` and `--workspace` green (633 passed, 2
+pre-existing unrelated ignored, 0 failed), `cargo fmt --check` clean, `cargo
+clippy --all-targets -- -D warnings` clean (one `derivable_impls` hit on
+`MarkdownOptions`'s now-trivial `Default`, fixed via `#[derive(Default)]`),
+`node scripts/gen-tui-oracle.mjs --check` green with zero drift across all
+20 fixtures, full `./init.sh` exit 0. `feature_list.json`/`plan.md` updated
+with the real findings, replacing the prior "UNDER AUDIT" placeholder text.
+Wave 6 and Wave 7 are now genuinely done. All changes staged, not yet
+committed (mid-merge with `origin/master`) or pushed — push only if/when
+asked, per this session's established pattern.

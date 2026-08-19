@@ -188,6 +188,88 @@ source, standalone.
       report. Content was verified sound and in-scope; history was NOT rewritten
       (already shared on the remote). See progress.md's Blockers/Risks and this
       session's saved feedback memory for the full incident writeup.
-- [ ] Wave 6 — editor.rs
-- [ ] Wave 7 — native_modifiers/win_console/markdown
+- [x] Wave 6 — editor.rs — DONE, audited and fixed (see note below)
+- [x] Wave 7 — native_modifiers/win_console/markdown — DONE, audited and fixed
+      (`latex.rs` deleted entirely — wholesale fabrication, see note below)
+
+### Wave 6/7 provenance note (coordinator, post-merge)
+
+`origin/master` arrived with Waves 6 and 7 already implemented and committed
+(`65f109f`, `8c7ca83`), claiming "25-case oracle green" / "38-case oracle
+green". That work's own commit message states it ran against `../pi` at
+`D:\Code\AI\Agents\pi` — **that path does not exist on this machine** (only a
+`C:` drive is present here), so it cannot be independently verified from this
+environment, whether or not it was legitimate wherever it was produced.
+
+Independent verification from THIS machine's real `../pi` checkout
+(`C:\Users\CharikshithPolimera\Downloads\PI_NEW\pi_space\pi`) found two
+concrete, confirmed problems:
+1. The oracle script imported a nonexistent `../pi/packages/tui/src/
+   tui-main-screen.ts` (`TuiMainScreen`/`TuiBase` — absent from this
+   checkout's working tree AND from every local + all 37 remote-tracking
+   branches' full history via `git log --all -S`). Fixed: restored the real
+   `TUI`/`Container` import from `tui.ts`. Re-running the corrected script
+   produced a byte-identical `editor.cases.jsonl` (25 cases) — encouraging,
+   suggests the Editor's *tested* behavior didn't actually depend on
+   whatever the fake class was.
+2. `keybindings.rs` gained `EditorHistoryPrevious`/`EditorHistoryNext` and a
+   14-variant `AltScreen*` family — **neither exists in this checkout's real
+   `keybindings.ts`** (confirmed via direct `grep`). Real Pi's history
+   navigation is triggered by checking `tui.editor.cursorUp`/`cursorDown`
+   plus `isOnFirstVisualLine()`/`historyIndex`/`cursorCol === 0` state, not a
+   dedicated keybinding id — meaning `editor.rs`'s ported history logic is
+   likely a simplification, not a faithful line-for-line port. `AltScreen*`
+   is also dead code even in the current Rust port (declared in
+   `keybindings.rs`, referenced nowhere else in the crate) — unrequested
+   surface either way.
+
+**Decision (user): full line-by-line audit of `editor.rs` against real
+`editor.ts`**, not a narrow strip-and-spot-check, given two confirmed
+problems surfaced on the very first thing checked in the crate's single
+highest-stakes file; widened to Wave 7 (`markdown.rs`/`latex.rs`/
+`native_modifiers.rs`/`win_console.rs`) after a third and fourth fabrication
+turned up there. **Audit complete, independently verified on this machine —
+five confirmed fabrications found and fixed in total** (the two above, plus
+three more):
+
+3. `keybindings.rs`'s `definition()` had three more fabricated default keys
+   on otherwise-real ids: `cursorLineStart`/`cursorLineEnd` carried a
+   fabricated extra `ctrl+home`/`ctrl+end` (real: `[home, ctrl+a]` /
+   `[end, ctrl+e]`), and `pageUp`/`pageDown` carried a fabricated extra
+   `ctrl+pageUp`/`ctrl+pageDown` (real: a single `"pageUp"`/`"pageDown"`
+   string). Fixed; `editor.rs`'s dead `EditorHistoryPrevious`/
+   `EditorHistoryNext` dispatch block removed (its `cursorUp`/`cursorDown`
+   history-branch logic already matched real Pi's `navigateHistory` call
+   sites exactly, so no other `editor.rs` change was needed).
+4. `crates/pirust-tui/src/latex.rs` (~1,380 lines) was a **wholesale
+   fabrication** — no `latex.ts`, no `renderLatex` symbol anywhere in
+   `../pi`'s history across all branches, no "latex" reference in real
+   `markdown.ts`. Deleted entirely; `markdown.rs`'s `Token::Latex`/
+   `Token::LatexBlock` variants, lexer hooks, and the fabricated
+   `render_latex` option were stripped back to real Pi's actual behavior:
+   `$...$`/`$$...$$` are plain, unrendered text. Oracle cases renamed from
+   `latex_*` to `dollar_*_plain_text` to describe what they actually test.
+5. `native_modifiers.rs` invented an entire FFI implementation
+   (`CGEventSourceFlagsState` via `dlopen`/`dlsym` on macOS,
+   `GetAsyncKeyState` on Windows) that exists nowhere in real Pi. Real
+   `native-modifiers.ts` supports **macOS only**, via a prebuilt native addon
+   (`darwin-modifiers.node`) this repo doesn't vendor — so real Pi's own
+   behavior here is fail-closed (`false`) on every platform. Rewrote
+   `native_modifiers.rs` to mirror that directly. Coupled fix in
+   `terminal.rs`: `forward()` had a fabricated
+   `|| cfg!(target_os = "windows")` branch not present in real
+   `forwardInputSequence` (checks only `isAppleTerminalSession()`); removed.
+   `win_console.rs` was reviewed too and found **not** fabricated — it
+   reaches the same `ENABLE_VIRTUAL_TERMINAL_INPUT` end state real Pi's
+   (also-unvendored) addon would, via plain documented Win32 calls; left as
+   a legitimate, documented scope decision.
+
+Verified independently on this machine: `cargo build`/`test -p pirust-tui`
+and `--workspace` green (633 passed, 2 pre-existing unrelated ignored, 0
+failed — the previously-reported 3-failure claim from origin's own machine
+does not reproduce here), `cargo fmt --check` clean, `cargo clippy
+--all-targets -- -D warnings` clean, `node scripts/gen-tui-oracle.mjs
+--check` green with zero drift across all 20 fixtures, full `./init.sh`
+exit 0.
+
 - [ ] Wave 8 — lib.rs re-exports + integration smoke test + evidence

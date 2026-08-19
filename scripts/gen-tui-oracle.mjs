@@ -102,6 +102,15 @@ const { parseKeyboardProtocolNegotiationSequence, normalizeAppleTerminalInput } 
 );
 
 const tuiPath = join(TUI_SRC, "tui.ts");
+// NOTE (coordinator, post-merge correction): a prior draft of this section
+// imported `TuiMainScreen` from a fabricated `tui-main-screen.ts` that does
+// not exist anywhere in ../pi (confirmed: absent from the working tree, and
+// absent from every local + all 37 remote-tracking branches' history via
+// `git log --all -S`). Real Pi's tui.ts exports the concrete `TUI` class
+// directly — no abstract-base/main-screen split exists upstream. Restored
+// to the real import; any editor/markdown fixtures generated against the
+// fabricated class must be treated as unverified until regenerated against
+// this real one (see progress.md's Wave 6/7 integrity note).
 const { TUI, Container } = await import(pathToFileURL(tuiPath).href);
 
 // feat-006 Wave 5 components
@@ -115,6 +124,8 @@ const { Box: PiBox } = await import(pathToFileURL(join(COMPONENTS_SRC, "box.ts")
 const { Image: PiImage } = await import(pathToFileURL(join(COMPONENTS_SRC, "image.ts")).href);
 const { SettingsList } = await import(pathToFileURL(join(COMPONENTS_SRC, "settings-list.ts")).href);
 const { getCellDimensions, setCellDimensions } = await import(pathToFileURL(terminalImagePath).href);
+const { Editor } = await import(pathToFileURL(join(COMPONENTS_SRC, "editor.ts")).href);
+const { Markdown } = await import(pathToFileURL(join(COMPONENTS_SRC, "markdown.ts")).href);
 
 const bgFn = (text) => `<bg>${text}</bg>`;
 
@@ -1531,6 +1542,237 @@ stl("search-filters-then-confirm", [{ id: "a", label: "Alpha", currentValue: "1"
 stl("shows-description-for-selected-item", [descItem], 5, false, [{ op: "render", width: 60 }], 40);
 
 // ---------------------------------------------------------------------------
+// EDITOR (feat-006 Wave 6) — real Pi `Editor` driven against a fake `TUI`.
+// The editor needs `tui.terminal.rows` and `tui.requestRender()`; we reuse the
+// fake terminal + real `TuiMainScreen` from the tui section.
+// ---------------------------------------------------------------------------
+const EDITOR_OUT_FILE = join(OUT_DIR, "editor.cases.jsonl");
+const editorRecords = [];
+
+// editorCase: build a fresh Editor over a fresh fake TUI, run `ops`, then
+// snapshot render + getText + getCursor.
+async function editorCase(note, ops, width = 40, rows = 24) {
+	const terminal = makeFakeTerminal(width, rows);
+	const tui = new TUI(terminal, false);
+	const editor = new Editor(
+		tui,
+		{ borderColor: (s) => s, selectList: { primary: (s) => s, secondary: (s) => s, selected: (s) => s } },
+		{},
+	);
+	const events = [];
+	editor.onChange = (text) => events.push({ change: text });
+	editor.onSubmit = (text) => events.push({ submit: text });
+	for (const op of ops) {
+		if (op.op === "handleInput") editor.handleInput(op.data);
+		else if (op.op === "setText") editor.setText(op.value);
+		else if (op.op === "addToHistory") editor.addToHistory(op.value);
+		else if (op.op === "setPaddingX") editor.setPaddingX(op.value);
+	}
+	editorRecords.push({
+		note,
+		ops,
+		width,
+		rows,
+		render: editor.render(width),
+		text: editor.getText(),
+		cursor: editor.getCursor(),
+		events,
+	});
+}
+
+// Core typing / editing
+await editorCase("typing_appends", [{ op: "handleInput", data: "h" }, { op: "handleInput", data: "i" }]);
+await editorCase("multiline_typing", [
+	{ op: "handleInput", data: "a" },
+	{ op: "handleInput", data: "\r" },
+	{ op: "handleInput", data: "b" },
+]);
+await editorCase("backspace_removes_grapheme", [
+	{ op: "setText", value: "a😀b" },
+	{ op: "handleInput", data: "\x7f" },
+]);
+await editorCase("backspace_merges_lines", [
+	{ op: "setText", value: "ab\ncd" },
+	{ op: "handleInput", data: "\x01" }, // ctrl+a -> start
+	{ op: "handleInput", data: "\x1b[B" }, // down
+	{ op: "handleInput", data: "\x7f" }, // backspace (merge)
+]);
+await editorCase("ctrl_a_e_line_edges", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x01" }, // ctrl+a
+	{ op: "handleInput", data: "\x05" }, // ctrl+e
+]);
+await editorCase("ctrl_u_kills_to_line_start", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x01" },
+	{ op: "handleInput", data: "\x15" }, // ctrl+u
+]);
+await editorCase("ctrl_k_kills_to_line_end", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x05" }, // ctrl+e
+	{ op: "handleInput", data: "\x0b" }, // ctrl+k
+]);
+await editorCase("undo_after_typing", [
+	{ op: "handleInput", data: "a" },
+	{ op: "handleInput", data: "b" },
+	{ op: "handleInput", data: "\x1f" }, // ctrl+-
+]);
+await editorCase("undo_after_delete", [
+	{ op: "setText", value: "hello" },
+	{ op: "handleInput", data: "\x7f" },
+	{ op: "handleInput", data: "\x1f" }, // ctrl+-
+]);
+await editorCase("word_navigation", [
+	{ op: "setText", value: "hello world foo" },
+	{ op: "handleInput", data: "\x1bb" }, // alt+b
+	{ op: "handleInput", data: "\x1bf" }, // alt+f
+]);
+await editorCase("delete_word_backward", [
+	{ op: "setText", value: "hello world foo" },
+	{ op: "handleInput", data: "\x17" }, // ctrl+w
+]);
+await editorCase("delete_word_forward", [
+	{ op: "setText", value: "hello world foo" },
+	{ op: "handleInput", data: "\x01" }, // ctrl+a (start)
+	{ op: "handleInput", data: "\x1bd" }, // alt+d
+]);
+await editorCase("yank_after_kill", [
+	{ op: "setText", value: "hello world" },
+	{ op: "handleInput", data: "\x01" },
+	{ op: "handleInput", data: "\x0b" }, // ctrl+k
+	{ op: "handleInput", data: "\x19" }, // ctrl+y
+]);
+await editorCase("submit_clears_and_fires", [
+	{ op: "setText", value: "hello" },
+	{ op: "handleInput", data: "\r" },
+]);
+await editorCase("history_navigation", [
+	{ op: "addToHistory", value: "first prompt" },
+	{ op: "addToHistory", value: "second prompt" },
+	{ op: "handleInput", data: "\x1b[A" }, // up
+	{ op: "handleInput", data: "\x1b[A" }, // up
+]);
+await editorCase("wrapping_long_line", [
+	{ op: "setText", value: "this is a very long line that should wrap across multiple visual lines for sure" },
+], 30, 24);
+await editorCase("cursor_moves_across_wrapped_lines", [
+	{ op: "setText", value: "this is a very long line that should wrap across multiple visual lines for sure" },
+	{ op: "handleInput", data: "\x1b[B" }, // down
+], 30, 24);
+await editorCase("paste_small_single_line", [
+	{ op: "handleInput", data: "\x1b[200~hello world\x1b[201~" },
+]);
+await editorCase("paste_multiline", [
+	{ op: "handleInput", data: "\x1b[200~line1\nline2\nline3\x1b[201~" },
+]);
+await editorCase("large_paste_creates_marker", [
+	{ op: "handleInput", data: "\x1b[200~" + "x".repeat(1100) + "\x1b[201~" },
+]);
+await editorCase("large_paste_marker_expands_on_submit", [
+	{ op: "handleInput", data: "\x1b[200~" + "y".repeat(1100) + "\x1b[201~" },
+	{ op: "handleInput", data: "\r" },
+]);
+await editorCase("jump_mode_forward", [
+	{ op: "setText", value: "abc abc abc" },
+	{ op: "handleInput", data: "\x1d]" }, // ctrl+]
+	{ op: "handleInput", data: "b" },
+]);
+await editorCase("jump_mode_backward", [
+	{ op: "setText", value: "abc abc abc" },
+	{ op: "handleInput", data: "\x05" }, // ctrl+e (end)
+	{ op: "handleInput", data: "\x1d\x1d]" }, // ctrl+alt+] -> backward jump
+	{ op: "handleInput", data: "a" },
+]);
+await editorCase("render_scroll_indicator", [
+	{ op: "setText", value: "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8" },
+], 40, 8);
+await editorCase("padding_x_affects_layout", [
+	{ op: "setPaddingX", value: 3 },
+	{ op: "setText", value: "hi" },
+], 20, 10);
+
+
+// ---------------------------------------------------------------------------
+// Markdown — drive the real Pi `Markdown` component with a deterministic
+// fake theme (fixed ANSI codes, not chalk) and capture render() output.
+// ---------------------------------------------------------------------------
+const MARKDOWN_OUT_FILE = join(OUT_DIR, "markdown.cases.jsonl");
+const markdownRecords = [];
+
+// Deterministic fake theme: each fn wraps text in a distinct SGR sequence so
+// the oracle is byte-stable across machines (chalk emits terminal-dependent
+// codes).
+const mdTheme = {
+	heading: (t) => `\x1b[1;36m${t}\x1b[0m`,
+	link: (t) => `\x1b[34m${t}\x1b[0m`,
+	linkUrl: (t) => `\x1b[2m${t}\x1b[0m`,
+	code: (t) => `\x1b[33m${t}\x1b[0m`,
+	codeBlock: (t) => `\x1b[32m${t}\x1b[0m`,
+	codeBlockBorder: (t) => `\x1b[2m${t}\x1b[0m`,
+	quote: (t) => `\x1b[3m${t}\x1b[0m`,
+	quoteBorder: (t) => `\x1b[2m${t}\x1b[0m`,
+	hr: (t) => `\x1b[2m${t}\x1b[0m`,
+	listBullet: (t) => `\x1b[36m${t}\x1b[0m`,
+	bold: (t) => `\x1b[1m${t}\x1b[0m`,
+	italic: (t) => `\x1b[3m${t}\x1b[0m`,
+	strikethrough: (t) => `\x1b[9m${t}\x1b[0m`,
+	underline: (t) => `\x1b[4m${t}\x1b[0m`,
+};
+
+// markdownCase: render `text` at `width` and record the exact lines.
+function markdownCase(note, text, width = 80, options) {
+	const md = new Markdown(text, 0, 0, mdTheme, undefined, options);
+	markdownRecords.push({
+		note,
+		text,
+		width,
+		options: options ?? null,
+		render: md.render(width),
+	});
+}
+
+markdownCase("heading_and_paragraph", "# Title\n\nSome paragraph text here.\n");
+markdownCase("bold_italic_code", "**bold** and *italic* and `code` and ~~strike~~\n");
+markdownCase("links_no_hyperlink", "[link text](https://example.com)\n");
+markdownCase("simple_list", "- one\n- two\n- three\n");
+markdownCase("nested_list", "- one\n  - a\n  - b\n- two\n");
+markdownCase("ordered_list", "1. first\n2. second\n3. third\n");
+markdownCase("code_block", "```js\nconst x = 1;\nconsole.log(x);\n```\n");
+markdownCase("blockquote", "> quoted line\n> second line\n");
+markdownCase("hr", "---\n");
+markdownCase("table", "| a | b |\n|---| --- |\n| 1 | 2 |\n");
+markdownCase("strikethrough", "~~gone~~ stays\n");
+markdownCase("autolink_email", "<foo@bar.com>\n");
+markdownCase("image_line_skip", "![alt](img.png)\n");
+markdownCase("dollar_inline_plain_text", "The value is $x^2 + 1$.\n");
+markdownCase("wrapped_long", "This is a very long paragraph that should wrap across multiple lines at width 30. It has several words and keeps going.\n", 30);
+markdownCase("padding", "hello\n", 20);
+markdownCase("html_tag", "<div>plain</div>\n");
+markdownCase("task_list", "- [ ] todo\n- [x] done\n");
+markdownCase("trailing_space_paragraph", "para with trailing space  \nnext\n");
+markdownCase("nested_blockquote", "> outer\n> > inner\n");
+markdownCase("list_with_code", "- item\n  ```\n  code\n  ```\n");
+
+
+markdownCase("heading_levels", "## Sub\n### Subsub\n");
+markdownCase("table_align", "| L | C | R |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n");
+markdownCase("table_varying", "| short | longcellcontent |\n|-------|-----------------|\n| a | b |\n", 30);
+markdownCase("table_narrow", "| a | b |\n|---| --- |\n| 1 | 2 |\n", 10);
+markdownCase("br_and_escape", "line1\\nline2 and \\*not emph*\n");
+markdownCase("lazy_blockquote", "> lazy\ncontinuation\n");
+markdownCase("nested_list_ordered", "1. one\n   1. a\n   2. b\n2. two\n");
+markdownCase("loose_list", "- a\n\n- b\n");
+markdownCase("start_numbered_list", "3. three\n4. four\n");
+markdownCase("list_paragraph_code", "- first\n\n  para\n- second\n");
+markdownCase("multiline_code", "\`\`\`python\ndef f():\n    return 1\n\`\`\`\n");
+markdownCase("dollar_block_plain_text", "$$\\sum_{i=1}^{n} i$$\n");
+markdownCase("dollar_currency_plain_text", "The cost is $5 and $10 total.\n");
+markdownCase("heading_no_space_after", "# H1\n");
+markdownCase("code_without_lang", "\`\`\`\nplain code\n\`\`\`\n");
+markdownCase("escape_asterisk", "not \\*emph* here\n");
+markdownCase("autolink_url", "<https://example.com>\n");
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 mkdirSync(OUT_DIR, { recursive: true });
@@ -1570,6 +1812,8 @@ drift += writeFixture(INPUT_OUT_FILE, inputRecords, "input.cases.jsonl");
 drift += writeFixture(BOX_OUT_FILE, boxRecords, "box.cases.jsonl");
 drift += writeFixture(IMAGE_OUT_FILE, imageRecords, "image.cases.jsonl");
 drift += writeFixture(SETTINGS_LIST_OUT_FILE, settingsListRecords, "settings-list.cases.jsonl");
+drift += writeFixture(EDITOR_OUT_FILE, editorRecords, "editor.cases.jsonl");
+drift += writeFixture(MARKDOWN_OUT_FILE, markdownRecords, "markdown.cases.jsonl");
 
 if (CHECK && drift > 0) {
 	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");

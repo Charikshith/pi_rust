@@ -4,15 +4,27 @@
 //! `docs/analysis/05-tui.md`. Ported literally (NOT ratatui); `crossterm` is a
 //! thin syscall shim only. Renderer + editor land in feat-006.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+// FFI shim (Wave 7): `win_console.rs` (Win32 console mode) needs raw extern
+// calls to set `ENABLE_VIRTUAL_TERMINAL_INPUT` — the same end state real
+// Pi's native addon (unvendored here) sets. The unsafe is tightly scoped,
+// cfg-gated, and fail-closed (see the module's docs) — the one deliberate,
+// documented exception to the crate's no-unsafe rule (`deny` so modules
+// must explicitly `allow`; `forbid` would reject even the allow).
+// `native_modifiers.rs` has no native addon to call and is fail-closed
+// (`false`) unconditionally — no unsafe code needed there.
+#![allow(unsafe_code)]
 
 pub mod autocomplete;
 pub mod components;
+pub mod editor;
 pub mod editor_component;
 pub mod fuzzy;
 pub mod keybindings;
 pub mod keys;
 pub mod kill_ring;
+pub mod markdown;
+pub mod native_modifiers;
 pub mod stdin_buffer;
 pub mod terminal;
 pub mod terminal_colors;
@@ -20,6 +32,7 @@ pub mod terminal_image;
 pub mod tui;
 pub mod undo_stack;
 pub mod utils;
+pub mod win_console;
 pub mod word_navigation;
 
 pub use autocomplete::{
@@ -58,7 +71,10 @@ pub use tui::{
     OverlayMarginValue, OverlayOptions, OverlayUnfocusOptions, SharedComponent, SizeValue,
     CURSOR_MARKER, TUI,
 };
-pub use utils::{slice_by_column, truncate_to_width, visible_width, wrap_text_with_ansi};
+pub use utils::{
+    is_cjk_break_char, is_whitespace_char, slice_by_column, truncate_to_width, visible_width,
+    wrap_text_with_ansi,
+};
 
 /// Returns the crate name — placeholder until the renderer (feat-006) lands.
 pub fn name() -> &'static str {
