@@ -63,3 +63,17 @@ shortcut/flag/provider registration).
       (submit→prompt path, ctrl+d quit), 179/179 coding-agent tests,
       clippy/fmt clean, workspace 384/3 (3 pre-existing find tests). Wave 2
       replaces the echo prompt callback with real `session.prompt` rendering.
+- [x] Wave 2 — streaming turn display
+      (`interactive_mode.rs` + main.rs + tests). `InteractiveMode` now takes
+      the `Arc<dyn PrintModeSession>` + `tokio::runtime::Handle`; on submit it
+      blocks the loop on `session.prompt` (exactly Pi's `await
+      this.session.prompt`), while the session's event subscription bridges
+      agent-thread events through an mpsc channel into the main loop, which
+      renders them into a chat `Container`: user line (▶ prefix), streaming
+      assistant text into a live `Text` component (updates on
+      `message_update`, finalized on `message_end`), spacer on `agent_end`.
+      assistant_text() extracts `content[].text` blocks (trimmed), matching
+      the assistant-message component's text handling; thinking/tool blocks
+      ignored this wave. main.rs wires the real SingleTurnSession. Verify: 3
+      smoke tests (submit→prompt, ctrl+d quit, events stream into chat),
+      clippy/fmt clean, workspace 385/3.

@@ -442,7 +442,7 @@ async fn run(parsed: args::Args) -> i32 {
     // Step 29 (`main.ts:811-858`): interactive mode launches the TUI; rpc
     // already exited above; everything else runs print mode.
     let run_exit_code = if app_mode == AppMode::Interactive {
-        run_interactive_mode().await
+        run_interactive_mode(session).await
     } else {
         let print_output_mode = print_mode::to_print_output_mode(app_mode);
         print_mode::run_print_mode(
@@ -468,20 +468,17 @@ async fn run(parsed: args::Args) -> i32 {
 
 /// `runInteractiveMode` (`main.ts:811-858`) — launch the TUI and loop.
 ///
-/// Wave 1 scaffold: prompt via the Editor, echo submissions back into the
-/// TUI, quit on Ctrl+D. The real `session.prompt` turn + streaming render is
-/// Wave 2 (the `host` is built above and threaded in then).
-async fn run_interactive_mode() -> i32 {
+/// Wave 2: on submit, `session.prompt` runs (blocking the loop via the
+/// runtime handle); session events stream into the TUI's chat container
+/// (user line, streaming assistant text, separator). Quit on Ctrl+D.
+async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
     use pirust_coding_agent::interactive_mode::InteractiveMode;
 
+    let session: Arc<dyn pirust_coding_agent::print_mode::PrintModeSession> = session;
+    let runtime = tokio::runtime::Handle::current();
     let terminal = Box::new(pirust_tui::terminal::ProcessTerminal::new());
-    let mut mode = InteractiveMode::new(terminal);
-    mode.run(|text: String| {
-        // Wave 1: the editor round-trips text to the prompt callback.
-        // Wave 2 replaces this with `session.prompt(text)` rendered into the
-        // TUI's chat container.
-        eprintln!("[wave1] submit: {text}");
-    });
+    let mut mode = InteractiveMode::new(terminal, session, runtime);
+    mode.run();
     0
 }
 
