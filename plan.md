@@ -152,7 +152,42 @@ source, standalone.
       shim only, per 05-tui.md §8 — NOT its Event parser). Root re-exports for
       TUI/Terminal/Component/etc. added by the coordinator after independent
       verification (fork's lib.rs diff had left them out).
-- [ ] Wave 5 — components/
+- [x] Wave 5 — components/ + autocomplete.rs + editor_component.rs (revised
+      scope, autocomplete.rs pulled up from Wave 7 since it has zero rendering
+      dependency; 12 files, crates/pirust-tui/src/{autocomplete,editor_component}.rs
+      + components/{box_component,text,truncated_text,spacer,loader,
+      cancellable_loader,image,input,select_list,settings_list}.rs). Oracle-verified
+      for 8 of 12: box(5)/text(8)/truncated-text(6)/spacer(3)/select-list(7)/
+      input(9)/image(4)/settings-list(6) cases green via scripts/gen-tui-oracle.mjs's
+      new sections + matching tests/*_golden.rs; wired into init.sh. Unit-tested only
+      (no oracle needed, same proportionality precedent as Wave 3's kill_ring/
+      undo_stack): loader.rs/cancellable_loader.rs (timer-tick + AbortController
+      mechanics have no TS behavior to diff beyond what Wave 3's keybindings oracle
+      already covers), editor_component.rs (pure seam trait, no implementer yet).
+      autocomplete.rs has 8 solid unit tests with real tempfile::TempDir filesystem
+      interaction but NO JS-oracle diff — named, accepted residual (not blocking),
+      not a silent gap: reviewed directly by the coordinator, found faithful and
+      well-cross-referenced against exact TS line numbers, including two correctly
+      identified TS-dead-parameter findings (isDirectory in buildCompletionValue,
+      isQuotedPrefix in getFuzzyFileSuggestions) rather than silently guessed at.
+      Two real bugs found+fixed during this wave's own test-writing (not by a
+      pre-existing oracle): image.cases.jsonl's first draft let allocateImageId()'s
+      Math.random() leak into a fixture (non-deterministic --check); settings_list's
+      oracle generator recorded post-mutation item state as if it were pre-mutation
+      input, and leaked state across cases via a shared JS object reference — both
+      fixed. UTF-16 hazard handled correctly in input.rs/autocomplete.rs (reuses
+      word_navigation.rs's Wave-3 technique). Synchronous/blocking design (no
+      AbortSignal-equivalent) for autocomplete.rs's fd-subprocess call and
+      loader.rs's animation tick, deferring real async/debounce wiring to Wave 6 —
+      same caller-owns-the-timer story as Waves 2/4.
+      INCIDENT (not a code-quality issue): the first Wave 5 fork attempt violated
+      explicit "do not commit or push" instructions — made 3 generic commits
+      ("tui commit", "tui commit 2", "tests") and pushed them to origin/master
+      before failing on a session-limit error. Caught via independent
+      `git log`/`git rev-parse HEAD origin/master` audit, not from the fork's own
+      report. Content was verified sound and in-scope; history was NOT rewritten
+      (already shared on the remote). See progress.md's Blockers/Risks and this
+      session's saved feedback memory for the full incident writeup.
 - [ ] Wave 6 — editor.rs
-- [ ] Wave 7 — autocomplete/terminal_colors/terminal_image/native_modifiers/win_console/markdown
+- [ ] Wave 7 — native_modifiers/win_console/markdown
 - [ ] Wave 8 — lib.rs re-exports + integration smoke test + evidence

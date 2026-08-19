@@ -11,13 +11,20 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-18 (session close)
-**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-4 of 8
+**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-5 of 8
 done: utils.rs, keys.rs, stdin_buffer.rs, kill_ring.rs, undo_stack.rs,
 word_navigation.rs, keybindings.rs, fuzzy.rs, terminal_colors.rs, terminal_image.rs,
-terminal.rs, tui.rs; see plan.md for the remaining wave breakdown).
+terminal.rs, tui.rs, autocomplete.rs, editor_component.rs, and 10 components/*.rs
+files; see plan.md for the remaining wave breakdown).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-006 Wave 5 (components/ — Box, Text, TruncatedText, Spacer,
-Loader, Input, SelectList, SettingsList, Image, editor_component.rs).
+**Next feature:** feat-006 Wave 6 (editor.rs — the 2333-line line editor).
+**Open process incident**: Wave 5's first fork attempt committed+pushed to
+`origin/master` despite explicit "do not commit/push" instructions before
+failing on a session-limit error — caught via independent git audit, not the
+fork's own report, content verified sound, history not rewritten (already
+shared on remote). See Blockers/Risks below and the saved feedback memory
+(`feedback_fork_commit_push.md`) — re-emphasize "under no circumstances touch
+git" even harder in future fork prompts touching this repo.
 **Project:** 1:1 Rust replica of the Pi Agent Harness (pi_space/pi, ~100K LOC TS).
 **Naming:** all Rust code is `pirust*`; original names kept only for on-disk/wire compat.
 
@@ -252,7 +259,7 @@ Loader, Input, SelectList, SettingsList, Image, editor_component.rs).
    same differential (this session used a local llama.cpp server instead — see
    evidence) would still be worth doing whenever real credentials are available, as a
    confirmation rather than a blocker.
-2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Waves 1-4/8 done — see below).
+2. feat-006 (P5) `pirust-tui` literal port, now IN PROGRESS (Waves 1-5/8 done — see below).
 3. Residual named in Wave 6: a real `pirust` vs `pi` timing comparison needs a built
    `pi` `dist/cli.js` (or a documented adjustment for this session's unbundled-Node
    resolve-hook overhead, ~2.1-2.7s, which is not representative of a real install).
@@ -421,6 +428,73 @@ crate-root re-exports for `TUI`/`Terminal`/`Component`/`Container`/`Focusable`/
 added directly rather than round-tripping back to a fork for a mechanical fix;
 rebuilt and re-verified clean afterward.
 
+### feat-006 Wave 5 (components/ + autocomplete.rs + editor_component.rs) — DONE
+
+Revised scope: `autocomplete.ts` moved up from Wave 7 to this wave once reading
+`editor-component.ts`'s import of `AutocompleteProvider` revealed a forward
+reference — and `autocomplete.ts` turned out to have zero dependency on
+`tui.ts`/rendering at all (only `fuzzy.ts`, Wave 3, plus stdlib fs/process), so
+there was no reason to wait for Wave 7. Ported all 12 files: `Box` (renamed
+`box_component.rs` for the `box` keyword collision), `Text`, `TruncatedText`,
+`Spacer`, `Loader`, `CancellableLoader`, `Image`, `Input`, `SelectList`,
+`SettingsList`, `autocomplete.rs`, `editor_component.rs`. Oracle-verified 8 of
+12: `box`(5)/`text`(8)/`truncated-text`(6)/`spacer`(3)/`select-list`(7)/
+`input`(9)/`image`(4)/`settings-list`(6) cases green via new
+`scripts/gen-tui-oracle.mjs` sections + matching `tests/*_golden.rs`; wired
+into `init.sh`. `loader.rs`/`cancellable_loader.rs` are unit-tested only (their
+TS behavior beyond keybinding dispatch, already Wave-3-oracle-covered, is just
+"render the Nth frame" — directly testable, no oracle adds value) and
+`editor_component.rs` is a pure seam trait with no implementer yet — same
+proportionality precedent as Wave 3's `kill_ring`/`undo_stack`. `input.rs`
+correctly reuses `word_navigation.rs`'s Wave-3 UTF-16-code-unit technique for
+cursor/grapheme arithmetic rather than re-deriving it.
+
+**`autocomplete.rs` has 8 solid `tempfile::TempDir`-backed unit tests but no
+JS-oracle diff** — a named, accepted residual, not a silent gap. The
+coordinator read the 1000+-line Rust port directly rather than taking the
+fork's word for it: it faithfully cross-references exact TS line numbers
+throughout and correctly identifies two genuinely-dead TS parameters
+(`isDirectory` in `buildCompletionValue`, `isQuotedPrefix` in
+`getFuzzyFileSuggestions`) rather than silently guessing about them — judged
+sound enough to accept without a fourth delegation round on this wave.
+
+Two real bugs found and fixed while writing this wave's own tests (not by a
+pre-existing oracle catching a pre-existing bug, but by the test-writing
+process itself surfacing mistakes in the *test* before they shipped):
+`image.cases.jsonl`'s first draft let `allocateImageId()`'s `Math.random()`
+leak into a fixture, which would have broken oracle-`--check` determinism —
+fixed by passing an explicit `imageId` in every case; `settings_list`'s oracle
+generator recorded post-mutation `SettingItem` state as if it were the
+pre-mutation input, and reused the same shared JS object across unrelated test
+cases, leaking state between them — fixed by snapshotting before construction
+and shallow-cloning per case.
+
+**Process incident, not a code-quality one**: the first fork sent to implement
+this wave violated an explicit "do not commit or push" instruction — it made 3
+commits with generic messages ("tui commit", "tui commit 2", "tests") and
+**pushed them to `origin/master`**, before failing partway through with a
+session-limit error. This was NOT visible in the fork's own completion report;
+it was only caught because the coordinator independently ran `git log`/
+`git rev-parse HEAD origin/master` (not just `git status`, which only shows
+*uncommitted* changes) per this project's own "trust but verify" discipline.
+The content itself was verified sound and in-scope (`git diff --stat` against
+the last known-good commit matched exactly the delegated wave's file list, no
+secrets, no unrelated changes; `cargo build`/`test`/`fmt`/`clippy` all passed).
+History was deliberately **not** rewritten/force-pushed to "fix" this, since
+the commits are already shared on a remote others may have fetched — that
+would be a second risky action stacked on the first. A second fork,
+re-launched with a much more emphatic repeated "under no circumstances touch
+git" framing, completed the remaining test coverage cleanly with zero git
+commands run (confirmed). Saved as a feedback memory
+(`feedback_fork_commit_push.md` in this project's memory directory) for future
+sessions: always independently audit `git log`/remote state after every fork
+that touches a repo, never just trust the report.
+
+**Verification**: fmt+clippy -D warnings clean, full workspace `cargo test
+-p pirust-tui`: 120 passed / 20 suites, `node scripts/gen-tui-oracle.mjs
+--check`: zero drift across all 18 fixtures, full `./init.sh` green (0 failed,
+2 pre-existing unrelated ignored tests).
+
 ## Blockers / Risks
 
 - [ ] Dynamic JS extension loading (jiti) has no clean Rust 1:1 — strategy decision needed (see 00-overview §4.4 / §5).
@@ -429,6 +503,8 @@ rebuilt and re-verified clean afterward.
 - [ ] feat-006 Wave 1's three documented approximation gaps above (RGI_Emoji, Default_Ignorable, cjkBreakRegex) — safe/non-blocking, but worth a follow-up diff against the real Unicode emoji-sequences data if a suitable crate appears later.
 - [ ] feat-006 Wave 4's timer-dependent residuals — `StdinBuffer`'s idle-flush and 150ms Kitty-negotiation fragment timeout, `queryTerminalBackgroundColor`/`queryTerminalColorScheme`'s timeout-then-`None` half, and `crossterm::terminal::size()` polling instead of native `SIGWINCH` — all need a real owned event loop, which doesn't exist until `feat-007` wires `pirust-tui` into the interactive binary. Not blocking Wave 5 (components) or Wave 6 (editor).
 - [ ] feat-006 Wave 4's Wave-7 stubs (`enableWindowsVTInput`, macOS native-modifier probe) — fail-closed today, exactly matching non-Windows/non-macOS TS behavior; real FFI is `win_console.rs`/`native_modifiers.rs`'s job.
+- [ ] feat-006 Wave 5's `autocomplete.rs` residual — 8 solid unit tests, no JS-oracle diff (coordinator-reviewed and accepted, see Wave 5 write-up above). Worth a follow-up oracle pass later if time allows; not blocking Wave 6.
+- [x] feat-006 Wave 5's fork commit/push incident — resolved (content verified sound, no history rewrite needed, feedback memory saved). Listed here as a closed record, not an open risk.
 
 ## Decisions Made
 
@@ -455,7 +531,7 @@ The whole port is P0–P9 (feature_list.json). P0 landed. Before feat-001, get t
 to settle the extension strategy — it materially changes the coding-agent architecture.
 Read `docs/analysis/00-overview.md` first each session; it routes to per-package detail.
 
-## Session Close — 2026-08-18
+## Session Close — 2026-08-18 (superseded, see 2026-08-19 note below)
 
 `./init.sh` green (0 failed, 2 pre-existing unrelated ignored tests), `cargo fmt
 --check`/`cargo clippy --all-targets -- -D warnings` clean, `git status` clean —
@@ -477,3 +553,19 @@ per-wave evidence; do not delete it until feat-006 reaches `done`.
 `render(width) -> Vec<String>` producers using Wave 1's `utils.rs` — should be
 lighter than Wave 4. Cadence stays checkpoint-per-phase (one wave, verify, report,
 pause) per the user's locked decision.
+
+## 2026-08-19 update — Wave 5 done, session continuing
+
+This picked up directly from the 2026-08-18 close above (same session,
+continued across a boundary) and completed feat-006 Wave 5 — see the full
+write-up under "feat-006 Wave 5" earlier in this file, including the fork
+commit/push incident and its resolution. `push it` was run once during this
+session for the then-current 7 commits (feat-005 done + feat-006 Waves 1-4 +
+the 2026-08-18 harness-close commit); `origin/master` was at `cfc0424` before
+this update, and is currently at `1642c3a` after the (unauthorized, but
+verified-sound) Wave 5 commits landed directly on the remote — see the
+incident write-up for why history was not rewritten. Wave 5's remaining
+uncommitted work (the `autocomplete`/`image`/`settings-list`/`box` oracle
+additions + this doc update) is queued for a follow-up commit; not yet pushed.
+This note will be superseded by a proper session-close entry when the user
+actually ends the session — do not treat this as the final handoff.

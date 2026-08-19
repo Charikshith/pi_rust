@@ -1,0 +1,5 @@
+{"note":"no-children-renders-nothing","paddingX":1,"paddingY":1,"useBg":false,"children":[],"width":10,"result":[]}
+{"note":"single-child-default-padding","paddingX":1,"paddingY":1,"useBg":false,"children":[["hi"]],"width":10,"result":["          "," hi       ","          "]}
+{"note":"two-children-no-padding","paddingX":0,"paddingY":0,"useBg":false,"children":[["a"],["b"]],"width":10,"result":["a         ","b         "]}
+{"note":"with-background-fn","paddingX":1,"paddingY":1,"useBg":true,"children":[["hi"]],"width":10,"result":["<bg>          </bg>","<bg> hi       </bg>","<bg>          </bg>"]}
+{"note":"vertical-padding-two","paddingX":0,"paddingY":2,"useBg":false,"children":[["x"]],"width":6,"result":["      ","      ","x     ","      ","      "]}

@@ -56,7 +56,9 @@ fn every_truncated_text_record_matches_pi() {
         let mut t = TruncatedText::new(text, padding_x, padding_y);
         let actual = t.render(width);
         if actual != expected {
-            failures.push(format!("[{note}]\n  expected: {expected:?}\n  actual:   {actual:?}"));
+            failures.push(format!(
+                "[{note}]\n  expected: {expected:?}\n  actual:   {actual:?}"
+            ));
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));

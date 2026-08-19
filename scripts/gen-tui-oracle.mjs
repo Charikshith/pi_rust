@@ -111,6 +111,10 @@ const { TruncatedText } = await import(pathToFileURL(join(COMPONENTS_SRC, "trunc
 const { Spacer } = await import(pathToFileURL(join(COMPONENTS_SRC, "spacer.ts")).href);
 const { SelectList } = await import(pathToFileURL(join(COMPONENTS_SRC, "select-list.ts")).href);
 const { Input } = await import(pathToFileURL(join(COMPONENTS_SRC, "input.ts")).href);
+const { Box: PiBox } = await import(pathToFileURL(join(COMPONENTS_SRC, "box.ts")).href);
+const { Image: PiImage } = await import(pathToFileURL(join(COMPONENTS_SRC, "image.ts")).href);
+const { SettingsList } = await import(pathToFileURL(join(COMPONENTS_SRC, "settings-list.ts")).href);
+const { getCellDimensions, setCellDimensions } = await import(pathToFileURL(terminalImagePath).href);
 
 const bgFn = (text) => `<bg>${text}</bg>`;
 
@@ -1398,6 +1402,134 @@ ip("bracketed_paste_strips_newlines", [
 ip("render_scrolls_when_value_exceeds_width", [{ op: "setValue", value: "this is a very long input value that overflows" }], 20);
 ip("render_shows_hardware_cursor_marker_when_focused", [{ op: "setValue", value: "hi" }]);
 
+// ===========================================================================
+// BOX (feat-006 Wave 5)
+// ===========================================================================
+const BOX_OUT_FILE = join(OUT_DIR, "box.cases.jsonl");
+const boxRecords = [];
+function fixedChild(lines) {
+	return { render: () => lines, invalidate: () => {} };
+}
+function bx(note, paddingX, paddingY, useBg, children, width) {
+	const box = new PiBox(paddingX, paddingY, useBg ? bgFn : undefined);
+	for (const c of children) box.addChild(fixedChild(c));
+	boxRecords.push({ note, paddingX, paddingY, useBg, children, width, result: box.render(width) });
+}
+bx("no-children-renders-nothing", 1, 1, false, [], 10);
+bx("single-child-default-padding", 1, 1, false, [["hi"]], 10);
+bx("two-children-no-padding", 0, 0, false, [["a"], ["b"]], 10);
+bx("with-background-fn", 1, 1, true, [["hi"]], 10);
+bx("vertical-padding-two", 0, 2, false, [["x"]], 6);
+
+// ===========================================================================
+// IMAGE (feat-006 Wave 5)
+// ===========================================================================
+const IMAGE_OUT_FILE = join(OUT_DIR, "image.cases.jsonl");
+const imageRecords = [];
+function img(note, capsImages, base64Data, mimeType, dims, options, width) {
+	resetCapabilitiesCache();
+	setCapabilities({ images: capsImages, trueColor: true, hyperlinks: true });
+	setCellDimensions({ widthPx: 9, heightPx: 18 });
+	const theme = { fallbackColor: (s) => `<fb>${s}</fb>` };
+	const image = new PiImage(base64Data, mimeType, theme, options ?? {}, dims);
+	const result = image.render(width);
+	imageRecords.push({ note, capsImages, base64Data, mimeType, dims, options: options ?? {}, width, result });
+	resetCapabilitiesCache();
+}
+// `imageId` is always passed explicitly below (never left to the real
+// `allocateImageId()`'s `Math.random()`) so every case is byte-deterministic
+// across regenerations, matching this oracle's `--check` idempotency
+// contract; `allocateImageId`'s own randomness is exercised by a plain unit
+// test in `terminal_image.rs` (Wave 4), not here.
+img("no-capability-renders-fallback", null, "", "image/png", { widthPx: 100, heightPx: 50 }, { filename: "cat.png" }, 40);
+img("kitty-capability-renders-sequence", "kitty", pngHeader(90, 180), "image/png", undefined, { maxWidthCells: 10, imageId: 7 }, 40);
+img("iterm2-capability-renders-sequence", "iterm2", pngHeader(90, 180), "image/png", undefined, { maxWidthCells: 10 }, 40);
+img(
+	"kitty-with-explicit-image-id-reuses-id",
+	"kitty",
+	pngHeader(90, 180),
+	"image/png",
+	undefined,
+	{ maxWidthCells: 10, imageId: 42 },
+	40,
+);
+
+// ===========================================================================
+// SETTINGS LIST (feat-006 Wave 5)
+// ===========================================================================
+const SETTINGS_LIST_OUT_FILE = join(OUT_DIR, "settings-list.cases.jsonl");
+const settingsListRecords = [];
+const settingsIdentityTheme = () => ({
+	label: (s) => s,
+	value: (s) => s,
+	description: (s) => s,
+	cursor: "> ",
+	hint: (s) => s,
+});
+function sanitizeSettingItem(item) {
+	// Drop the `submenu` function (not JSON-serializable) — its presence/
+	// absence is what the fixture cares about, recorded separately below.
+	const { submenu, ...rest } = item;
+	return { ...rest, hasSubmenu: submenu !== undefined };
+}
+function stl(note, itemsInput, maxVisible, enableSearch, ops, width) {
+	// Snapshot the ORIGINAL config before construction — `SettingsList` keeps
+	// live references to these objects and mutates `currentValue` in place
+	// (e.g. `activateItem`'s value-cycling), so recording `itemsInput` after
+	// running `ops` would silently capture post-mutation state as if it were
+	// the fixture's initial input. Caught by inspecting a generated fixture
+	// by hand before wiring the Rust side to it.
+	const itemsSnapshot = itemsInput.map(sanitizeSettingItem);
+	const items = itemsInput.map((i) => ({ ...i }));
+	const changes = [];
+	let cancelled = false;
+	const list = new SettingsList(
+		items,
+		maxVisible,
+		settingsIdentityTheme(),
+		(id, newValue) => changes.push({ id, newValue }),
+		() => {
+			cancelled = true;
+		},
+		{ enableSearch },
+	);
+	const events = [];
+	for (const op of ops) {
+		if (op.op === "render") {
+			events.push({ render: list.render(op.width ?? width) });
+		} else if (op.op === "handleInput") {
+			list.handleInput(op.data);
+			events.push({ afterInput: op.data, cancelled, changes: [...changes] });
+		}
+	}
+	settingsListRecords.push({
+		note,
+		items: itemsSnapshot,
+		maxVisible,
+		enableSearch,
+		ops,
+		width,
+		events,
+	});
+}
+const cycleItem = { id: "a", label: "A", currentValue: "x", values: ["x", "y", "z"] };
+const descItem = { id: "b", label: "B", currentValue: "1", description: "A helpful description" };
+stl("empty-list-shows-hint", [], 5, false, [{ op: "render" }], 40);
+stl("cycles-value-on-confirm", [cycleItem], 5, false, [
+	{ op: "handleInput", data: " " },
+	{ op: "render" },
+], 40);
+stl("down-then-up-wraps", [cycleItem, descItem], 5, false, [
+	{ op: "handleInput", data: "\x1b[A" }, // up from index 0 wraps to last
+	{ op: "render" },
+], 40);
+stl("cancel-fires-callback", [cycleItem], 5, false, [{ op: "handleInput", data: "\x1b" }], 40);
+stl("search-filters-then-confirm", [{ id: "a", label: "Alpha", currentValue: "1" }, { id: "b", label: "Beta", currentValue: "2" }], 5, true, [
+	{ op: "handleInput", data: "Beta" },
+	{ op: "render" },
+], 40);
+stl("shows-description-for-selected-item", [descItem], 5, false, [{ op: "render", width: 60 }], 40);
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1435,6 +1567,9 @@ drift += writeFixture(TRUNCATED_TEXT_OUT_FILE, truncatedTextRecords, "truncated-
 drift += writeFixture(SPACER_OUT_FILE, spacerRecords, "spacer.cases.jsonl");
 drift += writeFixture(SELECT_LIST_OUT_FILE, selectListRecords, "select-list.cases.jsonl");
 drift += writeFixture(INPUT_OUT_FILE, inputRecords, "input.cases.jsonl");
+drift += writeFixture(BOX_OUT_FILE, boxRecords, "box.cases.jsonl");
+drift += writeFixture(IMAGE_OUT_FILE, imageRecords, "image.cases.jsonl");
+drift += writeFixture(SETTINGS_LIST_OUT_FILE, settingsListRecords, "settings-list.cases.jsonl");
 
 if (CHECK && drift > 0) {
 	console.error("\nDRIFT: tui fixture(s) stale; run: node scripts/gen-tui-oracle.mjs");

@@ -52,7 +52,9 @@ fn every_spacer_record_matches_pi() {
         let mut s = Spacer::new(lines);
         let actual = s.render(width);
         if actual != expected {
-            failures.push(format!("[{note}]\n  expected: {expected:?}\n  actual:   {actual:?}"));
+            failures.push(format!(
+                "[{note}]\n  expected: {expected:?}\n  actual:   {actual:?}"
+            ));
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
