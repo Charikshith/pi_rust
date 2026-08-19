@@ -841,6 +841,17 @@ concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
 - main.rs wires the real SingleTurnSession.
 - 3 smoke tests; workspace 385/3, clippy/fmt clean.
 
+### 2026-08-19 — feat-007 Wave 3 (tool-call rendering + autocomplete) DONE
+
+- `interactive_theme.rs`: theme.ts fg/bg (ANSI truecolor) + dark.json tool
+  colors (pending/success/error bg, text/gray fg).
+- `ToolExecutionComponent` (tool-execution.ts simplified port): tool name +
+  args JSON + streaming result preview (10-line truncation), bg switches
+  pending→success/error. render_event handles tool_execution_start/update/end
+  via pendingTools map keyed by tool_call_id.
+- Autocomplete: CombinedAutocompleteProvider + 22 BUILTIN_SLASH_COMMANDS.
+- 5 smoke tests; 184/184 coding-agent; workspace 389/3, clippy/fmt clean.
+
 This is the honest record. The audit's writeup (progress.md:674) is preserved
 above but superseded by this analysis — every claim in it failed verification
 against the real oracle.
