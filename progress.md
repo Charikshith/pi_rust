@@ -852,6 +852,22 @@ concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
 - Autocomplete: CombinedAutocompleteProvider + 22 BUILTIN_SLASH_COMMANDS.
 - 5 smoke tests; 184/184 coding-agent; workspace 389/3, clippy/fmt clean.
 
+### 2026-08-19 — SESSION CLOSE (feat-007, mid-Wave-4→5 boundary)
+
+State at close:
+- feat-006 DONE (Wave 8, commit 65a5bba).
+- feat-007 Waves 1-4 DONE (commits b71f4f7 → 8d8d050, pushed): interactive
+  scaffold, streaming turn display, tool-call rendering + slash autocomplete,
+  pirust-extension-api crate (Extension host surface port).
+- Verified before close: `pirust -p --model anthropic/Qwen3.5-0.8B-Q8_0.gguf
+  "Reply with exactly one word: ok"` → `ok` against the local llama.cpp server
+  (Qwen3.5-0.8B-GGUF at 127.0.0.1:8080). Print-mode path works end-to-end.
+- Workspace: 397 passed / 3 failed (pre-existing env-polluted find tests),
+  clippy/fmt clean.
+- Next session: feat-007 Wave 5 (plan-mode bundled extension) — first real
+  built-in exercising ExtensionApi end-to-end; then Wave 6 (bind the runner
+  into SingleTurnSession, hook bind_extensions) + closeout.
+
 ### 2026-08-19 — feat-007 Wave 4 (`pirust-extension-api` crate) DONE
 
 - New `crates/pirust-extension-api/` (5 modules + demo_extension.rs integration

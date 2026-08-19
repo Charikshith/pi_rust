@@ -1,5 +1,11 @@
 # plan.md — feat-007: P6 — interactive pirust + native extension runner
 
+> SESSION PAUSE 2026-08-19: Waves 1-4 DONE (commits b71f4f7..8d8d050).
+> Next: **Wave 5 — plan-mode bundled extension**. Resume here. Full gates
+> green at close (397/3, clippy/fmt clean). Live turn vs local llama.cpp
+> Qwen3.5-0.8B confirmed working (`pirust -p --model
+> anthropic/Qwen3.5-0.8B-Q8_0.gguf` → `ok`).
+
 Source: `packages/coding-agent/src/modes/interactive/` (interactive-mode.ts 6,008
 lines + components/ 9,214 lines + theme/ 1,420 lines + assets/) and the
 extension host surface. Spec: `docs/analysis/03-coding-agent.md` §modes,
