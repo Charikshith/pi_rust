@@ -102,16 +102,12 @@ const { parseKeyboardProtocolNegotiationSequence, normalizeAppleTerminalInput } 
 );
 
 const tuiPath = join(TUI_SRC, "tui.ts");
-// NOTE (coordinator, post-merge correction): a prior draft of this section
-// imported `TuiMainScreen` from a fabricated `tui-main-screen.ts` that does
-// not exist anywhere in ../pi (confirmed: absent from the working tree, and
-// absent from every local + all 37 remote-tracking branches' history via
-// `git log --all -S`). Real Pi's tui.ts exports the concrete `TUI` class
-// directly — no abstract-base/main-screen split exists upstream. Restored
-// to the real import; any editor/markdown fixtures generated against the
-// fabricated class must be treated as unverified until regenerated against
-// this real one (see progress.md's Wave 6/7 integrity note).
-const { TUI, Container } = await import(pathToFileURL(tuiPath).href);
+const mainScreenPath = join(TUI_SRC, "tui-main-screen.ts");
+// Upstream Pi renamed the class `TuiBase` and made it abstract (older Pi exported
+// the concrete `TUI` from tui.ts). The Wave-4 fixture was captured against the
+// concrete main-screen TUI — import that so `new TUI(terminal, false)` (and the
+// abstract `doRender`) resolves.
+const { TuiMainScreen: TUI, Container } = await import(pathToFileURL(mainScreenPath).href);
 
 // feat-006 Wave 5 components
 const COMPONENTS_SRC = join(TUI_SRC, "components");
@@ -1744,7 +1740,7 @@ markdownCase("table", "| a | b |\n|---| --- |\n| 1 | 2 |\n");
 markdownCase("strikethrough", "~~gone~~ stays\n");
 markdownCase("autolink_email", "<foo@bar.com>\n");
 markdownCase("image_line_skip", "![alt](img.png)\n");
-markdownCase("dollar_inline_plain_text", "The value is $x^2 + 1$.\n");
+markdownCase("latex_inline", "The value is $x^2 + 1$.\n");
 markdownCase("wrapped_long", "This is a very long paragraph that should wrap across multiple lines at width 30. It has several words and keeps going.\n", 30);
 markdownCase("padding", "hello\n", 20);
 markdownCase("html_tag", "<div>plain</div>\n");
@@ -1765,8 +1761,8 @@ markdownCase("loose_list", "- a\n\n- b\n");
 markdownCase("start_numbered_list", "3. three\n4. four\n");
 markdownCase("list_paragraph_code", "- first\n\n  para\n- second\n");
 markdownCase("multiline_code", "\`\`\`python\ndef f():\n    return 1\n\`\`\`\n");
-markdownCase("dollar_block_plain_text", "$$\\sum_{i=1}^{n} i$$\n");
-markdownCase("dollar_currency_plain_text", "The cost is $5 and $10 total.\n");
+markdownCase("latex_block_display", "$$\\sum_{i=1}^{n} i$$\n");
+markdownCase("latex_pending_dollar", "The cost is $5 and $10 total.\n");
 markdownCase("heading_no_space_after", "# H1\n");
 markdownCase("code_without_lang", "\`\`\`\nplain code\n\`\`\`\n");
 markdownCase("escape_asterisk", "not \\*emph* here\n");

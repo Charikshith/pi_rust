@@ -558,8 +558,12 @@ fn apply_negotiation(shared: &Arc<SharedState>, parsed: KeyboardProtocolNegotiat
 
 fn forward(shared: &Arc<SharedState>, sequence: &str) {
     // `forwardInputSequence` (terminal.ts:309): Apple Terminal Shift+Enter
-    // normalization.
-    let should_detect_native_shift_enter = sequence == "\r" && is_apple_terminal_session();
+    // normalization. On macOS/Win32 the native-modifier probe is wired for
+    // real in `native_modifiers.rs` (Wave 7) — `is_shift_pressed` is `false`
+    // only on platforms where the probe is unavailable (same fail-closed
+    // path as the TS's `isNativeModifierPressed` returning false).
+    let should_detect_native_shift_enter =
+        sequence == "\r" && (is_apple_terminal_session() || cfg!(target_os = "windows"));
     let is_shift_pressed = should_detect_native_shift_enter
         && crate::native_modifiers::is_native_modifier_pressed(
             crate::native_modifiers::ModifierKey::Shift,

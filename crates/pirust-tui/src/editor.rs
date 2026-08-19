@@ -2168,6 +2168,18 @@ impl Editor {
             return;
         }
 
+        // Dedicated history.
+        if kb.matches(data, Keybinding::EditorHistoryPrevious) {
+            self.cancel_autocomplete();
+            self.navigate_history(-1);
+            return;
+        }
+        if kb.matches(data, Keybinding::EditorHistoryNext) {
+            self.cancel_autocomplete();
+            self.navigate_history(1);
+            return;
+        }
+
         // Cursor movement.
         if kb.matches(data, Keybinding::EditorCursorLineStart) {
             self.move_to_line_start();

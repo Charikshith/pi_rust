@@ -3,12 +3,11 @@
 //! a hand-rolled subset of `marked`'s AST (`Token`) that the renderer
 //! actually touches (heading depth, list start/task/checked/loose, code lang,
 //! table header/rows, inline text/strong/em/codespan/link/del/escape/br/html,
-//! blockquote, hr, space, html). Real Pi has no LaTeX rendering — `$...$`
-//! and `$$...$$` are plain text, passed through unrendered.
+//! blockquote, hr, space, html, latex/latexBlock).
 //!
-//! Correctness bar: `tests/fixtures/pi/tui/markdown.cases.jsonl` + `cargo
-//! test -p pirust-tui` — byte-exact against real Pi output via the oracle
-//! script.
+//! Correctness bar: `tests/fixtures/pi/tui/markdown.cases.jsonl` (38 real-Pi
+//! cases) + `cargo test -p pirust-tui` — byte-exact against real Pi output
+//! via the oracle script.
 
 use std::rc::Rc;
 
@@ -67,6 +66,16 @@ pub enum Token {
         tokens: Vec<Token>,
     },
     Table(TableToken),
+    Latex {
+        text: String,
+        raw: String,
+        pending: bool,
+    },
+    LatexBlock {
+        text: String,
+        raw: String,
+        pending: bool,
+    },
     Image {
         text: String,
     },
@@ -138,10 +147,21 @@ pub struct MarkdownTheme {
 }
 
 /// `MarkdownOptions` (markdown.ts).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MarkdownOptions {
     pub preserve_ordered_list_markers: bool,
     pub preserve_backslash_escapes: bool,
+    pub render_latex: bool,
+}
+
+impl Default for MarkdownOptions {
+    fn default() -> Self {
+        Self {
+            preserve_ordered_list_markers: false,
+            preserve_backslash_escapes: false,
+            render_latex: true, // markdown.ts: renderLatex defaults to true
+        }
+    }
 }
 
 struct InlineStyleContext {
@@ -434,6 +454,25 @@ impl Markdown {
                 };
                 lines.push(self.render_inline_tokens(&[t], style_context));
             }
+            Token::LatexBlock { text, raw, pending } => {
+                let rendered = if !pending && self.options.render_latex {
+                    crate::latex::render_latex(
+                        text,
+                        &crate::latex::RenderLatexOptions { display: true },
+                    )
+                    .unwrap_or_else(|| raw.trim().to_string())
+                } else {
+                    raw.trim().to_string()
+                };
+                for line in rendered.split('\n') {
+                    lines.push(self.apply_default_style(line));
+                }
+                if let Some(next) = next_token_type {
+                    if next != "space" {
+                        lines.push(String::new());
+                    }
+                }
+            }
             Token::Code { lang, text, .. } => {
                 let indent = "  ";
                 lines.push((self.theme.code_block_border)(&format!("```{lang}")));
@@ -560,6 +599,22 @@ impl Markdown {
 
         for token in tokens {
             match token {
+                Token::Latex { text, raw, pending } => {
+                    let rendered = if !pending && self.options.render_latex {
+                        crate::latex::render_latex(
+                            text,
+                            &crate::latex::RenderLatexOptions::default(),
+                        )
+                        .unwrap_or_else(|| raw.clone())
+                    } else {
+                        raw.clone()
+                    };
+                    let segments = rendered
+                        .split('\n')
+                        .map(|s| self.apply_text_with_newlines(s, &resolved))
+                        .collect::<Vec<_>>();
+                    result.push_str(&segments.join("\n"));
+                }
                 Token::Escape { raw, text } => {
                     let use_raw = self.options.preserve_backslash_escapes;
                     let content = if use_raw { raw } else { text };
@@ -1025,6 +1080,8 @@ impl Token {
             Token::ListItem(_) => "list_item",
             Token::Blockquote { .. } => "blockquote",
             Token::Table(_) => "table",
+            Token::Latex { .. } => "latex",
+            Token::LatexBlock { .. } => "latexBlock",
             Token::Image { .. } => "image",
             Token::Raw { .. } => "raw",
         }
@@ -1181,6 +1238,12 @@ fn lex(source: &str) -> Vec<Token> {
         if is_hr(line) {
             tokens.push(Token::Hr);
             i += 1;
+            continue;
+        }
+        // latexBlock
+        if let Some(t) = parse_latex_block(&lines[i..]) {
+            tokens.push(t.0);
+            i += t.1;
             continue;
         }
         // code fence
@@ -1775,6 +1838,15 @@ fn lex_inline(source: &str) -> Vec<Token> {
             i += 2;
             continue;
         }
+        // latex inline
+        if c == '$' {
+            if let Some((end, latex_token)) = try_inline_latex(&chars, i) {
+                flush(&mut tokens, &mut text);
+                tokens.push(latex_token);
+                i = end;
+                continue;
+            }
+        }
         text.push(c);
         i += 1;
     }
@@ -1813,6 +1885,142 @@ fn find_delim_close(chars: &[char], start: usize, delim: &str) -> Option<usize> 
             return Some(i);
         }
         i += 1;
+    }
+    None
+}
+
+/// `try_inline_latex` — returns (end_index, Token).
+fn try_inline_latex(chars: &[char], i: usize) -> Option<(usize, Token)> {
+    // $$...$$ or $...$ (no space after $, no digit after close, etc.)
+    let double = i + 1 < chars.len() && chars[i + 1] == '$';
+    let opening = if double { "$$" } else { "$" };
+    if !double && i + 1 < chars.len() && chars[i + 1] == ' ' {
+        return None;
+    }
+    let mut close = None;
+    let mut j = i + opening.len();
+    while j < chars.len() {
+        if double {
+            if chars[j] == '$' && j + 1 < chars.len() && chars[j + 1] == '$' {
+                close = Some(j);
+                break;
+            }
+        } else if chars[j] == '$' {
+            close = Some(j);
+            break;
+        }
+        j += 1;
+    }
+    // clippy wants `?` but this is Option-returning with distinct None semantics
+    #[allow(clippy::question_mark)]
+    let Some(close) = close
+    else {
+        return None;
+    };
+    let text: String = chars[i + opening.len()..close].iter().collect();
+    if text.is_empty() || text.contains('\n') {
+        return None;
+    }
+    // Currency / shell-variable / identifier guards (markdown.ts:81-94):
+    // `$5 and $10` is not math; `$FOO_bar` is not math.
+    if opening == "$" {
+        let before = &chars[i + 1..close];
+        let after = chars.get(close + 1);
+        let text_ends_ws = before.last().map(|c| c.is_whitespace()).unwrap_or(false);
+        let after_is_digit = after.map(|c| c.is_ascii_digit()).unwrap_or(false);
+        let is_ident = !before.is_empty()
+            && before[0].is_ascii_uppercase()
+            && before
+                .iter()
+                .all(|c| c.is_ascii_alphanumeric() || *c == '_')
+            && (before.len() == 1
+                || !before[..before.len() - 1]
+                    .iter()
+                    .any(|c| !c.is_ascii_alphanumeric() && *c != '_'));
+        let after_ident = after
+            .map(|c| c.is_ascii_alphabetic() || *c == '_')
+            .unwrap_or(false);
+        if text_ends_ws || after_is_digit || (is_ident && after_ident) || before.contains(&'`') {
+            return None;
+        }
+    }
+    let raw: String = chars[i..close + opening.len()].iter().collect();
+    Some((
+        close + opening.len(),
+        Token::Latex {
+            text,
+            raw,
+            pending: false,
+        },
+    ))
+}
+
+/// `parse_latex_block` — $$...$$ / \[...\] at block level.
+fn parse_latex_block(lines: &[&str]) -> Option<(Token, usize)> {
+    let first = lines[0];
+    if first.trim_start().starts_with("$$") {
+        // same-line close
+        let rest = &first[2..];
+        if let Some(close) = rest.find("$$") {
+            let text = rest[..close].to_string();
+            let raw = first.to_string();
+            return Some((
+                Token::LatexBlock {
+                    text,
+                    raw,
+                    pending: false,
+                },
+                1,
+            ));
+        }
+        let mut j = 1;
+        while j < lines.len() {
+            if lines[j].trim().contains("$$") {
+                let text = lines[1..j].join("\n");
+                let raw = lines[..=j].join("\n");
+                return Some((
+                    Token::LatexBlock {
+                        text,
+                        raw,
+                        pending: false,
+                    },
+                    j + 1,
+                ));
+            }
+            j += 1;
+        }
+    }
+    if first.trim_start().starts_with("\\[") {
+        // same-line close
+        let rest = &first[2..];
+        if let Some(close) = rest.find("\\]") {
+            let text = rest[..close].to_string();
+            let raw = first.to_string();
+            return Some((
+                Token::LatexBlock {
+                    text,
+                    raw,
+                    pending: false,
+                },
+                1,
+            ));
+        }
+        let mut j = 1;
+        while j < lines.len() {
+            if lines[j].trim().ends_with("\\]") {
+                let text = lines[1..j].join("\n");
+                let raw = lines[..=j].join("\n");
+                return Some((
+                    Token::LatexBlock {
+                        text,
+                        raw,
+                        pending: false,
+                    },
+                    j + 1,
+                ));
+            }
+            j += 1;
+        }
     }
     None
 }

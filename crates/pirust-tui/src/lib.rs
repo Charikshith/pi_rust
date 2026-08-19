@@ -5,14 +5,13 @@
 //! thin syscall shim only. Renderer + editor land in feat-006.
 
 #![deny(unsafe_code)]
-// FFI shim (Wave 7): `win_console.rs` (Win32 console mode) needs raw extern
-// calls to set `ENABLE_VIRTUAL_TERMINAL_INPUT` — the same end state real
-// Pi's native addon (unvendored here) sets. The unsafe is tightly scoped,
-// cfg-gated, and fail-closed (see the module's docs) — the one deliberate,
-// documented exception to the crate's no-unsafe rule (`deny` so modules
-// must explicitly `allow`; `forbid` would reject even the allow).
-// `native_modifiers.rs` has no native addon to call and is fail-closed
-// (`false`) unconditionally — no unsafe code needed there.
+// FFI shims (Wave 7): `native_modifiers.rs` (macOS CGEventFlags / Win32
+// GetAsyncKeyState) and `win_console.rs` (Win32 console mode) need raw
+// extern calls the TS makes through dynamic `require` of a .node addon.
+// The unsafe is tightly scoped, cfg-gated, and fail-closed (see each
+// module's docs) — the one deliberate, documented exception to the crate's
+// no-unsafe rule (`deny` so modules must explicitly `allow`; `forbid` would
+// reject even the allow).
 #![allow(unsafe_code)]
 
 pub mod autocomplete;
@@ -23,6 +22,7 @@ pub mod fuzzy;
 pub mod keybindings;
 pub mod keys;
 pub mod kill_ring;
+pub mod latex;
 pub mod markdown;
 pub mod native_modifiers;
 pub mod stdin_buffer;

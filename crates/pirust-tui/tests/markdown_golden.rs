@@ -75,6 +75,7 @@ fn every_markdown_record_matches_pi() {
                 preserve_backslash_escapes: options["preserveBackslashEscapes"]
                     .as_bool()
                     .unwrap_or(false),
+                render_latex: options["renderLatex"].as_bool().unwrap_or(true),
             })
         };
 

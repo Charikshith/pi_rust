@@ -143,7 +143,12 @@ impl Component for Image {
                     Some(self.dimensions),
                     self.options.filename.as_deref(),
                 );
-                lines = vec![(self.theme.fallback_color)(&fallback)];
+                // image.ts:115 — the fallback is styled THEN truncated to
+                // the full width (truncateToWidth(fallbackColor(fallback), width)).
+                let styled = (self.theme.fallback_color)(&fallback);
+                lines = vec![crate::utils::truncate_to_width(
+                    &styled, width, "...", false,
+                )];
             }
         } else {
             let fallback = image_fallback(
@@ -151,7 +156,11 @@ impl Component for Image {
                 Some(self.dimensions),
                 self.options.filename.as_deref(),
             );
-            lines = vec![(self.theme.fallback_color)(&fallback)];
+            // image.ts:119 — same styled-then-truncated fallback.
+            let styled = (self.theme.fallback_color)(&fallback);
+            lines = vec![crate::utils::truncate_to_width(
+                &styled, width, "...", false,
+            )];
         }
 
         self.cached_lines = Some(lines.clone());

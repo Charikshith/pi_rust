@@ -172,7 +172,9 @@ pub fn detect_capabilities(tmux_forwards_hyperlink: impl FnOnce() -> bool) -> Te
 
     TerminalCapabilities {
         images: None,
-        true_color: has_true_color_hint,
+        // Upstream: unknown terminals default `trueColor: true` (the previous
+        // port had `has_true_color_hint`, matching an older Pi).
+        true_color: true,
         hyperlinks: false,
     }
 }
@@ -321,10 +323,18 @@ pub struct EncodeIterm2Options {
 
 /// `encodeITerm2` (terminal-image.ts:227).
 pub fn encode_iterm2(base64_data: &str, options: &EncodeIterm2Options) -> String {
+    use base64::Engine;
     let mut params = vec![format!(
         "inline={}",
         if options.inline != Some(false) { 1 } else { 0 }
     )];
+    // Upstream `encodeITerm2` (terminal-image.ts:255): `size=` is the decoded
+    // byte length of the base64 payload, always emitted second.
+    let size = base64::engine::general_purpose::STANDARD
+        .decode(base64_data)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    params.push(format!("size={size}"));
     if let Some(width) = &options.width {
         params.push(format!("width={width}"));
     }
@@ -535,6 +545,8 @@ pub fn get_image_dimensions(base64_data: &str, mime_type: &str) -> Option<ImageD
 #[derive(Debug, Clone)]
 pub struct RenderedImage {
     pub sequence: String,
+    /// Upstream `renderImage` now returns `columns` too (terminal-image.ts:576).
+    pub columns: u32,
     pub rows: u32,
     pub image_id: Option<u32>,
 }
@@ -569,6 +581,7 @@ pub fn render_image(
             );
             Some(RenderedImage {
                 sequence,
+                columns: size.columns,
                 rows: size.rows,
                 image_id: options.image_id,
             })
@@ -585,6 +598,7 @@ pub fn render_image(
             );
             Some(RenderedImage {
                 sequence,
+                columns: size.columns,
                 rows: size.rows,
                 image_id: None,
             })
