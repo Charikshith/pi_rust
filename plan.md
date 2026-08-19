@@ -77,3 +77,17 @@ shortcut/flag/provider registration).
       ignored this wave. main.rs wires the real SingleTurnSession. Verify: 3
       smoke tests (submit→prompt, ctrl+d quit, events stream into chat),
       clippy/fmt clean, workspace 385/3.
+- [x] Wave 3 — tool-call rendering + autocomplete
+      (`interactive_theme.rs` + interactive_mode.rs + tests). New
+      `interactive_theme.rs` port of theme.ts's fg/bg (ANSI truecolor) with
+      the dark.json tool colors (pending/success/error bg, text/gray fg).
+      `ToolExecutionComponent` port (simplified, faithful): tool name + args
+      JSON + streaming result preview (10 lines, `... (N more lines)`
+      truncation via FALLBACK_PREVIEW_LINES), bg color switches
+      pending→success/error. `render_event` handles
+      `tool_execution_start/update/end` (pendingTools map keyed by
+      tool_call_id). Autocomplete: editor gets a
+      `CombinedAutocompleteProvider` with the BUILTIN_SLASH_COMMANDS list
+      (22 commands, slash-commands.ts). Verify: 5 smoke tests (+tool events
+      render, +slash autocomplete suggests /model), 184/184 coding-agent,
+      clippy/fmt clean, workspace 389/3.

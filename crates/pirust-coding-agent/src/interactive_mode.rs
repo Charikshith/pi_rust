@@ -34,6 +34,7 @@
 //! ```
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -44,7 +45,12 @@ use pirust_tui::components::text::Text;
 use pirust_tui::editor::Editor;
 use pirust_tui::tui::{SharedComponent, TUI};
 
+use crate::interactive_theme::{self, dark};
 use crate::print_mode::{AgentSessionEvent, PrintModeSession};
+
+/// How many lines of a tool result to preview before truncating with
+/// `... (N more lines)` — `FALLBACK_PREVIEW_LINES` (tool-execution.ts:15).
+const FALLBACK_PREVIEW_LINES: usize = 10;
 
 /// The interactive session runner.
 pub struct InteractiveMode {
@@ -67,6 +73,123 @@ pub struct InteractiveMode {
     /// child while a turn is in flight.
     chat: Rc<RefCell<pirust_tui::tui::Container>>,
     streaming_text: Option<Rc<RefCell<Text>>>,
+    /// Tool executions in flight, keyed by tool call id
+    /// (`pendingTools` map, interactive-mode.ts:468).
+    pending_tools: HashMap<String, Rc<RefCell<ToolExecutionComponent>>>,
+}
+
+/// `ToolExecutionComponent` (tool-execution.ts) — a simplified but faithful
+/// port: a `Box` (pending/success/error bg) with the tool name title + args
+/// JSON, then the streaming result text (truncated preview).
+pub struct ToolExecutionComponent {
+    tool_name: String,
+    args: serde_json::Value,
+    expanded: bool,
+    is_partial: bool,
+    execution_started: bool,
+    result: Option<ToolResult>,
+}
+
+/// The tool result (`tool-execution.ts` `result` field).
+pub struct ToolResult {
+    content: Vec<ToolResultContent>,
+    is_error: bool,
+}
+
+/// A `content` block of a tool result.
+pub struct ToolResultContent {
+    text: String,
+}
+
+impl ToolExecutionComponent {
+    /// `constructor` (tool-execution.ts:41).
+    fn new(tool_name: String, args: serde_json::Value) -> Self {
+        Self {
+            tool_name,
+            args,
+            expanded: false,
+            is_partial: true,
+            execution_started: false,
+            result: None,
+        }
+    }
+
+    /// `setExpanded` (tool-execution.ts:211).
+    fn set_expanded(&mut self, expanded: bool) {
+        self.expanded = expanded;
+    }
+
+    /// `markExecutionStarted` (tool-execution.ts:163).
+    fn mark_execution_started(&mut self) {
+        self.execution_started = true;
+    }
+
+    /// `updateResult` (tool-execution.ts:175).
+    fn update_result(&mut self, content: Vec<ToolResultContent>, is_error: bool, is_partial: bool) {
+        self.result = Some(ToolResult { content, is_error });
+        self.is_partial = is_partial;
+    }
+
+    /// The bg color for the current state (`updateDisplay`'s `bgFn`).
+    fn bg_hex(&self) -> &'static str {
+        if self.is_partial {
+            dark::TOOL_PENDING_BG
+        } else if self.result.as_ref().is_some_and(|r| r.is_error) {
+            dark::TOOL_ERROR_BG
+        } else {
+            dark::TOOL_SUCCESS_BG
+        }
+    }
+
+    /// `formatToolExecution` (tool-execution.ts:379) — the fallback render:
+    /// bold tool name + args JSON + result output.
+    fn format_tool_execution(&self) -> String {
+        let mut text = self.tool_name.clone();
+        let content = serde_json::to_string_pretty(&self.args).unwrap_or_default();
+        if !content.is_empty() && content != "{}" && content != "null" {
+            text.push_str("\n\n");
+            text.push_str(&content);
+        }
+        if let Some(result) = &self.result {
+            let output = result_text(&result.content);
+            if !output.is_empty() {
+                text.push('\n');
+                // `createResultFallback` (tool-execution.ts:145-155): preview
+                // the first N lines, truncating with a "more lines" hint.
+                let lines: Vec<&str> = output.split('\n').collect();
+                let display_lines = if self.expanded {
+                    lines.len()
+                } else {
+                    lines.len().min(FALLBACK_PREVIEW_LINES)
+                };
+                for line in lines.iter().take(display_lines) {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+                let remaining = lines.len().saturating_sub(display_lines);
+                if remaining > 0 {
+                    text.push_str(&format!("... ({remaining} more lines, to expand)"));
+                }
+            }
+        }
+        text
+    }
+}
+
+impl pirust_tui::tui::Component for ToolExecutionComponent {
+    /// `render` (tool-execution.ts:229-247) — no renderer definitions this
+    /// wave (built-in tool definitions are feat-007 Wave 4/5 territory), so
+    /// this is the fallback path: contentText with the current bg.
+    fn render(&mut self, width: usize) -> Vec<String> {
+        let text = self.format_tool_execution();
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut text = Text::with_bg_fn(text, 1, 1, interactive_theme::bg(self.bg_hex()));
+        text.render(width)
+    }
+
+    fn invalidate(&mut self) {}
 }
 
 impl InteractiveMode {
@@ -113,6 +236,34 @@ impl InteractiveMode {
         tui.borrow_mut().add_child(editor_shared);
         tui.borrow_mut()
             .set_focus(Some(Rc::clone(&editor) as SharedComponent));
+
+        // Slash-command autocomplete (`createBaseAutocompleteProvider`,
+        // interactive-mode.ts:670): the BUILTIN_SLASH_COMMANDS list mapped
+        // to `SlashCommand`.
+        {
+            let commands: Vec<pirust_tui::autocomplete::CommandOrItem> =
+                crate::interactive_mode::BUILTIN_SLASH_COMMANDS
+                    .iter()
+                    .map(|(name, description, hint)| {
+                        pirust_tui::autocomplete::CommandOrItem::Command(
+                            pirust_tui::autocomplete::SlashCommand {
+                                name: name.to_string(),
+                                description: Some(description.to_string()),
+                                argument_hint: hint.map(|h| h.to_string()),
+                                get_argument_completions: None,
+                            },
+                        )
+                    })
+                    .collect();
+            let provider = pirust_tui::autocomplete::CombinedAutocompleteProvider::new(
+                commands,
+                std::env::current_dir().unwrap_or_default(),
+                None, // no fd binary this wave — see autocomplete.rs module docs
+            );
+            editor
+                .borrow_mut()
+                .set_autocomplete_provider(Some(Box::new(provider)));
+        }
 
         // Ctrl+D quits when the editor is empty (Pi's `handleCtrlD`, enforced
         // by the editor being empty). The input listener runs before the
@@ -163,6 +314,7 @@ impl InteractiveMode {
             runtime,
             chat,
             streaming_text: None,
+            pending_tools: HashMap::new(),
         }
     }
 
@@ -260,6 +412,53 @@ impl InteractiveMode {
                 self.chat.borrow_mut().add_child(sep as SharedComponent);
                 self.tui.borrow_mut().request_render(true);
             }
+            AgentSessionEvent::ToolExecutionStart {
+                tool_call_id,
+                tool_name,
+                args,
+            } => {
+                // `handleEvent` case "tool_execution_start"
+                // (interactive-mode.ts:3263-3285): add a ToolExecutionComponent
+                // if not already present, then mark execution started.
+                let tool = self
+                    .pending_tools
+                    .entry(tool_call_id.clone())
+                    .or_insert_with(|| {
+                        let component = Rc::new(RefCell::new(ToolExecutionComponent::new(
+                            tool_name.clone(),
+                            args.clone(),
+                        )));
+                        let shared: SharedComponent = Rc::clone(&component) as SharedComponent;
+                        self.chat.borrow_mut().add_child(shared);
+                        component
+                    });
+                tool.borrow_mut().set_expanded(false); // Pi: this.toolOutputExpanded
+                tool.borrow_mut().mark_execution_started();
+                self.tui.borrow_mut().request_render(true);
+            }
+            AgentSessionEvent::ToolExecutionUpdate {
+                tool_call_id,
+                partial_result,
+                ..
+            } => {
+                if let Some(tool) = self.pending_tools.get(tool_call_id) {
+                    let content = result_content(partial_result);
+                    tool.borrow_mut().update_result(content, false, true);
+                    self.tui.borrow_mut().request_render(true);
+                }
+            }
+            AgentSessionEvent::ToolExecutionEnd {
+                tool_call_id,
+                result,
+                is_error,
+                ..
+            } => {
+                if let Some(tool) = self.pending_tools.get(tool_call_id) {
+                    let content = result_content(result);
+                    tool.borrow_mut().update_result(content, *is_error, false);
+                    self.tui.borrow_mut().request_render(true);
+                }
+            }
             _ => {}
         }
     }
@@ -304,3 +503,99 @@ fn assistant_text(message: &serde_json::Value) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// Extract the tool result text from a result `Value`: `content[].text`
+/// blocks joined, matching `getRenderedTextOutput`'s text handling.
+fn result_content(result: &serde_json::Value) -> Vec<ToolResultContent> {
+    let Some(content) = result.get("content").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|t| ToolResultContent {
+                        text: t.to_string(),
+                    })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Join tool result content into a single string.
+fn result_text(content: &[ToolResultContent]) -> String {
+    content
+        .iter()
+        .map(|c| c.text.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `BUILTIN_SLASH_COMMANDS` (slash-commands.ts:19) — name, description,
+/// optional argument hint.
+pub const BUILTIN_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
+    ("settings", "Open settings menu", None),
+    (
+        "model",
+        "Select model (opens selector UI)",
+        Some("<provider/model>"),
+    ),
+    (
+        "scoped-models",
+        "Enable/disable models for Ctrl+P cycling",
+        None,
+    ),
+    (
+        "export",
+        "Export session (HTML default, or specify path: .html/.jsonl)",
+        None,
+    ),
+    (
+        "import",
+        "Import and resume a session from a JSONL file",
+        None,
+    ),
+    ("share", "Share session as a secret GitHub gist", None),
+    ("copy", "Copy last agent message to clipboard", None),
+    ("name", "Set session display name", None),
+    ("session", "Show session info and stats", None),
+    ("changelog", "Show changelog entries", None),
+    ("hotkeys", "Show all keyboard shortcuts", None),
+    (
+        "fork",
+        "Create a new fork from a previous user message",
+        None,
+    ),
+    (
+        "clone",
+        "Duplicate the current session at the current position",
+        None,
+    ),
+    ("tree", "Navigate session tree (switch branches)", None),
+    (
+        "trust",
+        "Save project trust decision for future sessions",
+        None,
+    ),
+    (
+        "login",
+        "Configure provider authentication",
+        Some("<provider>"),
+    ),
+    ("logout", "Remove provider authentication", None),
+    ("new", "Start a new session", None),
+    ("compact", "Manually compact the session context", None),
+    ("resume", "Resume a different session", None),
+    (
+        "reload",
+        "Reload keybindings, extensions, skills, prompts, themes, and context files",
+        None,
+    ),
+    ("quit", "Quit pi", None),
+];

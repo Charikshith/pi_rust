@@ -34,6 +34,7 @@ pub mod catalog;
 pub mod config;
 pub mod initial_message;
 pub mod interactive_mode;
+pub mod interactive_theme;
 pub mod migrations;
 pub mod models;
 pub mod print_mode;

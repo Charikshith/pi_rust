@@ -295,3 +295,90 @@ fn events_stream_into_chat_container() {
                                 // assertion (rendered output contains "Hello") needs a terminal that
                                 // captures writes; the golden TUI tests cover that path.
 }
+
+#[test]
+fn tool_events_render_into_chat() {
+    let input_slot = Arc::new(Mutex::new(None));
+    let terminal = Box::new(DriveTerminal {
+        input_slot: Arc::clone(&input_slot),
+    });
+    let session = Arc::new(StubSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        runtime.handle().clone(),
+    );
+
+    {
+        let listener = session
+            .listener
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("subscribed");
+        listener(&AgentSessionEvent::ToolExecutionStart {
+            tool_call_id: "call_1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!({"command": "echo hi"}),
+        });
+        listener(&AgentSessionEvent::ToolExecutionUpdate {
+            tool_call_id: "call_1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!({}),
+            partial_result: serde_json::json!({
+                "content": [{"type": "text", "text": "hi"}]
+            }),
+        });
+        listener(&AgentSessionEvent::ToolExecutionEnd {
+            tool_call_id: "call_1".into(),
+            tool_name: "bash".into(),
+            result: serde_json::json!({
+                "content": [{"type": "text", "text": "hi\n"}]
+            }),
+            is_error: false,
+        });
+    }
+    mode.poll();
+    std::thread::sleep(Duration::from_millis(20));
+    mode.poll();
+    // No panic + tool events rendered without error. The chat container now
+    // holds a ToolExecutionComponent; quit to drop cleanly.
+    mode.handle_input("\u{4}");
+}
+
+#[test]
+fn slash_commands_autocomplete_suggestions() {
+    use pirust_tui::autocomplete::{AutocompleteProvider, CommandOrItem, CompletionContext};
+
+    // Build the same provider list interactive mode uses (BUILTIN_SLASH_COMMANDS).
+    let commands: Vec<CommandOrItem> =
+        pirust_coding_agent::interactive_mode::BUILTIN_SLASH_COMMANDS
+            .iter()
+            .map(|(name, description, _hint)| {
+                CommandOrItem::Command(pirust_tui::autocomplete::SlashCommand {
+                    name: name.to_string(),
+                    description: Some(description.to_string()),
+                    argument_hint: None,
+                    get_argument_completions: None,
+                })
+            })
+            .collect();
+    let provider = pirust_tui::autocomplete::CombinedAutocompleteProvider::new(commands, ".", None);
+
+    let ctx = CompletionContext {
+        lines: &["/mode".to_string()],
+        cursor_line: 0,
+        cursor_col: 5,
+    };
+    let suggestions = provider.get_suggestions(&ctx, false).expect("suggestions");
+    assert!(
+        suggestions.items.iter().any(|i| i.value == "model"),
+        "typing /mode should suggest /model, got: {:?}",
+        suggestions
+            .items
+            .iter()
+            .map(|i| &i.value)
+            .collect::<Vec<_>>()
+    );
+}
