@@ -393,6 +393,10 @@ pub struct Editor {
     pub on_submit: Option<OnTextFnMut>,
     pub on_change: Option<OnTextFnMut>,
     pub disable_submit: bool,
+    /// Cached `terminal_rows` for reads that happen mid-render (when the
+    /// TUI that renders this editor is already mutably borrowed — a
+    /// re-entrant `RefCell::borrow` would panic). See [`Editor::terminal_rows`].
+    cached_terminal_rows: u16,
 }
 
 impl Editor {
@@ -438,6 +442,7 @@ impl Editor {
             on_submit: None,
             on_change: None,
             disable_submit: false,
+            cached_terminal_rows: 24,
         }
     }
 
@@ -582,6 +587,23 @@ impl Editor {
     }
 
     /// `getText` (editor.ts:993).
+    /// `terminalRows()` (editor.ts:500,1871) — reads the terminal height
+    /// through the TUI handle. The TUI that renders this editor holds a
+    /// mutable borrow of itself during `render`; a plain `RefCell::borrow`
+    /// here would panic re-entrantly. `try_borrow` with a cached fallback
+    /// keeps the read working (rows don't change mid-render) without
+    /// fighting the borrow checker.
+    pub fn terminal_rows(&mut self) -> u16 {
+        match self.tui.try_borrow() {
+            Ok(tui) => {
+                let rows = tui.terminal_rows();
+                self.cached_terminal_rows = rows;
+                rows
+            }
+            Err(_) => self.cached_terminal_rows,
+        }
+    }
+
     pub fn get_text(&self) -> String {
         self.state.lines.join("\n")
     }
@@ -1339,7 +1361,7 @@ impl Editor {
 
     fn page_scroll(&mut self, direction: i8) {
         self.last_action = None;
-        let terminal_rows = self.tui.borrow().terminal_rows();
+        let terminal_rows = self.terminal_rows();
         let page_size = std::cmp::max(5, (terminal_rows as f64 * 0.3).floor() as usize);
         let visual_lines = self.build_visual_line_map(self.last_width);
         let current_visual_line = self.find_current_visual_line(&visual_lines);
@@ -1793,7 +1815,7 @@ impl Editor {
         let horizontal = (self.border_color)("─");
         let layout_lines = self.layout_text(layout_width);
 
-        let terminal_rows = self.tui.borrow().terminal_rows();
+        let terminal_rows = self.terminal_rows();
         let max_visible_lines = std::cmp::max(5, (terminal_rows as f64 * 0.3).floor() as usize);
 
         let cursor_line_index = layout_lines.iter().position(|l| l.has_cursor).unwrap_or(0);

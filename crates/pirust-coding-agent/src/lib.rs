@@ -33,6 +33,7 @@ pub mod auth_guidance;
 pub mod catalog;
 pub mod config;
 pub mod initial_message;
+pub mod interactive_mode;
 pub mod migrations;
 pub mod models;
 pub mod print_mode;

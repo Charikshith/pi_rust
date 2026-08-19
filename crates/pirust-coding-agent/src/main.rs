@@ -437,29 +437,52 @@ async fn run(parsed: args::Args) -> i32 {
     let session = SingleTurnSession::new(agent, session_manager);
     let host = Arc::new(SingleTurnRuntimeHost::new(Arc::clone(&session)));
 
-    let print_output_mode = print_mode::to_print_output_mode(app_mode);
     let platform = pirust_coding_agent::config::Platform::current();
 
-    // Step 29 (`main.ts:811-858`): rpc/interactive already excluded above, so this is
-    // always `runPrintMode`.
-    let run_exit_code = print_mode::run_print_mode(
-        host,
-        PrintModeOptions {
-            mode: print_output_mode,
-            messages,
-            initial_message: initial.initial_message,
-            initial_images: initial.initial_images,
-        },
-        PrintModeEnv {
-            guard: Arc::clone(&guard),
-            signals: Arc::new(print_mode::NoSignals),
-            platform,
-        },
-    )
-    .await;
+    // Step 29 (`main.ts:811-858`): interactive mode launches the TUI; rpc
+    // already exited above; everything else runs print mode.
+    let run_exit_code = if app_mode == AppMode::Interactive {
+        run_interactive_mode().await
+    } else {
+        let print_output_mode = print_mode::to_print_output_mode(app_mode);
+        print_mode::run_print_mode(
+            host,
+            PrintModeOptions {
+                mode: print_output_mode,
+                messages,
+                initial_message: initial.initial_message,
+                initial_images: initial.initial_images,
+            },
+            PrintModeEnv {
+                guard: Arc::clone(&guard),
+                signals: Arc::new(print_mode::NoSignals),
+                platform,
+            },
+        )
+        .await
+    };
 
     guard.restore_stdout();
     run_exit_code
+}
+
+/// `runInteractiveMode` (`main.ts:811-858`) — launch the TUI and loop.
+///
+/// Wave 1 scaffold: prompt via the Editor, echo submissions back into the
+/// TUI, quit on Ctrl+D. The real `session.prompt` turn + streaming render is
+/// Wave 2 (the `host` is built above and threaded in then).
+async fn run_interactive_mode() -> i32 {
+    use pirust_coding_agent::interactive_mode::InteractiveMode;
+
+    let terminal = Box::new(pirust_tui::terminal::ProcessTerminal::new());
+    let mut mode = InteractiveMode::new(terminal);
+    mode.run(|text: String| {
+        // Wave 1: the editor round-trips text to the prompt callback.
+        // Wave 2 replaces this with `session.prompt(text)` rendered into the
+        // TUI's chat container.
+        eprintln!("[wave1] submit: {text}");
+    });
+    0
 }
 
 /// `getSessionDir()`-equivalent precedence, `main.ts:573-577` + spec §5.3.
