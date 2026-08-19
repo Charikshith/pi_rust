@@ -211,6 +211,39 @@ verified against **Pi as the oracle** — never against self-authored expectatio
 - Naming: all Rust code is `pirust*`. Keep original names only for on-disk data / wire
   identifiers that must stay compatible with real Pi (`~/.pi`, `pi-messages`, etc.).
 
+## The Oracle Audit Rule (hard requirement — prevents rework)
+
+**Never declare code "fabricated" or "invented" based on grep absence alone.**
+Grep-miss ≠ doesn't-exist. This project paid for that mistake twice: an audit on a
+machine *without* the Pi oracle deleted real, verified code (`latex.rs`, `tui-main-screen.ts`
+import, keybindings) and regenerated fixtures to match, causing wholesale rework.
+
+Before you claim something in `../pi` is fabricated, missing, or wrong, you MUST:
+
+1. **Have the oracle**: the sibling `D:\Code\AI\Agents\pi` checkout (or whatever path
+   `scripts/gen-*.mjs` uses) must EXIST and be the CURRENT Pi. A machine without it is
+   NOT qualified to audit — say so and stop, or pull it first.
+2. **Search the real source, not absence**: `grep -rn` the actual `../pi/packages/tui/src/`
+   (and `git log --all -S` across branches) for the symbol BEFORE concluding it doesn't
+   exist. An unqualified `grep -r` that returns nothing is a *signal to investigate the
+   search*, not a verdict.
+3. **Run the oracle, don't reason about it**: `node scripts/gen-tui-oracle.mjs --check`
+   must pass against current Pi BEFORE and AFTER any change. If it crashes (e.g.
+   `TUI is not a constructor`), that's the first red flag that an import or fixture is
+   wrong — investigate the crash, don't paper over it.
+4. **Never regenerate fixtures to match a suspicion.** Fixtures come from executing real
+   Pi code. If a fixture "disagrees", the fixture generator is stale or the source
+   moved — regenerate from real Pi, never hand-edit a fixture to fit a claim.
+5. **Deletion is the last resort**: when an audit suspects a module, the default is
+   "unverifiable on this machine — flag for re-verification where the oracle exists",
+   NOT "delete it". Deleting verified code to fix an audit doubt is the exact failure
+   that caused the Wave 6/7 rework.
+
+**The one acceptable form of "fabrication" finding**: a claim backed by (a) the oracle
+checkout present, (b) `grep` + `git log --all -S` both empty, (c) the oracle script run
+successfully against it, (d) the finding written as "flag for human review", not as
+an executed deletion.
+
 ## Escalation
 
 If you encounter:

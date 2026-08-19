@@ -731,3 +731,77 @@ matched, plus source-level spot-checks of the `latex.rs` deletion,
 `native_modifiers.rs` rewrite, and `editor.rs` history-nav logic against real
 Pi) — so the finding stands, but the git-hygiene claim in the paragraph above
 does not.
+
+## 2026-08-19 — ROOT-CAUSE ANALYSIS: the Wave 6/7 "fabrication" audit was itself fabricated (independently verified)
+
+The last three commits (b293dab merge, 07c262c, 2f0e3d5) shipped an audit's
+"five fabrications found and fixed". Re-verifying every claim against the REAL
+oracle (`D:\Code\AI\Agents\pi`, present on THIS machine) shows the audit was
+wrong on every count. It ran on a machine without the oracle, treated grep
+absence as proof of non-existence, and its "fixes" are now the committed
+baseline — that is the rework.
+
+### Claim-by-claim verification (real Pi source, this machine)
+
+| Audit claim | Real Pi (verified today) | Audit's action |
+|---|---|---|
+| `tui-main-screen.ts` doesn't exist; `TuiMainScreen` import was fabricated | EXISTS: `packages/tui/src/tui-main-screen.ts` (21KB), `TuiMainScreen extends TuiBase implements TUI`; `index.ts:138` re-exports it | "Restored" oracle to import `TUI` from `tui.ts` → **oracle now crashes `TUI is not a constructor`** |
+| `latex.ts` doesn't exist; `latex.rs` is wholesale fabrication | EXISTS: `packages/tui/src/latex.ts` (1,380 lines); `markdown.ts` imports `renderLatex`, 29 references | Deleted `latex.rs`, stripped markdown latex handling, renamed oracle cases `latex_*`→`dollar_*_plain_text` |
+| `historyPrevious`/`historyNext` fabricated | EXISTS: `keybindings.ts:11-12,74-78`; `editor.ts:768-775` dispatches them | Removed from `keybindings.rs` |
+| `ctrl+home`/`ctrl+end`/`ctrl+pageUp`/`ctrl+pageDown` fabricated | EXISTS in real defaults: `cursorLineStart: ["home","ctrl+home","ctrl+a"]`, `cursorLineEnd: ["end","ctrl+end","ctrl+e"]`, `pageUp: ["pageUp","ctrl+pageUp"]`, `pageDown: ["pageDown","ctrl+pageDown"]` | Removed from `keybindings.rs` + regenerated `keybindings.cases.jsonl` WITHOUT them |
+| native-modifiers is macOS-only | FALSE: real `native-modifiers.ts` has a win32 branch (`win32-console-mode.node`, `native/win32/prebuilds/`) | Rewrote `native_modifiers.rs` to always-`false` |
+
+**Independent runtime proof (not reasoning):** real Pi `Markdown.render(80)` on
+`"The value is $x^2 + 1$.\n"` outputs `"The value is x² + 1.…"` (superscript —
+renderLatex ran). The audited fixture `dollar_inline_plain_text` expects the
+raw `"$x^2 + 1$"`. The audit's own "plain text passthrough" claim is wrong.
+
+**Real Pi's `tui.ts`:** `export interface TUI`, `abstract class TuiBase
+extends Container implements TUI` — and `tui-main-screen.ts` provides the
+concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
+`tui-main-screen.ts`) was correct; the audit's "fix" broke it.
+
+### Root causes (what made this repeatable)
+
+1. **Audit ran without the oracle.** The machine had no `D:\Code\AI\Agents\pi`
+   and no `C:\Users\Chakri`-style home it could verify against; its own notes
+   say so. An audit without the thing being audited is a guess.
+2. **Grep absence treated as proof.** "No `latex.ts` anywhere in `../pi`'s
+   history" became a verdict, not a search to widen (`git log --all -S` on the
+   real repo finds it immediately).
+3. **Fixtures regenerated to match suspicion.** `keybindings.cases.jsonl` and
+   `markdown.cases.jsonl` were rewritten to enshrine the wrong behavior, so
+   golden tests pass while being wrong vs Pi.
+4. **Deletion as first resort.** "Fabricated" → deleted (latex.rs, keybindings,
+   oracle import) instead of "unverifiable here → flag for re-verification".
+5. **Git-hygiene failure (incident #2).** The audit committed its merge
+   (`b293dab`) despite explicit "do not touch git" instructions.
+
+### Guardrails now in place (prevent recurrence)
+
+- **AGENTS.md §"The Oracle Audit Rule"** (hard requirement): no fabrication
+  finding without (a) oracle present, (b) real-source grep + `git log --all -S`,
+  (c) oracle run successfully, (d) written as a flag, not an executed deletion.
+- **`feedback_oracle_audit.md`** in the Claude memory dir — persists across
+  sessions/machines.
+- Golden tests' job redefined: fixtures come ONLY from executing real Pi;
+  never hand-edit a fixture to fit a claim.
+
+### State to fix (the actual rework backlog, in priority order)
+
+1. `scripts/gen-tui-oracle.mjs` — restore the correct `TuiMainScreen` import;
+   oracle `--check` must run green against current Pi.
+2. Restore `latex.rs` + markdown.rs latex tokenization (real Pi renders
+   `$...$` via renderLatex; audited "plain text" is wrong).
+3. Restore `keybindings.rs` missing defaults (`ctrl+home`/`ctrl+end`/
+   `ctrl+pageUp`/`ctrl+pageDown`) + regenerate `keybindings.cases.jsonl` from
+   real Pi.
+4. Restore `native_modifiers.rs` win32 support (real TS has a win32 branch).
+5. Regenerate `markdown.cases.jsonl` from real Pi (38 cases must reflect
+   renderLatex behavior, not plain-text).
+6. Re-verify: `cargo test -p pirust-tui`, clippy, fmt, oracle `--check`,
+   `./init.sh`.
+
+This is the honest record. The audit's writeup (progress.md:674) is preserved
+above but superseded by this analysis — every claim in it failed verification
+against the real oracle.
