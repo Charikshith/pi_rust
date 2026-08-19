@@ -829,6 +829,18 @@ concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
 - 2 smoke tests; 135/135 pirust-tui, 179/179 coding-agent, clippy/fmt clean,
   workspace 384/3 (3 pre-existing env-polluted find tests).
 
+### 2026-08-19 — feat-007 Wave 2 (streaming turn display) DONE
+
+- `InteractiveMode` takes `Arc<dyn PrintModeSession>` + `tokio::runtime::Handle`;
+  on submit it blocks the loop on `session.prompt` (Pi's `await prompt`),
+  while session events bridge agent-thread → channel → main loop → chat
+  container: user line (▶), streaming assistant Text (message_update),
+  finalized on message_end, spacer on agent_end.
+- `assistant_text()` extracts `content[].text` blocks (trimmed) — matches
+  assistant-message.ts; thinking/tool ignored this wave.
+- main.rs wires the real SingleTurnSession.
+- 3 smoke tests; workspace 385/3, clippy/fmt clean.
+
 This is the honest record. The audit's writeup (progress.md:674) is preserved
 above but superseded by this analysis — every claim in it failed verification
 against the real oracle.
