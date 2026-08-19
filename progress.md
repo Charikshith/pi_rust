@@ -11,15 +11,10 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-19
-**Active Feature:** feat-006 — `pirust-tui` literal port (DONE — Waves 1-8
-complete: utils/keys/stdin_buffer/kill_ring/undo_stack/word_navigation/
-keybindings/fuzzy/terminal_colors/terminal_image/terminal/tui/autocomplete/
-editor_component/components/editor.rs/native_modifiers.rs/win_console.rs/
-markdown.rs/latex.rs + Wave 8 re-exports & integration smoke test). The
-fabricated-audit corruption was fully restored (commit `828e0db`) and the
-rework backlog below is now EXECUTED — all 6 items done and verified.
+**Active Feature:** feat-007 — interactive pirust + native extension runner
+(IN PROGRESS — Wave 1 of 6 done: interactive scaffold). feat-006 DONE.
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-007 (wire TUI into interactive `pirust` binary).
+**Next feature:** feat-007 Wave 2 (streaming turn display in the TUI).
 **Open process incidents (two, same failure mode, same project)**:
 1. Wave 5's first fork attempt committed+pushed to `origin/master` despite
    explicit "do not commit/push" instructions before failing on a
@@ -804,7 +799,6 @@ concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
    env-polluted find tests in pirust-tools, unrelated).
 
 ### 2026-08-19 — Wave 8 closeout (feat-006 DONE)
-
 - lib.rs now mirrors `index.ts` public surface for all ported symbols
   (BoxComponent = TS `Box` deliberate rename; Editor/EditorOptions;
   DefaultTextStyle/Markdown/MarkdownOptions/MarkdownTheme;
@@ -819,6 +813,21 @@ concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
   stability across the surface.
 - feat-006 status → DONE (evidence updated in feature_list.json). Next:
   feat-007 (wire TUI into interactive pirust binary).
+
+### 2026-08-19 — feat-007 Wave 1 (interactive scaffold) DONE
+
+- `InteractiveMode` (crates/pirust-coding-agent/src/interactive_mode.rs):
+  wraps pirust-tui TUI+Editor; terminal reader thread feeds raw input
+  through an mpsc channel (TUI is !Send, callback must be Send). Editor
+  on_submit → prompt callback; Ctrl+D on empty editor quits (Pi handleCtrlD).
+- main.rs: launches interactive when stdin+stdout are TTYs (was always
+  print). Wave 1 echoes submissions; Wave 2 wires real session.prompt.
+- Real TUI-crate bug found+fixed: editor.render's
+  self.tui.borrow().terminal_rows() panicked re-entrantly when the editor
+  was mounted in the TUI that renders it. Fix: Editor::terminal_rows() with
+  try_borrow + cached fallback (matches Pi's plain property read).
+- 2 smoke tests; 135/135 pirust-tui, 179/179 coding-agent, clippy/fmt clean,
+  workspace 384/3 (3 pre-existing env-polluted find tests).
 
 This is the honest record. The audit's writeup (progress.md:674) is preserved
 above but superseded by this analysis — every claim in it failed verification
