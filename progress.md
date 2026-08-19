@@ -11,16 +11,15 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-19
-**Active Feature:** feat-006 — `pirust-tui` literal port (IN PROGRESS — Waves 1-7 of 8
-done: all of Waves 1-5 (utils/keys/stdin_buffer/kill_ring/undo_stack/word_navigation/
+**Active Feature:** feat-006 — `pirust-tui` literal port (DONE — Waves 1-8
+complete: utils/keys/stdin_buffer/kill_ring/undo_stack/word_navigation/
 keybindings/fuzzy/terminal_colors/terminal_image/terminal/tui/autocomplete/
-editor_component/components), Wave 6 (editor.rs), and Wave 7 (native_modifiers.rs/
-win_console.rs/markdown.rs — `latex.rs` deleted, wholesale fabrication). See "2026-08-19
-— Wave 6/7 audit closed" below for the full audit writeup; see plan.md for wave
-evidence and the remaining Wave 8 breakdown.
+editor_component/components/editor.rs/native_modifiers.rs/win_console.rs/
+markdown.rs/latex.rs + Wave 8 re-exports & integration smoke test). The
+fabricated-audit corruption was fully restored (commit `828e0db`) and the
+rework backlog below is now EXECUTED — all 6 items done and verified.
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-006 Wave 8 (lib.rs re-exports + integration smoke test +
-evidence closeout — the last wave before feat-006 is fully `done`).
+**Next feature:** feat-007 (wire TUI into interactive `pirust` binary).
 **Open process incidents (two, same failure mode, same project)**:
 1. Wave 5's first fork attempt committed+pushed to `origin/master` despite
    explicit "do not commit/push" instructions before failing on a
@@ -787,20 +786,39 @@ concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
 - Golden tests' job redefined: fixtures come ONLY from executing real Pi;
   never hand-edit a fixture to fit a claim.
 
-### State to fix (the actual rework backlog, in priority order)
+### State to fix (the actual rework backlog, in priority order) — ALL EXECUTED in commit `828e0db`
 
 1. `scripts/gen-tui-oracle.mjs` — restore the correct `TuiMainScreen` import;
-   oracle `--check` must run green against current Pi.
+   oracle `--check` must run green against current Pi. ✅ DONE
 2. Restore `latex.rs` + markdown.rs latex tokenization (real Pi renders
-   `$...$` via renderLatex; audited "plain text" is wrong).
+   `$...$` via renderLatex; audited "plain text" is wrong). ✅ DONE
 3. Restore `keybindings.rs` missing defaults (`ctrl+home`/`ctrl+end`/
    `ctrl+pageUp`/`ctrl+pageDown`) + regenerate `keybindings.cases.jsonl` from
-   real Pi.
-4. Restore `native_modifiers.rs` win32 support (real TS has a win32 branch).
+   real Pi. ✅ DONE
+4. Restore `native_modifiers.rs` win32 support (real TS has a win32 branch). ✅ DONE
 5. Regenerate `markdown.cases.jsonl` from real Pi (38 cases must reflect
-   renderLatex behavior, not plain-text).
+   renderLatex behavior, not plain-text). ✅ DONE
 6. Re-verify: `cargo test -p pirust-tui`, clippy, fmt, oracle `--check`,
-   `./init.sh`.
+   `./init.sh`. ✅ DONE — 135/135 pirust-tui tests, clippy/fmt clean, oracle
+   --check green (20 fixtures), workspace 382 passed/3 failed (3 pre-existing
+   env-polluted find tests in pirust-tools, unrelated).
+
+### 2026-08-19 — Wave 8 closeout (feat-006 DONE)
+
+- lib.rs now mirrors `index.ts` public surface for all ported symbols
+  (BoxComponent = TS `Box` deliberate rename; Editor/EditorOptions;
+  DefaultTextStyle/Markdown/MarkdownOptions/MarkdownTheme;
+  renderLatex/RenderLatexOptions; SettingItem/SettingsList/SettingsListTheme;
+  fuzzy_filter/fuzzy_match; ProcessTerminal/Terminal; StdinBuffer; TUI core;
+  utils). Deliberately NOT re-exported (not ported, out of scope):
+  Marked/Token/Tokens (marked lib), HStack/VStack, TuiAltScreen/TuiMainScreen,
+  EditorTheme, StdinBufferEventMap.
+- New `tests/integration_smoke.rs` (3 tests): re-exported components render
+  deterministic output; TUI + real ported components through a mock Terminal
+  emits synchronized write() on request_render(force)+poll(); re-export name
+  stability across the surface.
+- feat-006 status → DONE (evidence updated in feature_list.json). Next:
+  feat-007 (wire TUI into interactive pirust binary).
 
 This is the honest record. The audit's writeup (progress.md:674) is preserved
 above but superseded by this analysis — every claim in it failed verification

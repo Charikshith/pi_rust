@@ -54,6 +54,7 @@ pub use components::settings_list::{
 pub use components::spacer::Spacer;
 pub use components::text::Text;
 pub use components::truncated_text::TruncatedText;
+pub use editor::{Editor, EditorOptions};
 pub use editor_component::EditorComponent;
 pub use fuzzy::{fuzzy_filter, fuzzy_match, FuzzyMatch};
 pub use keybindings::{
@@ -64,6 +65,8 @@ pub use keys::{
     decode_kitty_printable, decode_printable_key, is_key_release, is_key_repeat,
     is_kitty_protocol_active, matches_key, parse_key, set_kitty_protocol_active,
 };
+pub use latex::{render_latex, RenderLatexOptions};
+pub use markdown::{DefaultTextStyle, Markdown, MarkdownOptions, MarkdownTheme};
 pub use stdin_buffer::{StdinBuffer, StdinBufferOptions, StdinEvent};
 pub use terminal::{ProcessTerminal, Terminal};
 pub use tui::{
