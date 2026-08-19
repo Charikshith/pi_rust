@@ -852,6 +852,33 @@ concrete `TuiMainScreen`. The ORIGINAL oracle import (`TuiMainScreen` from
 - Autocomplete: CombinedAutocompleteProvider + 22 BUILTIN_SLASH_COMMANDS.
 - 5 smoke tests; 184/184 coding-agent; workspace 389/3, clippy/fmt clean.
 
+### 2026-08-19 — feat-007 Wave 4 (`pirust-extension-api` crate) DONE
+
+- New `crates/pirust-extension-api/` (5 modules + demo_extension.rs integration
+  test), registered in workspace Cargo.toml.
+- `events.rs`: full `ExtensionEvent` union (34 variants, tagged `{type:...}`,
+  camelCase serde renames) + `event_type()` + reason/source enums — port of
+  `ExtensionEvent` (extensions/types.ts).
+- `context.rs`: `ExtensionContext` (mode/has_ui/cwd + accessor closures),
+  `ExtensionCommandContext`, all result types incl. tagged `InputEventResult`.
+- `registration.rs`: `ToolDefinition` (execute via `ToolCallParams`),
+  `RegisteredCommand`, `ExtensionShortcut`, `ExtensionFlag`, `ExtensionApi`
+  (on/register_tool/register_command/register_shortcut/register_flag/get_flag),
+  `Extension` object, `SourceInfo`.
+- `runner.rs`: `ExtensionRunner` with Pi's exact dispatch semantics — generic
+  emit (error capture, session-before cancel short-circuit), emit_tool_call
+  (first result wins, block returns), emit_user_bash (first wins),
+  emit_context (clone+chain), emit_before_provider_request/headers,
+  emit_message_end (same-role chained), emit_before_agent_start (chained
+  systemPrompt), emit_resources_discover, emit_input (transforms chain,
+  handled short-circuits). Sync handlers this wave (Pi async; Wave 6 binds
+  the real agent loop).
+- `loader.rs`: `InlineExtension` + `ExtensionFactory` + `built_in_extensions()`
+  (empty — plan-mode lands Wave 5). Matches spec 00-overview §5 (Rust-native,
+  built-in loader first; dynamic/WASM is P9, out of scope).
+- 6 unit tests + 2 integration tests (demo extension registers/dispatches,
+  tool executes end-to-end). Workspace 397/3, clippy/fmt clean.
+
 This is the honest record. The audit's writeup (progress.md:674) is preserved
 above but superseded by this analysis — every claim in it failed verification
 against the real oracle.

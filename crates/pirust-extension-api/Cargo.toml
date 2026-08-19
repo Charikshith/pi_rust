@@ -1,0 +1,15 @@
+[package]
+name = "pirust-extension-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The pirust port of @earendil-works/pi-coding-agent's extension host surface — Extension trait, events, registration, runner"
+
+[dependencies]
+pirust-agent-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

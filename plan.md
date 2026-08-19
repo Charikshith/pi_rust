@@ -91,3 +91,31 @@ shortcut/flag/provider registration).
       (22 commands, slash-commands.ts). Verify: 5 smoke tests (+tool events
       render, +slash autocomplete suggests /model), 184/184 coding-agent,
       clippy/fmt clean, workspace 389/3.
+- [x] Wave 4 — `pirust-extension-api` crate
+      (new `crates/pirust-extension-api/`, 5 modules + integration test).
+      `events.rs`: the full `ExtensionEvent` union (34 variants, tagged
+      `{type: ...}`, camelCase serde renames) + `event_type()` discriminator
+      + the reason/source enums. `context.rs`: `ExtensionContext` (mode/
+      has_ui/cwd + accessor closures), `ExtensionCommandContext`, and all
+      result types (`ContextEventResult`, `ToolCallEventResult`,
+      `ToolResultEventResult`, `InputEventResult` (tagged `{action:...}`),
+      `MessageEndEventResult`, `BeforeAgentStartEventResult`,
+      `ResourcesDiscoverResult`, session-before results). `registration.rs`:
+      `ToolDefinition` (execute via `ToolCallParams`), `RegisteredCommand`,
+      `ExtensionShortcut`, `ExtensionFlag`, `ExtensionApi` (on/register_
+      tool/command/shortcut/flag + get_flag), `Extension` object, `SourceInfo`.
+      `runner.rs`: `ExtensionRunner` with Pi's exact dispatch semantics —
+      generic emit (error capture, session-before cancel short-circuit),
+      emit_tool_call (first result wins, block returns), emit_user_bash
+      (first result wins), emit_context (clone+chain), emit_before_provider_
+      request/headers, emit_message_end (same-role chained), emit_before_
+      agent_start (chained systemPrompt), emit_resources_discover,
+      emit_input (transform chains, handled short-circuits). Handlers are
+      sync `Result<Value, String>` this wave (Pi's are async; Wave 6 binds
+      the async agent loop). `loader.rs`: `InlineExtension` + `ExtensionFactory`
+      + `built_in_extensions()` (empty list — plan-mode lands Wave 5).
+      Workspace: registered in Cargo.toml members + workspace.dependencies.
+      Verify: 6 unit tests (discriminators, tagged serialization, dispatch,
+      error capture, cancel short-circuit, input transform) + 2 integration
+      tests (demo extension registers + dispatches; tool executes),
+      clippy/fmt clean, workspace 397/3.

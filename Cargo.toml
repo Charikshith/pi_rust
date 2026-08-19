@@ -5,6 +5,7 @@ members = [
     "crates/pirust-agent-core",
     "crates/pirust-tui",
     "crates/pirust-tools",
+    "crates/pirust-extension-api",
     "crates/pirust-coding-agent",
     "crates/pirust-orchestrator",
     "xtask",
@@ -27,6 +28,7 @@ pirust-ai = { path = "crates/pirust-ai" }
 pirust-agent-core = { path = "crates/pirust-agent-core" }
 pirust-tui = { path = "crates/pirust-tui" }
 pirust-tools = { path = "crates/pirust-tools" }
+pirust-extension-api = { path = "crates/pirust-extension-api" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
