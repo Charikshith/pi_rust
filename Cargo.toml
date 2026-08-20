@@ -53,6 +53,11 @@ unicode-normalization = "0.1"
 # feat-005 Wave 4 provider-attribution: `new URL(baseUrl).hostname` (matchesHost).
 # Already resolved transitively via reqwest; declared explicitly for direct use.
 url = "2"
+# feat-007 Wave 5 plan-mode: DESTRUCTIVE_PATTERNS/SAFE_PATTERNS regexes
+# (plan-mode/utils.ts). `regex` lacks look-around (the `(?!>)` redirect
+# pattern), so use `fancy-regex` — already in the tree transitively via
+# jsonschema (pirust-agent-core), zero new packages.
+fancy-regex = "0.14"
 # feat-006 Wave 1 utils.rs: grapheme clusters (Intl.Segmenter equivalent) and
 # East Asian Width (get-east-asian-width equivalent) for visibleWidth (docs/analysis/05-tui.md §9).
 unicode-segmentation = "1"

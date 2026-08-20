@@ -8,6 +8,7 @@ description = "The pirust port of @earendil-works/pi-coding-agent's extension ho
 
 [dependencies]
 pirust-agent-core = { workspace = true }
+fancy-regex = { workspace = true }  # plan-mode utils: DESTRUCTIVE_PATTERNS/SAFE_PATTERNS
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -45,7 +45,28 @@ impl InlineExtension {
 /// The built-in extensions list (mirrors `builtInExtensions`,
 /// extensions/index.ts).
 pub fn built_in_extensions() -> Vec<InlineExtension> {
-    vec![
-        // The bundled `plan-mode` extension (feat-007 Wave 5) lands here.
-    ]
+    vec![crate::plan_mode_extension::plan_mode_extension()]
+}
+
+/// Run an `InlineExtension` factory against a fresh [`crate::registration::Extension`],
+/// returning the loaded extension. Mirrors the loader's "load factory → extension
+/// object" step (used by tests and the built-in loader).
+pub fn load(factory: &InlineExtension, cwd: &str) -> crate::registration::Extension {
+    let mut ext = crate::registration::Extension {
+        path: format!("<inline:{}>", factory.name),
+        resolved_path: format!("<inline:{}>", factory.name),
+        hidden: factory.hidden,
+        handlers: std::collections::HashMap::new(),
+        tools: std::collections::HashMap::new(),
+        commands: std::collections::HashMap::new(),
+        flags: std::collections::HashMap::new(),
+        shortcuts: std::collections::HashMap::new(),
+    };
+    let mut api = crate::registration::ExtensionApi {
+        extension: &mut ext,
+        cwd: cwd.to_string(),
+        assert_active: Box::new(|| {}),
+    };
+    (factory.factory)(&mut api).expect("extension factory ran");
+    ext
 }

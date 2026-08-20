@@ -1,10 +1,11 @@
 # plan.md — feat-007: P6 — interactive pirust + native extension runner
 
-> SESSION PAUSE 2026-08-19: Waves 1-4 DONE (commits b71f4f7..8d8d050).
-> Next: **Wave 5 — plan-mode bundled extension**. Resume here. Full gates
-> green at close (397/3, clippy/fmt clean). Live turn vs local llama.cpp
-> Qwen3.5-0.8B confirmed working (`pirust -p --model
-> anthropic/Qwen3.5-0.8B-Q8_0.gguf` → `ok`).
+> SESSION 2026-08-19 (resumed): Wave 5 DONE — plan-mode bundled extension
+> (plan_mode.rs + plan_mode_extension.rs + tests; 58 tests, differential vs
+> real Pi = 0 mismatches; workspace 486/3). Next: **Wave 6 — bind the
+> extension runner into SingleTurnSession** (action seams: getActiveTools/
+> setActiveTools/appendEntry/sendMessage + ctx.ui.* + sessionManager).
+> Resume here.
 
 Source: `packages/coding-agent/src/modes/interactive/` (interactive-mode.ts 6,008
 lines + components/ 9,214 lines + theme/ 1,420 lines + assets/) and the
@@ -125,3 +126,31 @@ shortcut/flag/provider registration).
       error capture, cancel short-circuit, input transform) + 2 integration
       tests (demo extension registers + dispatches; tool executes),
       clippy/fmt clean, workspace 397/3.
+- [x] Wave 5 — plan-mode bundled extension
+      (`crates/pirust-extension-api/src/plan_mode.rs` +
+      `plan_mode_extension.rs` + tests/plan_mode_extension.rs).
+      `plan_mode.rs`: pure 1:1 port of `plan-mode/utils.ts` (isSafeCommand/
+      cleanStepText/extractTodoItems/extractDoneSteps/markCompletedSteps +
+      TodoItem). `plan_mode_extension.rs`: faithful port of `index.ts` —
+      `plan` flag, `/plan` + `/todos` commands, `ctrl+alt+p` shortcut,
+      `tool_call` (block destructive bash), `context` (filter stale
+      plan-mode context), `before_agent_start` (inject plan/execution
+      context), `turn_end` ([DONE:n] tracking), `agent_end` (plan
+      extraction + execution-complete), `session_start` (flag + state
+      restore). Shared `Arc<Mutex<PlanModeStateMachine>>` across handlers
+      (Pi's closure-over-`let`). `built_in_extensions()` now returns
+      plan-mode. Fixed a real Wave-4 bug: `ToolCallEventResult` fields are
+      optional in Pi's TS, so `{block: true, reason}` without `terminate`
+      failed to deserialize → `unwrap_or_default` silently dropped the
+      `block`; added serde defaults.
+      Verify: 41 unit (plan_mode 29 + extension 2 + runner 6 + events 2 +
+      context 2) + 2 demo integration + 15 plan-mode integration = 58;
+      DIFFERENTIAL vs real Pi Node output (46 safe + 10 clean + 6 extract +
+      5 done + mark) = 0 mismatches; clippy/fmt clean; workspace 486/3
+      (3 = pre-existing env-polluted find tests).
+- [ ] Wave 6 — bind the extension runner into `SingleTurnSession`
+      (replace the `active_tools`/`set_active_tools`/`persist_state`/`update_status`
+      seams + `ctx.ui.*`/`ctx.sessionManager` no-ops with real implementations;
+      wire `ExtensionRunner` dispatch into the agent loop events).
+- [ ] Wave 7 — closeout: evidence in feature_list.json; `./init.sh` green;
+      delete plan.md.

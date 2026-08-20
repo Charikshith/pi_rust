@@ -91,13 +91,19 @@ pub struct ContextEventResult {
     pub messages: Option<Value>,
 }
 
-/// `ToolCallEventResult` (types.ts:1413).
+/// `ToolCallEventResult` (types.ts:1413). All fields are optional in Pi's TS
+/// (an extension may return only `{ block: true }`), so each has a serde
+/// default — a missing key must not fail the parse (runner.ts:935
+/// `unwrap_or_default` would then silently drop a real `block`).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ToolCallEventResult {
     /// Block tool execution.
+    #[serde(default)]
     pub block: bool,
+    #[serde(default)]
     pub reason: Option<String>,
     /// Hint that the agent should stop after the current tool batch.
+    #[serde(default)]
     pub terminate: bool,
 }
 

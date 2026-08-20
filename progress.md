@@ -898,3 +898,45 @@ State at close:
 This is the honest record. The audit's writeup (progress.md:674) is preserved
 above but superseded by this analysis — every claim in it failed verification
 against the real oracle.
+
+### 2026-08-19 — feat-007 Wave 5 (plan-mode bundled extension) DONE
+
+- `crates/pirust-extension-api/src/plan_mode.rs`: pure 1:1 port of
+  `examples/extensions/plan-mode/utils.ts` — `is_safe_command`,
+  `clean_step_text`, `extract_todo_items`, `extract_done_steps`,
+  `mark_completed_steps`, `TodoItem`. Uses `fancy-regex` (already in the tree
+  transitively via jsonschema — the `(?!>)` lookahead in the redirect
+  pattern needs it; plain `regex` can't express it). 29 unit tests porting
+  `test/plan-mode-utils.test.ts` verbatim.
+- `crates/pirust-extension-api/src/plan_mode_extension.rs`: faithful port of
+  `examples/extensions/plan-mode/index.ts` — `plan` flag, `/plan` + `/todos`
+  commands, `ctrl+alt+p` shortcut, `tool_call` (block destructive bash),
+  `context` (filter stale plan-mode context), `before_agent_start` (inject
+  plan/execution context), `turn_end` ([DONE:n] tracking), `agent_end`
+  (plan extraction + execution-complete), `session_start` (flag + state
+  restore). Handlers share one `Arc<Mutex<PlanModeStateMachine>>` (Pi's
+  closure-over-`let`). Action-method seams (`active_tools()`/
+  `set_active_tools()`/`persist_state()`/`update_status()`) are explicit
+  no-ops until Wave 6 binds the real session runtime — the state machine and
+  dispatch logic are unchanged, only the seams move.
+- `loader.rs`: `built_in_extensions()` now returns `[plan-mode]` + a `load()`
+  helper (mirrors the test seam; the loader's factory→extension step).
+- `context.rs` BUG FIX (real, found by the plan-mode tests): `ToolCallEventResult`
+  fields are optional in Pi's TS (`{block: true}` alone must parse); the Rust
+  struct had non-optional `terminate: bool`, so `{"block":true,"reason":...}`
+  failed to deserialize and `unwrap_or_default()` silently dropped the block.
+  Added `#[serde(default)]` to all three fields. This is a real Wave-4 bug the
+  demo extension never exercised.
+- DIFFERENTIAL vs real Pi Node output (the oracle): ran Pi's actual utils.ts
+  through Node and compared 46 isSafeCommand + 10 cleanStepText + 6
+  extractTodoItems + 5 extractDoneSteps + markCompletedSteps — **0 mismatches**,
+  including the "Add a regression test" → "A regression test" action-word
+  stripping and the `>file.txt`/`echo hello > file.txt` redirect blocks.
+- Tests: 41 unit (29 plan_mode + 2 extension + 6 runner + 2 events + 2
+  context) + 2 demo integration + 15 plan-mode integration = 58.
+  Workspace 486/3 (3 = pre-existing env-polluted find tests, unrelated),
+  clippy 0 warnings, fmt clean.
+- Wave 6 next: bind the extension runner into SingleTurnSession — replace
+  the no-op action seams with real getActiveTools/setActiveTools/appendEntry/
+  sendMessage + ctx.ui.*/ctx.sessionManager; wire ExtensionRunner dispatch
+  into the agent loop events.

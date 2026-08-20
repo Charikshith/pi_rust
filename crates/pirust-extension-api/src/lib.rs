@@ -15,11 +15,15 @@
 pub mod context;
 pub mod events;
 pub mod loader;
+pub mod plan_mode;
+pub mod plan_mode_extension;
 pub mod registration;
 pub mod runner;
 
 pub use context::*;
 pub use events::*;
 pub use loader::*;
+pub use plan_mode::*;
+pub use plan_mode_extension::*;
 pub use registration::*;
 pub use runner::*;
