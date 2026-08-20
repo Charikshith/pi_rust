@@ -990,3 +990,42 @@ against the real oracle.
   drift.
 - Wave 7 next: closeout — feature_list.json evidence, `./init.sh` green, delete
   plan.md.
+
+### 2026-08-19 — feat-007 Wave 7 closeout + oracle-drift fix (system-prompt)
+
+- feat-007 marked done in feature_list.json (Waves 1-6 evidence consolidated);
+  plan.md deleted after this commit. Workspace 490/3 (3 = pre-existing
+  env-polluted find tests), clippy 0, fmt clean.
+- ORACLE-DRIFT FIX (found during closeout verification): real Pi's
+  `core/system-prompt.ts` moved since the feat-005 fixture was committed
+  (2026-08-17). Two changes: (1) the "When asked about:" doc line gained
+  `environment variables (docs/environment-variables.md)`; (2) the
+  custom-prompt path now appends a trailing `\n` after "Current working
+  directory" (system-prompt.ts:69) while the default path does NOT
+  (system-prompt.ts:159) — the asymmetry matters. Rust port updated
+  (system_prompt.rs: template line + custom-path trailing newline + unit
+  test), fixture regenerated from real Pi via `node scripts/gen-sdk-oracle.mjs`
+  (legit regen: source moved, not hand-edited), system_prompt_golden green.
+- ENVIRONMENTAL drifts left alone (documented, not fixed):
+  - `gen-tools-oracle --check` DRIFT (exec.tree.json insideGitRepo
+    false->true, strings/bash.json): caused by a real `.git` ancestor in the
+    HOME dir (`C:\Users\Chakri\.git` — an actual home repo since Jun 28).
+    Temp dirs under AppData inherit it, so the oracle's `ancestorGit` is now
+    non-null. The script itself prints the warning ("An ancestor .git exists...
+    may not be reproducible elsewhere"). Regenerating would bake the wrong
+    environment into the fixture — left committed, gated by find_golden.rs
+    which runs on clean machines.
+  - The 3 pirust-tools find test failures are the SAME root cause (verified
+    present at 47033a0 pre-Wave-6: `git checkout 47033a0 && cargo test -p
+    pirust-tools --lib find` fails identically). Environmental, not a
+    regression.
+  - `gen-cli-oracle.mjs --check` crashes with ERR_MODULE_NOT_FOUND on
+    `data/amazon-bedrock.json`: Node 26.3.0 cannot type-strip Pi's
+    `with { type: "json" }` imports (`amazon-bedrock.models.ts`). Bare repro
+    (`node --experimental-strip-types -e "import(...)"`) fails identically —
+    a Node-26 tooling regression, not fixture drift. The models.cases fixture
+    is still gate-green via models_golden.rs (19 tests). Fix deferred (add a
+    .json branch to the resolve hook / pin Node <26) — out of closeout scope.
+- Oracle audit summary: 5/8 scripts green (golden, message-corpus,
+  model-corpus, rarefields-corpus, tui-oracle), 1 fixed (sdk), 2
+  environmental (tools, cli).
