@@ -11,10 +11,12 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 ## Current State
 
 **Last Updated:** 2026-08-19
-**Active Feature:** feat-007 — interactive pirust + native extension runner
-(IN PROGRESS — Wave 1 of 6 done: interactive scaffold). feat-006 DONE.
+**Active Feature:** feat-008 — P7: remaining ai providers + catalog generator
+(NOT STARTED). feat-007 DONE (Waves 1-7, commits b71f4f7..3540ec7).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-007 Wave 2 (streaming turn display in the TUI).
+**Next feature:** feat-008 (remaining providers + catalog generator).
+**Session resume:** read feature_list.json + progress.md; next session starts
+feat-008 (see "Feat-008 starter" in the 2026-08-19 Wave-7 closeout entry).
 **Open process incidents (two, same failure mode, same project)**:
 1. Wave 5's first fork attempt committed+pushed to `origin/master` despite
    explicit "do not commit/push" instructions before failing on a
@@ -1029,3 +1031,36 @@ against the real oracle.
 - Oracle audit summary: 5/8 scripts green (golden, message-corpus,
   model-corpus, rarefields-corpus, tui-oracle), 1 fixed (sdk), 2
   environmental (tools, cli).
+
+### 2026-08-19 — Session closeout (feat-007 complete, feat-008 next)
+
+- **State:** feat-007 DONE (last commit 3540ec7). Working tree clean.
+  Workspace 490/3, clippy 0, fmt clean. 9/13 features done.
+- **Remaining features (not started):** feat-008 (remaining providers +
+  catalog generator), feat-012 (RPC mode), feat-009 (orchestrator daemon,
+  blocked on feat-012), feat-010 (dynamic WASM extensions, depends on
+  feat-008).
+- **Open residuals (documented, not blockers):**
+  1. 3 pirust-tools find tests fail on THIS machine (real `~/.git` ancestor
+     in home dir makes temp-dir insideGitRepo walk hit it). Verified
+     pre-existing at 47033a0. Runs green on a machine without a home-dir
+     `.git`.
+  2. gen-tools-oracle --check DRIFT (exec.tree.json insideGitRepo
+     false->true, strings/bash.json) — same root cause; the script itself
+     warns "may not be reproducible elsewhere". Do NOT regenerate on this
+     machine.
+  3. gen-cli-oracle.mjs crashes under Node 26 on Pi's `with { type: "json" }`
+     imports (ERR_MODULE_NOT_FOUND data/amazon-bedrock.json). Bare
+     `node --experimental-strip-types` repro fails identically — a Node-26
+     tooling regression, not fixture drift. models.cases still gate-green via
+     models_golden.rs. Fix when convenient: add a `.json` branch to the
+     oracle resolve hook or pin Node <26.
+- **Feat-008 starter:** source is `packages/ai/src/providers/` (~35
+  providers, 10+ adapters) + `packages/ai/src/providers/data/*.json` +
+  `xtask` catalog generator. Models corpus (feat-001) already covers model
+  DATA byte-compat; feat-008 is the provider RUNTIME adapters + the
+  generator that reproduces the JSON. Follow the feat-002 pattern: capture
+  Pi oracle offline (gen-*-oracle.mjs driving real adapters with fake
+  clients), byte-golden each adapter, wire into models.json resolution.
+  Next session: read feature_list.json feat-008 entry + docs/analysis/
+  03-coding-agent.md before writing code.
