@@ -8,6 +8,8 @@
 //! registration methods write into the `Extension` being built; action
 //! methods delegate to a runtime (Wave 6 binds real implementations).
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
 use crate::context::{ExtensionCommandContext, ExtensionContext, ExtensionHandler};
@@ -103,6 +105,10 @@ pub struct ExtensionApi<'a> {
     pub cwd: String,
     /// Stale-instance guard: throws when this extension is stale.
     pub assert_active: Box<dyn Fn() + Send + Sync>,
+    /// The runner's shared runtime (action closures). Delegated from the
+    /// runner at construction — mirrors the `pi` function-object's closures
+    /// over `this.runtime` (runner.ts:326-332).
+    pub runtime: Arc<crate::runtime::ExtensionRuntime>,
 }
 
 /// A loaded extension (`Extension`, types.ts:1618): all registered items.
@@ -212,6 +218,44 @@ impl ExtensionApi<'_> {
             .flags
             .get(name)
             .and_then(|f| f.default.clone())
+    }
+
+    // --- runtime action accessors (pi.getActiveTools() etc., runner.ts:326-332) ---
+
+    /// `pi.getActiveTools()` — closure reads the shared slot at call time.
+    pub fn get_active_tools(&self) -> Arc<dyn Fn() -> Vec<String> + Send + Sync> {
+        let slot = Arc::clone(&self.runtime.get_active_tools);
+        Arc::new(move || slot.lock().unwrap()())
+    }
+
+    /// `pi.getAllTools()`.
+    pub fn get_all_tools(&self) -> Arc<dyn Fn() -> Vec<String> + Send + Sync> {
+        let slot = Arc::clone(&self.runtime.get_all_tools);
+        Arc::new(move || slot.lock().unwrap()())
+    }
+
+    /// `pi.setActiveTools(toolNames)`.
+    pub fn set_active_tools(&self) -> Arc<dyn Fn(Vec<String>) + Send + Sync> {
+        let slot = Arc::clone(&self.runtime.set_active_tools);
+        Arc::new(move |tools| slot.lock().unwrap()(tools))
+    }
+
+    /// `pi.appendEntry(customType, data)`.
+    pub fn append_entry(&self) -> Arc<dyn Fn(String, Option<Value>) + Send + Sync> {
+        let slot = Arc::clone(&self.runtime.append_entry);
+        Arc::new(move |custom_type, data| slot.lock().unwrap()(custom_type, data))
+    }
+
+    /// `pi.sendMessage(message, options)`.
+    pub fn send_message(&self) -> Arc<dyn Fn(Value, Value) + Send + Sync> {
+        let slot = Arc::clone(&self.runtime.send_message);
+        Arc::new(move |message, options| slot.lock().unwrap()(message, options))
+    }
+
+    /// `pi.sendUserMessage(content, options)`.
+    pub fn send_user_message(&self) -> Arc<dyn Fn(String, Value) + Send + Sync> {
+        let slot = Arc::clone(&self.runtime.send_user_message);
+        Arc::new(move |content, options| slot.lock().unwrap()(content, options))
     }
 }
 

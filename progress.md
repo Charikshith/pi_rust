@@ -940,3 +940,53 @@ against the real oracle.
   the no-op action seams with real getActiveTools/setActiveTools/appendEntry/
   sendMessage + ctx.ui.*/ctx.sessionManager; wire ExtensionRunner dispatch
   into the agent loop events.
+
+### 2026-08-19 — feat-007 Wave 6 (extension runner bound into SingleTurnSession) DONE
+
+- `crates/pirust-extension-api/src/runtime.rs` (new): `ExtensionRuntime` — the
+  shared runtime action closures (`ExtensionActions`, runner.ts:198-266). Each
+  action is a mutable slot (`Arc<Mutex<Box<dyn Fn…>>>`); `bind()` copies new
+  closures in place, matching Pi's `bindCore` (`this.runtime.getActiveTools =
+  actions.getActiveTools`). Extensions read through the shared slots lazily at
+  call time, so bind-after-load is visible to already-loaded extensions.
+- `loader.rs`: `load_with_runtime(factory, cwd, runtime_arc)` — the runner loads
+  built-ins against ITS OWN runtime Arc. This fixed a real Wave-5 latent bug:
+  `load()` built a fresh noop runtime, so plan-mode's captured closures read the
+  loader's noop slots while `bind_runtime` wrote to the runner's — the toggle
+  tests failed until the arcs were unified (the `plan_command_toggles_real_agent_tools`
+  e2e caught it).
+- `runner.rs`: `ExtensionRunner::new_with_runtime`; `bind_runtime` now mutates
+  the shared runtime in place.
+- `registration.rs`: `ExtensionApi` gains `runtime: Arc<ExtensionRuntime>` +
+  action accessors (`get_active_tools`/`set_active_tools`/`append_entry`/
+  `send_message`/`send_user_message`) returning closures that lock the slot.
+- `plan_mode_extension.rs`: the action-method seams are now real closures
+  captured into `PlanModeStateMachine` at factory time (`pi.getActiveTools()`
+  etc. — Pi's extension closes over the `pi` object). `persist_state` writes
+  `{enabled, todos, executing, toolsBeforePlanMode}` via `appendEntry`.
+- `pirust-agent-core/src/agent.rs`: `Agent` gains post-hoc hook setters
+  (`set_transform_context`/`set_before_tool_call`/`set_after_tool_call` — the
+  three fields became `Mutex<Option<Arc>>`) + `tool_names()`. Faithful to Pi's
+  mutable `agent.beforeToolCall = …` (`_installAgentToolHooks`).
+- `pirust-coding-agent/src/runtime_host.rs`: `SingleTurnSession` owns
+  `Arc<Mutex<ExtensionRunner>>` + the tool registry. `bind_extensions` (Wave 6):
+  builds the runner from `built_in_extensions()`, binds real actions
+  (`getActiveTools` → `agent.tool_names()`, `setActiveTools` → registry-filter +
+  `agent.set_tools` (unknown names dropped = `validToolNames` filter),
+  `appendEntry` → `session_manager.append_custom_entry` (sync, session.rs:2083)),
+  installs the agent-loop hooks (`transform_context`→`emit_context`,
+  `before_tool_call`→`emit_tool_call` block, `after_tool_call`→`emit_tool_result`),
+  forwards agent events via `to_extension_event`, emits
+  `session_start{reason:startup}`.
+- `sdk.rs`/`main.rs`: `CreateAgentSessionResult` carries the full tool registry;
+  `SingleTurnSession::new(agent, manager, tool_registry)`. Interactive mode
+  binds extensions (`ExtensionBindMode::Tui` added — `has_ui:true`, which
+  plan-mode's `agent_end` extraction needs).
+- Tests: 4 new e2e (`tests/wave6_binding.rs`) — runner built; `/plan` toggles
+  REAL agent tools (edit/write dropped, restored on toggle-off); destructive
+  bash blocked through the real `before_tool_call` hook path; `appendEntry`
+  persists the plan-mode custom entry (`enabled:true`,
+  `toolsBeforePlanMode: 7`). Workspace 490/3, clippy 0, fmt clean, no oracle
+  drift.
+- Wave 7 next: closeout — feature_list.json evidence, `./init.sh` green, delete
+  plan.md.

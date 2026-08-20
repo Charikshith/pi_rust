@@ -2,10 +2,10 @@
 
 > SESSION 2026-08-19 (resumed): Wave 5 DONE — plan-mode bundled extension
 > (plan_mode.rs + plan_mode_extension.rs + tests; 58 tests, differential vs
-> real Pi = 0 mismatches; workspace 486/3). Next: **Wave 6 — bind the
-> extension runner into SingleTurnSession** (action seams: getActiveTools/
-> setActiveTools/appendEntry/sendMessage + ctx.ui.* + sessionManager).
-> Resume here.
+> real Pi = 0 mismatches; workspace 486/3). Wave 6 DONE — extension runner
+> bound into `SingleTurnSession` (real tool-toggle + appendEntry + hooks;
+> workspace 490/3). Next: **Wave 7 — closeout** (evidence in
+> feature_list.json; `./init.sh` green; delete plan.md). Resume here.
 
 Source: `packages/coding-agent/src/modes/interactive/` (interactive-mode.ts 6,008
 lines + components/ 9,214 lines + theme/ 1,420 lines + assets/) and the
@@ -148,9 +148,30 @@ shortcut/flag/provider registration).
       DIFFERENTIAL vs real Pi Node output (46 safe + 10 clean + 6 extract +
       5 done + mark) = 0 mismatches; clippy/fmt clean; workspace 486/3
       (3 = pre-existing env-polluted find tests).
-- [ ] Wave 6 — bind the extension runner into `SingleTurnSession`
-      (replace the `active_tools`/`set_active_tools`/`persist_state`/`update_status`
-      seams + `ctx.ui.*`/`ctx.sessionManager` no-ops with real implementations;
-      wire `ExtensionRunner` dispatch into the agent loop events).
+- [x] Wave 6 — bind the extension runner into `SingleTurnSession`
+      (`crates/pirust-coding-agent/src/runtime_host.rs` +
+      `crates/pirust-extension-api/src/runtime.rs` + `loader.rs` + `runner.rs`
+      + `agent.rs` hooks). `ExtensionRuntime` = mutable action slots (Pi's
+      shared `runtime` object, `bindCore` copies in place); `load_with_runtime`
+      loads extensions against the runner's own runtime Arc so bind-after-load
+      swaps are visible (the Wave-5 fresh-noop-arc bug that made the toggle
+      tests fail). `SingleTurnSession` owns `Arc<Mutex<ExtensionRunner>>`;
+      `bind_extensions` builds the runner from built-ins, binds real actions
+      (`getActiveTools` → `agent.tool_names()`, `setActiveTools` → registry
+      filter + `agent.set_tools`, `appendEntry` → `session_manager.append_custom_entry`),
+      installs the agent-loop hooks (`transform_context`→`emit_context`,
+      `before_tool_call`→`emit_tool_call` (block), `after_tool_call`→
+      `emit_tool_result`), forwards agent events (`to_extension_event`), and
+      emits `session_start{reason:startup}`. `Agent` gains post-hoc hook
+      setters (`set_transform_context`/`set_before_tool_call`/`set_after_tool_call`,
+      faithful to Pi's mutable `agent.beforeToolCall = …`) + `tool_names()`.
+      `ExtensionBindMode::Tui` added (interactive mode binds `tui`,
+      `has_ui:true` — plan-mode plan extraction needs it). Interactive mode
+      now binds extensions at launch.
+      Verify: 4 new e2e tests (`tests/wave6_binding.rs`) — runner built,
+      `/plan` toggles REAL agent tools (edit/write dropped, restored on toggle),
+      destructive bash blocked via the real hook, `appendEntry` persists the
+      plan-mode entry with `enabled:true` + `toolsBeforePlanMode`. Workspace
+      490/3, clippy 0, fmt clean, no oracle drift.
 - [ ] Wave 7 — closeout: evidence in feature_list.json; `./init.sh` green;
       delete plan.md.

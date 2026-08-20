@@ -660,13 +660,17 @@ impl Subscription {
 /// The listener passed to `session.subscribe` (`print-mode.ts:104-108`).
 pub type SessionEventListener = Arc<dyn Fn(&AgentSessionEvent) + Send + Sync>;
 
-/// `bindExtensions`'s `mode`: `mode === "json" ? "json" : "print"`
-/// (`print-mode.ts:74`) — note text mode binds as **`print`**, not `text`.
+/// `bindExtensions`'s `mode` — `mode === "json" ? "json" : "print"`
+/// (`print-mode.ts:74`) for print mode; the interactive TUI binds `"tui"`
+/// (interactive-mode.ts:1862). Note text print mode binds as **`print`**, not
+/// `text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExtensionBindMode {
     Print,
     Json,
+    /// Interactive TUI — `has_ui: true` (dialog-capable).
+    Tui,
 }
 
 /// An extension error reported through `bindExtensions`'s `onError`
@@ -698,6 +702,21 @@ pub struct CommandContextActions {
     pub navigate_tree: NavigateTreeFn,
     pub switch_session: SwitchSessionFn,
     pub reload: ReloadFn,
+}
+
+impl CommandContextActions {
+    /// All no-op actions — used by tests that only exercise the extension
+    /// binding, not the session-control commands.
+    pub fn placeholder() -> Self {
+        Self {
+            wait_for_idle: Arc::new(|| Box::pin(async {})),
+            new_session: Arc::new(|_| Box::pin(async { Value::Null })),
+            fork: Arc::new(|_, _| Box::pin(async { Cancelled { cancelled: false } })),
+            navigate_tree: Arc::new(|_, _| Box::pin(async { Cancelled { cancelled: false } })),
+            switch_session: Arc::new(|_, _| Box::pin(async { Value::Null })),
+            reload: Arc::new(|| Box::pin(async {})),
+        }
+    }
 }
 
 /// `Object.keys(commandContextActions)` (`print-mode.ts:76-97`).

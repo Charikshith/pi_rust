@@ -30,6 +30,8 @@ use crate::context::{
 };
 use crate::events::ExtensionEvent;
 use crate::registration::Extension;
+use crate::runtime::ExtensionRuntime;
+use std::sync::Arc;
 
 /// `ExtensionError` (types.ts:1638).
 #[derive(Debug, Clone)]
@@ -48,6 +50,9 @@ pub struct ExtensionRunner {
     /// Current run mode.
     pub mode: ExtensionMode,
     errors: Vec<ExtensionError>,
+    /// Shared runtime action closures (`ExtensionActions`, runner.ts:198-266);
+    /// no-ops until `bind_runtime` (Pi's `bindCore`).
+    runtime: Arc<ExtensionRuntime>,
 }
 
 /// Combined result from all before_agent_start handlers (runner.ts:110).
@@ -58,12 +63,39 @@ pub struct BeforeAgentStartCombinedResult {
 
 impl ExtensionRunner {
     pub fn new(extensions: Vec<Extension>, cwd: String, mode: ExtensionMode) -> Self {
+        Self::new_with_runtime(extensions, cwd, mode, Arc::new(ExtensionRuntime::noop()))
+    }
+
+    /// [`new`] with a caller-provided runtime Arc — extensions must be loaded
+    /// against THIS Arc (via [`crate::loader::load_with_runtime`]) so their
+    /// captured closures reference the same slots `bind_runtime` mutates.
+    pub fn new_with_runtime(
+        extensions: Vec<Extension>,
+        cwd: String,
+        mode: ExtensionMode,
+        runtime: Arc<ExtensionRuntime>,
+    ) -> Self {
         Self {
             extensions,
             cwd,
             mode,
             errors: Vec::new(),
+            runtime,
         }
+    }
+
+    /// `runner.bindCore(actions, …)` (runner.ts:312-350) — copy the action
+    /// closures into the shared runtime **in place**. Extensions captured the
+    /// same `Arc<ExtensionRuntime>` at factory time, so a bind-after-load
+    /// swap is visible to already-loaded extensions exactly as Pi's shared
+    /// `runtime` object makes it.
+    pub fn bind_runtime(&mut self, runtime: ExtensionRuntime) {
+        self.runtime.bind(runtime);
+    }
+
+    /// The current runtime (shared with the extension APIs).
+    pub fn runtime(&self) -> Arc<ExtensionRuntime> {
+        Arc::clone(&self.runtime)
     }
 
     pub fn has_handlers(&self, event_type: &str) -> bool {

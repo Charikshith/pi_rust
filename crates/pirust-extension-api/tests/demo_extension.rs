@@ -73,6 +73,7 @@ fn load(factory: &InlineExtension, cwd: &str) -> Extension {
         extension: &mut ext,
         cwd: cwd.to_string(),
         assert_active: Box::new(|| {}),
+        runtime: std::sync::Arc::new(pirust_extension_api::runtime::ExtensionRuntime::noop()),
     };
     (factory.factory)(&mut api).expect("factory ran");
     ext

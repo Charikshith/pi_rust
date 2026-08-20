@@ -372,6 +372,7 @@ async fn run(parsed: args::Args) -> i32 {
     // is `sdk.rs`'s only failure mode (see its module docs), so it doubles as steps 26/27.
     let sdk::CreateAgentSessionResult {
         agent,
+        tool_registry,
         model_fallback_message,
         model,
         thinking_level,
@@ -434,7 +435,7 @@ async fn run(parsed: args::Args) -> i32 {
     // Step 26 handled above (step 27); the interactive-only first-time-setup and theme
     // steps (25) are feat-006/007.
 
-    let session = SingleTurnSession::new(agent, session_manager);
+    let session = SingleTurnSession::new(agent, session_manager, tool_registry);
     let host = Arc::new(SingleTurnRuntimeHost::new(Arc::clone(&session)));
 
     let platform = pirust_coding_agent::config::Platform::current();
@@ -471,10 +472,27 @@ async fn run(parsed: args::Args) -> i32 {
 /// Wave 2: on submit, `session.prompt` runs (blocking the loop via the
 /// runtime handle); session events stream into the TUI's chat container
 /// (user line, streaming assistant text, separator). Quit on Ctrl+D.
+///
+/// `bindCurrentSessionExtensions` (interactive-mode.ts:1858-1860) — the
+/// interactive session binds extensions with `mode: "tui"` before the loop.
 async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
     use pirust_coding_agent::interactive_mode::InteractiveMode;
 
+    // Bind the extension runner (plan-mode + tool blocking active in the TUI).
+    let binding = pirust_coding_agent::print_mode::ExtensionBinding {
+        mode: pirust_coding_agent::print_mode::ExtensionBindMode::Tui,
+        command_context_actions:
+            pirust_coding_agent::print_mode::CommandContextActions::placeholder(),
+        on_error: Arc::new(|_| {}),
+    };
     let session: Arc<dyn pirust_coding_agent::print_mode::PrintModeSession> = session;
+    if let Err(error) = session.bind_extensions(binding).await {
+        eprintln!(
+            "Warning: failed to bind extensions: {}",
+            error.console_message()
+        );
+    }
+
     let runtime = tokio::runtime::Handle::current();
     let terminal = Box::new(pirust_tui::terminal::ProcessTerminal::new());
     let mut mode = InteractiveMode::new(terminal, session, runtime);

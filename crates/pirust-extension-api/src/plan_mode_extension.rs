@@ -18,13 +18,12 @@
 //!
 //! Pi's extension calls `pi.getActiveTools()` / `pi.setActiveTools()` /
 //! `pi.appendEntry()` / `pi.sendMessage()` and `ctx.ui.*` /
-//! `ctx.sessionManager.getEntries()`. The Wave-4 `ExtensionApi`/`ExtensionContext`
-//! are registration-only; action methods and the UI context are bound by
-//! `pirust-coding-agent` in Wave 6. This module keeps those as explicit
-//! no-op seams (`active_tools()`, `set_active_tools()`, `persist_state()`,
-//! `update_status()`) so the port is line-for-line faithful and only the
-//! seams change in Wave 6 — the state machine and dispatch logic stay
-//! identical.
+//! `ctx.sessionManager.getEntries()`. The Rust port captures the runtime
+//! action closures from the `ExtensionApi` (which delegates to the runner's
+//! shared `ExtensionRuntime`) into the state machine at factory time —
+//! `get_active_tools`/`set_active_tools`/`append_entry` are real closures,
+//! no-ops until `bind_runtime` swaps in implementations. Only the UI seam
+//! (`update_status`, `ctx.ui.*`) remains a no-op this wave.
 
 use std::sync::{Arc, Mutex};
 
@@ -69,12 +68,37 @@ pub struct PlanModeState {
 
 /// The mutable per-extension state (`planModeEnabled`, `executionMode`,
 /// `todoItems`, `toolsBeforePlanMode` in index.ts).
-#[derive(Default)]
+///
+/// The action closures (`get_active_tools` / `set_active_tools` /
+/// `append_entry`) are captured from the `ExtensionApi` at factory time — Pi's
+/// extension code closes over the `pi` object (`pi.getActiveTools()`,
+/// `pi.setActiveTools()`, `pi.appendEntry()`); the Rust port stores those
+/// same closures in the shared state machine.
 pub struct PlanModeStateMachine {
     pub plan_mode_enabled: bool,
     pub execution_mode: bool,
     pub todo_items: Vec<TodoItem>,
     pub tools_before_plan_mode: Option<Vec<String>>,
+    /// `pi.getActiveTools()`.
+    pub get_active_tools: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// `pi.setActiveTools(tools)`.
+    pub set_active_tools: Arc<dyn Fn(Vec<String>) + Send + Sync>,
+    /// `pi.appendEntry(customType, data)`.
+    pub append_entry: Arc<dyn Fn(String, Option<Value>) + Send + Sync>,
+}
+
+impl Default for PlanModeStateMachine {
+    fn default() -> Self {
+        Self {
+            plan_mode_enabled: false,
+            execution_mode: false,
+            todo_items: Vec::new(),
+            tools_before_plan_mode: None,
+            get_active_tools: Arc::new(Vec::new),
+            set_active_tools: Arc::new(|_| {}),
+            append_entry: Arc::new(|_, _| {}),
+        }
+    }
 }
 
 impl PlanModeStateMachine {
@@ -117,56 +141,59 @@ impl PlanModeStateMachine {
     }
 }
 
-/// `pi.getActiveTools()` — seam. Wave 6 binds the real active-tool list from
-/// the session runtime.
-fn active_tools() -> Vec<String> {
-    Vec::new()
-}
-
-/// `pi.setActiveTools(tools)` — seam. Wave 6 binds the real tool list.
-fn set_active_tools(_tools: Vec<String>) {}
-
-/// `pi.appendEntry("plan-mode", data)` — seam. Wave 6 binds the session's
-/// appendEntry action.
-fn persist_state(_state: &PlanModeStateMachine) {}
-
 /// `updateStatus(ctx)` (index.ts:54-76) — footer status + todo widget. The
-/// Wave-4 `ExtensionContext` has no `ui`; Wave 6 binds it.
+/// TUI status-bar seam stays a no-op this wave (the interactive TUI's status
+/// indicator binding is out of scope); the status text itself is unchanged.
 fn update_status(_ctx: &ExtensionContext, _state: &PlanModeStateMachine) {}
 
-/// `enablePlanModeTools` (index.ts:91-96).
-fn enable_plan_mode_tools(state: &mut PlanModeStateMachine) {
-    if state.tools_before_plan_mode.is_none() {
-        state.tools_before_plan_mode = Some(active_tools());
+impl PlanModeStateMachine {
+    /// `enablePlanModeTools` (index.ts:91-96).
+    fn enable_plan_mode_tools(&mut self) {
+        if self.tools_before_plan_mode.is_none() {
+            self.tools_before_plan_mode = Some((self.get_active_tools)());
+        }
+        let plan_tools =
+            self.get_plan_mode_tools(self.tools_before_plan_mode.as_deref().unwrap_or(&[]));
+        (self.set_active_tools)(plan_tools);
     }
-    let plan_tools =
-        state.get_plan_mode_tools(state.tools_before_plan_mode.as_deref().unwrap_or(&[]));
-    set_active_tools(plan_tools);
-}
 
-/// `restoreNormalModeTools` (index.ts:98-102).
-fn restore_normal_mode_tools(state: &mut PlanModeStateMachine) {
-    let current = active_tools();
-    let restored = state
-        .tools_before_plan_mode
-        .take()
-        .unwrap_or_else(|| state.get_normal_mode_tools(&current));
-    set_active_tools(restored);
-}
-
-/// `togglePlanMode` (index.ts:105-114).
-fn toggle_plan_mode(state: &mut PlanModeStateMachine, ctx: &ExtensionContext) {
-    state.plan_mode_enabled = !state.plan_mode_enabled;
-    state.execution_mode = false;
-    state.todo_items.clear();
-
-    if state.plan_mode_enabled {
-        enable_plan_mode_tools(state);
-    } else {
-        restore_normal_mode_tools(state);
+    /// `restoreNormalModeTools` (index.ts:98-102).
+    fn restore_normal_mode_tools(&mut self) {
+        let current = (self.get_active_tools)();
+        let restored = self
+            .tools_before_plan_mode
+            .take()
+            .unwrap_or_else(|| self.get_normal_mode_tools(&current));
+        (self.set_active_tools)(restored);
     }
-    update_status(ctx, state);
-    persist_state(state);
+
+    /// `persistState` (index.ts:65-73) — `pi.appendEntry("plan-mode", {...})`.
+    fn persist_state(&self) {
+        (self.append_entry)(
+            "plan-mode".to_string(),
+            Some(json!({
+                "enabled": self.plan_mode_enabled,
+                "todos": self.todo_items,
+                "executing": self.execution_mode,
+                "toolsBeforePlanMode": self.tools_before_plan_mode,
+            })),
+        );
+    }
+
+    /// `togglePlanMode` (index.ts:105-114).
+    fn toggle_plan_mode(&mut self, ctx: &ExtensionContext) {
+        self.plan_mode_enabled = !self.plan_mode_enabled;
+        self.execution_mode = false;
+        self.todo_items.clear();
+
+        if self.plan_mode_enabled {
+            self.enable_plan_mode_tools();
+        } else {
+            self.restore_normal_mode_tools();
+        }
+        update_status(ctx, self);
+        self.persist_state();
+    }
 }
 
 /// Build + register the plan-mode extension — the `planModeExtension(pi)`
@@ -184,7 +211,16 @@ pub fn plan_mode_extension() -> InlineExtension {
                 extension_path: api.extension.path.clone(),
             });
 
-            let state = Arc::new(Mutex::new(PlanModeStateMachine::default()));
+            // Capture the runtime action closures (`pi.getActiveTools()` etc.)
+            // into the state machine at factory time — Pi's extension closes
+            // over the `pi` object; the Wave-6 `ExtensionApi` exposes the
+            // runner's shared runtime.
+            let state = Arc::new(Mutex::new(PlanModeStateMachine {
+                get_active_tools: api.get_active_tools(),
+                set_active_tools: api.set_active_tools(),
+                append_entry: api.append_entry(),
+                ..Default::default()
+            }));
 
             api.register_command(
                 "plan",
@@ -196,7 +232,7 @@ pub fn plan_mode_extension() -> InlineExtension {
                         let state = Arc::clone(&state);
                         move |_args, ctx| {
                             let mut s = state.lock().unwrap();
-                            toggle_plan_mode(&mut s, &ctx.base);
+                            s.toggle_plan_mode(&ctx.base);
                             Ok(())
                         }
                     }),
@@ -245,7 +281,7 @@ pub fn plan_mode_extension() -> InlineExtension {
                     let state = Arc::clone(&state);
                     move |ctx| {
                         let mut s = state.lock().unwrap();
-                        toggle_plan_mode(&mut s, ctx);
+                        s.toggle_plan_mode(ctx);
                         Ok(())
                     }
                 }),
@@ -387,7 +423,7 @@ pub fn plan_mode_extension() -> InlineExtension {
                         if mark_completed_steps(&text, &mut s.todo_items) > 0 {
                             update_status(ctx, &s);
                         }
-                        persist_state(&s);
+                        s.persist_state();
                         Ok(Value::Null)
                     }
                 }),
@@ -416,7 +452,7 @@ pub fn plan_mode_extension() -> InlineExtension {
                                 s.execution_mode = false;
                                 s.todo_items.clear();
                                 update_status(ctx, &s);
-                                persist_state(&s);
+                                s.persist_state();
                             }
                             return Ok(Value::Null);
                         }
@@ -440,7 +476,7 @@ pub fn plan_mode_extension() -> InlineExtension {
                         if s.todo_items.is_empty() {
                             return Ok(Value::Null);
                         }
-                        persist_state(&s);
+                        s.persist_state();
 
                         // Show plan steps + next-action select (index.ts:301-330). The
                         // `ctx.ui.select` dialog is a no-op until Wave 6 (Pi's runtime
@@ -466,7 +502,7 @@ pub fn plan_mode_extension() -> InlineExtension {
                         // ctx.sessionManager.getEntries() — no-op until Wave 6.
                         let _ = ctx;
                         if s.plan_mode_enabled {
-                            enable_plan_mode_tools(&mut s);
+                            s.enable_plan_mode_tools();
                         }
                         update_status(ctx, &s);
                         Ok(Value::Null)
@@ -570,6 +606,7 @@ mod tests {
             extension: &mut e,
             cwd: ".".into(),
             assert_active: Box::new(|| {}),
+            runtime: std::sync::Arc::new(crate::runtime::ExtensionRuntime::noop()),
         };
         assert_eq!(api.get_flag("plan"), Some(FlagValue::Bool(false)));
     }

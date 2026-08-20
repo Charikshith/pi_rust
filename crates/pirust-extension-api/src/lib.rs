@@ -10,6 +10,7 @@
 //! - [`registration`]: `ToolDefinition`, `RegisteredCommand`,
 //!   `ExtensionShortcut`, `ExtensionFlag`, `ExtensionApi`, `Extension`
 //! - [`runner`]: `ExtensionRunner` with Pi's exact dispatch semantics
+//! - [`runtime`]: shared runtime action closures (`bindCore` seam)
 //! - [`loader`]: built-in (compile-time) loader
 
 pub mod context;
@@ -19,6 +20,7 @@ pub mod plan_mode;
 pub mod plan_mode_extension;
 pub mod registration;
 pub mod runner;
+pub mod runtime;
 
 pub use context::*;
 pub use events::*;

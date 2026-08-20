@@ -466,6 +466,7 @@ impl PrintModeSession for StubSession {
             "mode": match binding.mode {
                 ExtensionBindMode::Print => "print",
                 ExtensionBindMode::Json => "json",
+                ExtensionBindMode::Tui => "tui",
             },
             "hasCommandContextActions": true,
             "commandContextActionKeys": COMMAND_CONTEXT_ACTION_KEYS,

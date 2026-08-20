@@ -274,11 +274,16 @@ struct AgentInner {
     idle: watch::Sender<bool>,
     // config
     convert_to_llm: ConvertToLlmArc,
-    transform_context: Option<TransformContextArc>,
+    /// `agent.transformContext` (agent.ts:100) — mutable after construction
+    /// (Pi's `_installAgentNextTurnRefresh`-style assignment); the extension
+    /// host sets it at bind time.
+    transform_context: Mutex<Option<TransformContextArc>>,
     stream_fn: Option<StreamFn>,
     get_api_key: Option<GetApiKeyArc>,
-    before_tool_call: Option<BeforeToolCallArc>,
-    after_tool_call: Option<AfterToolCallArc>,
+    /// `agent.beforeToolCall` (agent.ts:105) — mutable after construction.
+    before_tool_call: Mutex<Option<BeforeToolCallArc>>,
+    /// `agent.afterToolCall` (agent.ts:106) — mutable after construction.
+    after_tool_call: Mutex<Option<AfterToolCallArc>>,
     session_id: Option<String>,
     tool_execution: ToolExecutionMode,
 }
@@ -317,11 +322,11 @@ impl Agent {
             active_run: Mutex::new(None),
             idle,
             convert_to_llm,
-            transform_context: options.transform_context,
+            transform_context: Mutex::new(options.transform_context),
             stream_fn: options.stream_fn,
             get_api_key: options.get_api_key,
-            before_tool_call: options.before_tool_call,
-            after_tool_call: options.after_tool_call,
+            before_tool_call: Mutex::new(options.before_tool_call),
+            after_tool_call: Mutex::new(options.after_tool_call),
             session_id: options.session_id,
             tool_execution: options.tool_execution,
         };
@@ -359,6 +364,37 @@ impl Agent {
     /// Replace the tools (copy-on-assign, agent.ts:80-82).
     pub fn set_tools(&self, tools: &[Arc<dyn AgentTool>]) {
         self.inner.state.lock().unwrap().set_tools(tools);
+    }
+
+    /// `getActiveToolNames` (agent-session.ts:909-911) — `agent.state.tools.map(t => t.name)`.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .tools
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect()
+    }
+
+    /// `agent.transformContext = fn` (agent.ts:100) — post-construction hook
+    /// assignment (the extension host's `_installAgentNextTurnRefresh` does
+    /// this in Pi).
+    pub fn set_transform_context(&self, hook: Option<TransformContextArc>) {
+        *self.inner.transform_context.lock().unwrap() = hook;
+    }
+
+    /// `agent.beforeToolCall = fn` (agent.ts:105) — post-construction hook
+    /// assignment (Pi's `_installAgentToolHooks`).
+    pub fn set_before_tool_call(&self, hook: Option<BeforeToolCallArc>) {
+        *self.inner.before_tool_call.lock().unwrap() = hook;
+    }
+
+    /// `agent.afterToolCall = fn` (agent.ts:106) — post-construction hook
+    /// assignment (Pi's `_installAgentToolHooks`).
+    pub fn set_after_tool_call(&self, hook: Option<AfterToolCallArc>) {
+        *self.inner.after_tool_call.lock().unwrap() = hook;
     }
 
     /// Queue a steering message (agent.ts:274-276).
@@ -534,17 +570,17 @@ impl AgentInner {
         let convert_to_llm =
             Box::new(move |msgs: Vec<AgentMessage>| convert(msgs)) as crate::types::ConvertToLlmFn;
 
-        let transform_context = self.transform_context.clone().map(|arc| {
+        let transform_context = self.transform_context.lock().unwrap().clone().map(|arc| {
             Box::new(move |msgs, token| arc(msgs, token)) as crate::types::TransformContextFn
         });
         let get_api_key = self
             .get_api_key
             .clone()
             .map(|arc| Box::new(move |p| arc(p)) as crate::types::GetApiKeyFn);
-        let before_tool_call = self.before_tool_call.clone().map(|arc| {
+        let before_tool_call = self.before_tool_call.lock().unwrap().clone().map(|arc| {
             Box::new(move |ctx, token| arc(ctx, token)) as crate::types::BeforeToolCallFn
         });
-        let after_tool_call = self.after_tool_call.clone().map(|arc| {
+        let after_tool_call = self.after_tool_call.lock().unwrap().clone().map(|arc| {
             Box::new(move |ctx, token| arc(ctx, token)) as crate::types::AfterToolCallFn
         });
 

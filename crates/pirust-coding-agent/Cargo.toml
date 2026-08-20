@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 pirust-ai = { workspace = true }
 pirust-agent-core = { workspace = true }
+pirust-extension-api = { workspace = true }
 pirust-tui = { workspace = true }
 pirust-tools = { workspace = true }
 serde = { workspace = true }

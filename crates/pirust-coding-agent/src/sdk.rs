@@ -37,7 +37,7 @@ use pirust_agent_core::harness::messages::convert_to_llm;
 use pirust_agent_core::types::{AgentTool, ThinkingLevel};
 use pirust_ai::api::{anthropic_messages, SimpleStreamOptions, StreamOptions};
 use pirust_ai::types::Model;
-use pirust_tools::{create_all_tool_definitions, create_all_tools, ToolName};
+use pirust_tools::{create_all_tool_definitions, create_all_tools, ToolName, ToolRecord};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{credential_api_key, read_stored_credential};
@@ -90,6 +90,11 @@ pub struct CreateAgentSessionOptions<'a> {
 /// `session` (`AgentSession`, out of scope — see module docs).
 pub struct CreateAgentSessionResult {
     pub agent: Agent,
+    /// The full tool registry (`create_all_tools` output) — the `_toolRegistry`
+    /// Pi's `setActiveToolsByName` filters through (agent-session.ts:936-955).
+    /// `main.rs` hands it to the session so extension `setActiveTools` can map
+    /// names → tools.
+    pub tool_registry: ToolRecord,
     /// `formatNoModelsAvailableMessage()` when no model resolved; `None` otherwise. Pi's
     /// other fallback text ("Could not restore model …") only fires on session restore,
     /// which is out of scope this wave.
@@ -403,6 +408,7 @@ pub fn assemble_agent_session(
 
     Ok(CreateAgentSessionResult {
         agent: Agent::new(agent_options),
+        tool_registry: impls,
         model_fallback_message,
         model: result_model,
         thinking_level,
