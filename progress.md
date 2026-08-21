@@ -1288,3 +1288,37 @@ oracle --checks green + deterministic (codec 25 / storage 8 / repo 10 / memory 5
 **Next:** v3→v4 replacement of the SessionStorage trait + harness + coding-agent
 session.rs wiring, then `gen-agent-oracle` rework, then `gen-printmode-oracle`
 + printmode regen.
+
+## 2026-08-21 — SESSION CLOSE (v4 session port step 4 done; harness swap scoped)
+
+**Pause point:** v4 session layer fully ported (codec/state/storage/repo/Session/
+memory/context, all oracle-verified, 4 `--check`s green). `ca340bf`, 1 ahead of
+origin, nothing pushed. Live smoke test this session: `pirust -p "Reply with
+exactly one word: ok" --model anthropic/Qwen3.5-0.8B-Q8_0.gguf` → `ok` against
+the local llama-server (ggml-org/Qwen3.5-0.8B-GGUF loaded at 127.0.0.1:8080).
+
+**Scope of the NEXT wave (harness swap — mapped against real Pi 0.84.2):**
+0.84.2 removed the v3 tree session path: `agent-loop.ts` never touches session;
+`agent-harness.ts` only `findRecords({limit:1})` at `create` restore + `getLeafId()`.
+Session writes now flow through the v4 `Session` via `SessionManager`
+(coding-agent `agent-session.ts` + `session-manager.ts`), constructed for a
+`JsonlSessionRepo`. So the Rust side must:
+1. Port `session-manager.ts` (`SessionManager`: create/open/fork by id, cwd
+   verification, `CURRENT_SESSION_VERSION`, `SessionHeader`, `getLatestCompactionEntry`).
+2. Wire the already-ported `JsonlSessionRepo` behind it (repo create/open → the
+   v4 `Session<JsonlSessionStorage>` the harness drives).
+3. Rewire `HarnessShared<St>` + `apply_pending_write`: v3 tree-`Session`
+   (async append_message/append_model_change/append_thinking_level_change/
+   append_active_tools_change/append_compaction/append_custom*/append_label/
+   append_session_name/set_leaf_id) → v4 sync mutation-log `Session`
+   (LaneView appends; append_session_name→set_name rename; set_leaf_id→v4 lane
+   leaf model).
+4. Rebuild coding-agent `session.rs` wiring against v4 (Rust analog of
+   agent-session.ts).
+5. Rework `gen-agent-oracle` against v4 APIs; regenerate agent fixtures.
+This is a full multi-step wave, deferred to next session start.
+
+**Gate at close:** fmt + clippy `-D warnings` clean; `cargo test --workspace`
+green except the same 3 pre-existing env-polluted pirust-tools find tests; all
+4 v4 oracle `--check`s green (codec 25 / storage 8 / repo 10 / memory 5).
+Tree clean at `ca340bf`; nothing pushed.

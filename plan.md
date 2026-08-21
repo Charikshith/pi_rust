@@ -82,9 +82,29 @@ porting feat-008. This is a distinct prerequisite wave:
    Arc). Full workspace gate green (3 pre-existing env-polluted pirust-tools
    find tests only); all 4 v4 oracle --checks green (codec 25 / storage 8 /
    repo 10 / memory 5).
-   STILL TO GO: the v3→v4 replacement of the SessionStorage trait + harness +
-   coding-agent session.rs wiring, then rework `gen-agent-oracle` against the v4
-   APIs.
+   STILL TO GO: the v3→v4 harness/session wiring swap. Scoped against real Pi
+   0.84.2 (oracle: `agent-loop.ts` no longer touches session; `agent-harness.ts`
+   only `findRecords({limit:1})` at create restore + `getLeafId()`; session
+   writes flow through the v4 `Session` via `SessionManager` in
+   coding-agent `agent-session.ts` + `session-manager.ts`, constructed for a
+   `JsonlSessionRepo`). Concrete mapping needed:
+     - Port `session-manager.ts` (`SessionManager`: create/open/fork by session
+       id verus cwd, CURRENT_SESSION_VERSION, SessionHeader, getLatestCompactionEntry)
+     - Wire `JsonlSessionRepo` (already ported) behind it: repo `create`/`open`
+       return the v4 `Session<JsonlSessionStorage>` the harness can drive.
+     - Rewire the harness `HarnessShared<St>` + `apply_pending_write` from the v3
+       tree `Session` (append_message/append_model_change/append_thinking/
+       append_active_tools/append_compaction/append_custom*/append_label/
+       append_session_name/set_leaf_id) onto the v4 `Session` (sync, mutation-log:
+       append_message/append_model_change/append_thinking_level_change/
+       append_active_tools_change/append_compaction/append_custom_entry/
+       append_label over LaneView; set_name vs append_session_name rename;
+       set_leaf_id → v4 lane leaf model).
+     - Rebuild the coding-agent `session.rs` wiring (the Rust analog of Pi's
+       `agent-session.ts`) against v4.
+     - Rework `gen-agent-oracle` against the v4 APIs; regenerate agent fixtures.
+   This is a full wave (or more) — NOT a one-shot close, deferred to the next
+   session start.
 3. `gen-agent-oracle` rework against the v4 session APIs once the port lands.
 
 ## feat-008 waves (on the 0.84.2 baseline)
