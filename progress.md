@@ -10,13 +10,17 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 ## Current State
 
-**Last Updated:** 2026-08-19
+**Last Updated:** 2026-08-21
 **Active Feature:** feat-008 — P7: remaining ai providers + catalog generator
-(NOT STARTED). feat-007 DONE (Waves 1-7, commits b71f4f7..3540ec7).
+(NOT STARTED — prerequisite oracle upgrade 0.80.10 → 0.84.2 in progress; see
+2026-08-21 session-close entry below). feat-007 DONE (Waves 1-7, commits
+b71f4f7..3540ec7).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
 **Next feature:** feat-008 (remaining providers + catalog generator).
-**Session resume:** read feature_list.json + progress.md; next session starts
-feat-008 (see "Feat-008 starter" in the 2026-08-19 Wave-7 closeout entry).
+**Session resume:** read feature_list.json + progress.md; next session continues
+  the v4 session port (see "2026-08-21 — Session close" entry: JsonlSessionStorage
+  → JsonlSessionRepo → v4 Session/memory → v3→v4 trait swap → gen-agent-oracle
+  rework → printmode fixture regen → then the feat-008 waves).
 **Open process incidents (two, same failure mode, same project)**:
 1. Wave 5's first fork attempt committed+pushed to `origin/master` despite
    explicit "do not commit/push" instructions before failing on a
@@ -1064,3 +1068,75 @@ against the real oracle.
   clients), byte-golden each adapter, wire into models.json resolution.
   Next session: read feature_list.json feat-008 entry + docs/analysis/
   03-coding-agent.md before writing code.
+
+### 2026-08-21 — Session close (oracle upgrade + v4 session port, mid-wave)
+
+This session picked up the deferred **oracle upgrade 0.80.10 → 0.84.2** (the
+`../pi` checkout is now the locked oracle) and advanced the **v4 session-port
+prerequisite** for feat-008. The commits below are LOCAL on `master` — nothing
+pushed to `origin/master`.
+
+**Oracle upgrade — Wave B (types/pragmatics) DONE, commit `da63f5c`:**
+- `pirust-ai` → 0.84.2: `AssistantMessage` + anthropic adapter gained
+  `rawStopReason`/`endTurn` (always present) and `model: Option<String>`
+  (0.84.2 overwrites it from the wire's `message_start.message.model`, omitting
+  the key when absent). All 5 anthropic goldens byte-identical.
+- Model corpus regenerated → **1306 models** (`gen-model-corpus.mjs` now handles
+  `data/*.json` grouped `{api:{modelId:model}}` + skips `.manifest.json`).
+- `catalog.rs` → 13 anthropic models; `DEFAULT_MODEL_PER_PROVIDER` 36→40;
+  `resolve_cli_model` 0.84.2 ambiguity-error behavior; `deepMergeSettings` now
+  recursive; help template (`pi auth`, `--use-theme`, `--tui-mode`, new env vars).
+- Oracle-script fixes: `gen-cli-oracle`/`gen-anthropic-oracle` alias-added
+  `@earendil-works/pi-telemetry` (dist not built) + `getAvailableSnapshot` stub;
+  `NODE_NO_WARNINGS` for the deprecation child (Node 26 DEP0205 was leaking into
+  fixtures); deterministic `C:\oracle` chdir for session-dir capture.
+- Gate: fmt/clippy `-D warnings` + all workspace tests green except the 3
+  pre-existing env-polluted `pirust-tools find` tests (a real `C:\Users\Chakri\.git`
+  sits above temp dirs — re-verified pre-existing, not from the upgrade).
+
+**v4 session port — foundation DONE, commit `a352516` (oracle-verified):**
+- 0.84.2 replaced the **v3 tree-of-entries JSONL with a v4 mutation-log format**
+  (`harness/session/{state,jsonl/{codec,storage,repo}.ts}`). Ported:
+  - `harness/session/v4/types.rs` (full v4 data model) + `state.rs`
+    (`SessionState` seq-ordered mutation replay, lanes, open-op records, facts,
+    fork mutations) + `codec.rs` (header + mutation byte format + `V4FileSystem`
+    trait + 5 unit tests). v3 layer untouched — additive.
+  - `scripts/gen-v4-session-oracle.mjs` drives Pi's REAL `codec.ts` (source alias
+    hook) → `tests/fixtures/pi/agent/v4/codec.cases.jsonl` (25 records).
+  - `v4_codec_golden.rs`: byte-identical encode/parse vs Pi's literal bytes — key
+    order (`kind` first, then `lane` for entries), `undefined`-dropped facts
+    (cleared name/label emit NO key), and error kinds/messages all match.
+  - **The oracle caught a real bug**: serde `untagged` let `AbortRequested`
+    swallow a `tool_started` record's fields → switched `LaneRecord`/`Entry` to
+    `serde(tag="type")` and removed the now-redundant `type` field from variant
+    structs; `kind`/`lane` moved to front by rebuilding the map.
+  - `SessionErrorCode` grew v4 codes (`already_exists`, `invalid_payload`,
+    `invalid_lane`, `invalid_query`).
+
+**Last commit `66955c8` = plan.md's REMAINING updated** to record the v4 codec
+completion + the still-open list.
+
+**Where the session stopped — next session resumes here** (in priority order):
+1. Continue the v4 port: `JsonlSessionStorage` (`storage.ts`: file I/O + torn-tail
+   repair + atomic publish — the core `V4FileSystem` analogue), then
+   `JsonlSessionRepo` (`repo.ts`: create/open/list/fork, session-id validation,
+   cwd dir naming), then v4 `Session`/`memory`/`context`, then the v3→v4
+   replacement of the `SessionStorage` trait + `AgentHarness` + coding-agent
+   `session.rs`, then rework `gen-agent-oracle` against the v4 APIs, then
+   `gen-printmode-oracle` NODE_NO_WARNINGS + printmode fixture regen.
+2. Then the feat-008 waves (9 planned) on the 0.84.2 baseline.
+
+**Open process residuals (carried, none new):**
+1. 3 pirust-tools `find` tests fail on THIS machine (real `~/.git` ancestor above
+   temp dirs) — pre-existing, unrelated to this session's work; green on a clean
+   machine.
+2. `gen-tools-oracle --check` DRIFT (same root cause) — do NOT regenerate on this
+   machine.
+3. `gen-cli-oracle.mjs` crashes under Node 26 on Pi's `with { type: "json" }`
+   imports (ERR_MODULE_NOT_FOUND) — a Node-26 tooling regression, not fixture
+   drift. Fix deferred.
+
+Local-commits state: `master` is 3 commits ahead of `origin/master` (`5989c81`);
+nothing pushed. Independent git-audit reminder from prior incidents: verify
+`git log`/`git rev-parse HEAD origin/master` after any fork-using step in the
+next session.

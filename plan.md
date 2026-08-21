@@ -35,8 +35,10 @@ porting feat-008. This is a distinct prerequisite wave:
    mutation-log format. DONE so far (commit a352516): `harness/session/v4/`
    types.rs (Entry/LaneRecord/SessionMutation/records/queries) + state.rs
    (SessionState replay) + codec.rs (header/mutation byte format), oracle-
-   verified byte-identical against Pi's real codec.ts (25-record fixture,
-   `v4_codec_golden.rs`). STILL TO GO: JsonlSessionStorage (storage.ts incl.
+   verified byte-identical against Pi's real codec.ts
+   (25-record fixture, `v4_codec_golden.rs`, commit a352516). The oracle caught
+   and fixed a real serde-untagged bug (AbortRequested swallowing tool_started's
+   fields → serde(tag="type")). STILL TO GO: JsonlSessionStorage (storage.ts incl.
    torn-tail repair + atomic publish), JsonlSessionRepo (repo.ts:
    create/open/list/fork, session-id validation, dir naming), v4 `Session`/
    `memory.ts`/`context.ts`, then the v3→v4 replacement of the SessionStorage

@@ -48,6 +48,11 @@ if command -v node >/dev/null 2>&1; then
   if [ -f scripts/gen-tui-oracle.mjs ]; then
     node scripts/gen-tui-oracle.mjs --check || echo "WARN: tui fixtures differ; run node scripts/gen-tui-oracle.mjs"
   fi
+  # 0.84.2 v4 session codec fixtures (feat-008 prerequisite, oracle-upgrade):
+  # drives real Pi's jsonl/codec.ts, gated by v4_codec_golden.rs.
+  if [ -f scripts/gen-v4-session-oracle.mjs ]; then
+    node scripts/gen-v4-session-oracle.mjs --check || echo "WARN: v4 codec fixtures differ; run node scripts/gen-v4-session-oracle.mjs"
+  fi
   # events.corpus.jsonl is a frozen capture (non-deterministic ids) — not --check'd.
 fi
 # agent-core oracle fixtures (tests/fixtures/pi/agent/*: entries/header/uuid/loop/compaction)
