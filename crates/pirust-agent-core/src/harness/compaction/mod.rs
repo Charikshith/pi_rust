@@ -40,6 +40,11 @@
 // add the `fileOps` field to `CompactionPreparation` (extractFileOperations,
 // compaction.ts:35-58) and port the LLM summary pipeline (`generateSummary` /
 // `compact`) + `branch_summarization`.
+//
+// The v4-`Entry`-shaped port (0.84.2 oracle) lives in [`v4`] — the same
+// algorithms over the v4 mutation-log entry model, with `retainedTail`.
+
+pub mod v4;
 
 use crate::harness::messages::{
     create_branch_summary_message, create_compaction_summary_message, create_custom_message,

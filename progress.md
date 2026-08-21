@@ -10,17 +10,18 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 ## Current State
 
-**Last Updated:** 2026-08-21
+**Last Updated:** 2026-08-22
 **Active Feature:** feat-008 — P7: remaining ai providers + catalog generator
-(NOT STARTED — prerequisite oracle upgrade 0.80.10 → 0.84.2 in progress; see
-2026-08-21 session-close entry below). feat-007 DONE (Waves 1-7, commits
-b71f4f7..3540ec7).
+(NOT STARTED — prerequisite oracle upgrade 0.80.10 → 0.84.2 in progress; the
+v4 harness-swap prerequisite wave is DONE — see 2026-08-22 entry below).
+feat-007 DONE (Waves 1-7, commits b71f4f7..3540ec7).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
 **Next feature:** feat-008 (remaining providers + catalog generator).
-**Session resume:** read feature_list.json + progress.md; next session continues
-  the v4 session port (see "2026-08-21 — Session close" entry: JsonlSessionStorage
-  → JsonlSessionRepo → v4 Session/memory → v3→v4 trait swap → gen-agent-oracle
-  rework → printmode fixture regen → then the feat-008 waves).
+**Session resume:** read feature_list.json + progress.md; next session starts
+  the feat-008 provider waves (remaining adapters + catalog generator). The v4
+  harness-swap prerequisite is DONE (2026-08-22 entry): harness drives the v4
+  `Session`; `session-manager.ts` port dropped (harness never used it);
+  `gen-agent-oracle` rework deferred (0.84.2 harness is a stub — no tape).
 **Open process incidents (two, same failure mode, same project)**:
 1. Wave 5's first fork attempt committed+pushed to `origin/master` despite
    explicit "do not commit/push" instructions before failing on a
@@ -1322,3 +1323,49 @@ This is a full multi-step wave, deferred to next session start.
 green except the same 3 pre-existing env-polluted pirust-tools find tests; all
 4 v4 oracle `--check`s green (codec 25 / storage 8 / repo 10 / memory 5).
 Tree clean at `ca340bf`; nothing pushed.
+
+## 2026-08-22 — v4 HARNESS SWAP DONE (oracle-mapped against 0.84.2)
+
+**What changed vs the prior scope note:** the plan's step 1 (port
+`session-manager.ts` — the v3-tree coding-agent session layer) was REMOVED after
+auditing real 0.84.2 source: `AgentHarness` never used `SessionManager`; the
+harness's contract is the v4 `Session` directly. Step 5 (`gen-agent-oracle`
+rework) is deferred — the 0.84.2 harness is a stub, so there is no harness tape
+to capture; the existing `loop-echo.json` fixture (pre-stub era) + the v4
+session fixtures are the oracle.
+
+**Landed:**
+1. `harness/compaction/v4.rs` (new) — v4-`Entry`-shaped `prepare_compaction`
+   (with `virtualRetainedEntries` + `retainedTail`), `find_cut_point`,
+   `find_turn_start_index`, `get_message_from_entry(_for_compaction)`. Reuses v3
+   token estimators. LLM summary + `fileOps` deferred (unchanged).
+2. `harness/mod.rs` — `AgentHarness`/`HarnessShared`/`AgentHarnessOptions`
+   re-bound to the v4 `V4SessionStorage` + `V4Session`:
+   - `apply_pending_write` → v4 ops (`append_message`/`append_entry(Provisioned*)`/
+     `append_custom_entry`/`set_label`/`set_name`/`move_lane("main", …)`;
+     `CustomMessage`/`BranchSummary` no-op — no such v4 entries).
+   - context via `build_v4_context` (`build_session_context` over
+     `find_entries_on_branch`, leaf→root reversed).
+   - `compact_inner` → v4 `prepare_compaction` + `ProvisionedCompactionEntry`
+     with `retained_tail`; `CompactionOutcome` carries `retained_tail` (no
+     `firstKeptEntryId` — v4 `CompactResult` shape).
+   - `navigate_tree_inner` → `move_lane("main", target)`.
+3. `harness/session/v4/session.rs` — added `new_id()` (expose id generator for
+   harness-built `ProvisionedEntry`s).
+4. `tests/harness_golden.rs` — harness built on v4 `InMemorySessionStorage` +
+   `V4Session`; new `harness_writes_v4_entry_shapes` (4 message entries,
+   `type`/`id`/`parentId` chain/`seq` monotonic, main-lane leaf = last entry;
+   oracle-modeled on `memory.cases.jsonl`).
+
+**Gate:** `cargo test -p pirust-agent-core` all green (harness_golden 2/2
+incl. the loop-echo tape); fmt + clippy `-D warnings` clean; 4 v4 oracle
+`--check`s green (25/8/10/5). `./init.sh` halted only by the 3 pre-existing
+`pirust-tools` find tests — re-verified failing on a clean stash (env `.git`
+above temp, not this diff). `CompactionOutcome` no longer has
+`first_kept_entry_id` (v4 `CompactResult` has `retainedTail`); no other crate
+consumed it (AgentHarness had no consumers besides harness_golden.rs).
+
+**Residuals (named):** SessionManager (v3-tree coding-agent layer) still NOT
+ported — out of scope; LLM summary placeholder unchanged; `fileOps`
+(`compaction/utils.ts`) deferred; v1→v3 migration deferred.
+

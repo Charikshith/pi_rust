@@ -157,6 +157,12 @@ impl<S: SessionStorage> Session<S> {
         &self.storage
     }
 
+    /// Generate a fresh entry id from the injected id generator (the harness
+    /// fabricates ids for `ProvisionedEntry`s it builds directly).
+    pub fn new_id(&self) -> String {
+        self.id_generator.next()
+    }
+
     /// `getMetadata` (session.ts:159-161).
     pub fn get_metadata(&self) -> Result<S::Metadata, SessionError> {
         self.storage.get_metadata()

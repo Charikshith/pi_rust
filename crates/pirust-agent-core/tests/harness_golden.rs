@@ -25,9 +25,11 @@ use tokio_util::sync::CancellationToken;
 
 use pirust_agent_core::agent_loop::StreamFn;
 use pirust_agent_core::harness::messages::AgentMessage;
-use pirust_agent_core::harness::session::memory_storage::InMemorySessionStorage;
-use pirust_agent_core::harness::session::Session;
-use pirust_agent_core::harness::types::SessionTreeEntry;
+use pirust_agent_core::harness::session::v4::memory::InMemorySessionStorage as V4MemoryStorage;
+use pirust_agent_core::harness::session::v4::session::Session as V4Session;
+use pirust_agent_core::harness::session::v4::types::{
+    Entry, EntryOrder, EntryQuery, SessionMetadata,
+};
 use pirust_agent_core::harness::{
     AgentHarness, AgentHarnessOptions, HarnessEvent, HarnessListener,
 };
@@ -124,11 +126,11 @@ fn collapse_updates(types: &[String]) -> Vec<String> {
     out
 }
 
-/// Map a session entry to the fixture's `entryTypes` form (message entries only).
-fn entry_type(entry: &SessionTreeEntry) -> Option<String> {
+/// Map a v4 session entry to the fixture's `entryTypes` form (message entries only).
+fn entry_type(entry: &Entry) -> Option<String> {
     match entry {
-        SessionTreeEntry::Message { message, .. } => {
-            let role = match message {
+        Entry::Message(e) => {
+            let role = match &e.message {
                 AgentMessage::Llm(Message::User(_)) => "user",
                 AgentMessage::Llm(Message::Assistant(_)) => "assistant",
                 AgentMessage::Llm(Message::ToolResult(_)) => "toolResult",
@@ -146,7 +148,12 @@ fn entry_type(entry: &SessionTreeEntry) -> Option<String> {
 #[tokio::test]
 async fn harness_tape_and_session_match_pi_fixture() {
     let model = Faux::new().get_model().clone();
-    let session = Session::new(InMemorySessionStorage::new());
+    let storage = Arc::new(V4MemoryStorage::new(SessionMetadata {
+        id: "sess-1".to_string(),
+        created_at: 1000,
+        parent_session_id: None,
+    }));
+    let session = V4Session::new(storage);
 
     let mut options = AgentHarnessOptions::new(scripted_stream_fn(), model, session);
     options.tools = vec![Arc::new(EchoTool) as Arc<dyn AgentTool>];
@@ -205,7 +212,13 @@ async fn harness_tape_and_session_match_pi_fixture() {
     );
 
     // 2. Resulting session entryTypes.
-    let entries = harness.session().get_entries().await.expect("entries");
+    let entries = harness
+        .session()
+        .find_entries(&EntryQuery {
+            order: Some(EntryOrder::OldestFirst),
+            ..Default::default()
+        })
+        .expect("entries");
     let entry_types: Vec<String> = entries.iter().filter_map(entry_type).collect();
     assert_eq!(
         entry_types,
@@ -223,10 +236,10 @@ async fn harness_tape_and_session_match_pi_fixture() {
     let tool_result = entries
         .iter()
         .find_map(|e| match e {
-            SessionTreeEntry::Message {
-                message: AgentMessage::Llm(Message::ToolResult(tr)),
-                ..
-            } => Some(tr),
+            Entry::Message(m) => match &m.message {
+                AgentMessage::Llm(Message::ToolResult(tr)) => Some(tr),
+                _ => None,
+            },
             _ => None,
         })
         .expect("toolResult entry");
@@ -247,10 +260,10 @@ async fn harness_tape_and_session_match_pi_fixture() {
     let stop_reasons: Vec<StopReason> = entries
         .iter()
         .filter_map(|e| match e {
-            SessionTreeEntry::Message {
-                message: AgentMessage::Llm(Message::Assistant(a)),
-                ..
-            } => Some(a.stop_reason),
+            Entry::Message(m) => match &m.message {
+                AgentMessage::Llm(Message::Assistant(a)) => Some(a.stop_reason),
+                _ => None,
+            },
             _ => None,
         })
         .collect();
@@ -267,4 +280,63 @@ async fn harness_tape_and_session_match_pi_fixture() {
         .collect();
     assert_eq!(final_text, "done");
     assert_eq!(final_message.stop_reason, StopReason::Stop);
+}
+
+/// v4 entry-shape golden (0.84.2 oracle): the harness's session writes land as
+/// v4 mutation-log `Entry`s with the exact field shape the oracle's
+/// `memory.cases.jsonl` `memory-storage` scenario records — `type` discriminant,
+/// `id`, `parentId` (null on the first entry), `seq` (storage-assigned,
+/// monotonically increasing), `timestamp`. No v3 label/session_info/leaf entries.
+#[tokio::test]
+async fn harness_writes_v4_entry_shapes() {
+    let model = Faux::new().get_model().clone();
+    let storage = Arc::new(V4MemoryStorage::new(SessionMetadata {
+        id: "sess-shape".to_string(),
+        created_at: 1000,
+        parent_session_id: None,
+    }));
+    let session = V4Session::new(storage);
+
+    let mut options = AgentHarnessOptions::new(scripted_stream_fn(), model, session);
+    options.tools = vec![Arc::new(EchoTool) as Arc<dyn AgentTool>];
+    options.system_prompt = "You are a test agent.".to_string();
+
+    let harness = AgentHarness::new(options);
+    harness.prompt("please echo hi").await.expect("prompt ok");
+
+    let entries = harness
+        .session()
+        .find_entries(&EntryQuery {
+            order: Some(EntryOrder::OldestFirst),
+            ..Default::default()
+        })
+        .expect("entries");
+    assert_eq!(entries.len(), 4, "four message entries on the main lane");
+
+    // Every entry is a message with the v4 shape: type discriminant + id +
+    // parentId (chain) + seq (strictly increasing) + timestamp.
+    let mut prev_seq = 0i64;
+    let mut prev_id: Option<&str> = None;
+    for entry in &entries {
+        assert_eq!(entry.entry_type(), "message");
+        assert!(!entry.id().is_empty());
+        assert!(entry.seq() > prev_seq, "seq strictly increases");
+        prev_seq = entry.seq();
+        match entry.parent_id() {
+            None => assert!(prev_id.is_none(), "only the first entry has null parentId"),
+            Some(p) => assert_eq!(Some(p.as_str()), prev_id, "parentId chains to prior entry"),
+        }
+        prev_id = Some(entry.id());
+    }
+
+    // Only message entries exist — no v3 label/session_info/leaf entries leaked
+    // into the v4 session (0.84.2 contract: those are lane facts, not entries).
+    let lanes = harness.session().get_lanes().expect("lanes");
+    assert_eq!(lanes.len(), 1, "main lane only");
+    assert_eq!(lanes[0].lane, "main");
+    assert_eq!(
+        lanes[0].leaf_id.as_deref(),
+        Some(entries.last().unwrap().id()),
+        "main lane leaf is the last entry"
+    );
 }

@@ -54,12 +54,16 @@ use pirust_ai::types::{AssistantMessage, Message, Model};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_loop::{run_agent_loop, AgentEventSink, StreamFn};
-use crate::harness::compaction::{prepare_compaction, DEFAULT_COMPACTION_SETTINGS};
+use crate::harness::compaction::{v4 as compaction_v4, DEFAULT_COMPACTION_SETTINGS};
 use crate::harness::messages::{convert_to_llm, AgentMessage};
-use crate::harness::session::Session;
-use crate::harness::types::{
-    AgentHarnessError, AgentHarnessErrorCode, PendingSessionWrite, SessionStorage,
+use crate::harness::session::v4::session::Session as V4Session;
+use crate::harness::session::v4::types::{
+    Entry, EntryOrder, EntryQuery, ProvisionedActiveToolsEntry, ProvisionedCompactionEntry,
+    ProvisionedEntry, ProvisionedModelChangeEntry, ProvisionedThinkingLevelEntry,
+    SessionStorage as V4SessionStorage,
 };
+use crate::harness::types::SessionError;
+use crate::harness::types::{AgentHarnessError, AgentHarnessErrorCode, PendingSessionWrite};
 use crate::types::{
     AgentContext, AgentEvent, AgentLoopConfig, AgentLoopTurnUpdate, AgentTool, ThinkingLevel,
     ToolExecutionMode,
@@ -177,8 +181,8 @@ pub enum AgentHarnessPhase {
 
 /// Shared, interior-mutable core of an [`AgentHarness`]. Held behind an [`Arc`] so
 /// the loop's `'static` event sink and the wrapped stream function can capture it.
-struct HarnessShared<St: SessionStorage + Send + Sync + 'static> {
-    session: Session<St>,
+struct HarnessShared<St: V4SessionStorage + Send + Sync + 'static> {
+    session: V4Session<St>,
     /// Writes queued while a run is active; flushed at turn boundaries (§4.2).
     pending_writes: Mutex<Vec<PendingSessionWrite>>,
     /// Wildcard subscribers (agent-harness.ts subscribe / `emitAny`+`emitOwn`).
@@ -196,7 +200,7 @@ struct HarnessShared<St: SessionStorage + Send + Sync + 'static> {
     next_turn_count: Mutex<usize>,
 }
 
-impl<St: SessionStorage + Send + Sync + 'static> HarnessShared<St> {
+impl<St: V4SessionStorage + Send + Sync + 'static> HarnessShared<St> {
     /// Emit an event to every subscriber, in subscription order (agent-harness.ts
     /// `emitAny`/`emitOwn`, 212-230).
     async fn emit(&self, event: HarnessEvent) {
@@ -229,74 +233,65 @@ impl<St: SessionStorage + Send + Sync + 'static> HarnessShared<St> {
         }
     }
 
-    async fn apply_pending_write(
-        &self,
-        write: PendingSessionWrite,
-    ) -> Result<(), types::SessionError> {
+    async fn apply_pending_write(&self, write: PendingSessionWrite) -> Result<(), SessionError> {
         match write {
             PendingSessionWrite::Message { message } => {
-                self.session.append_message(message).await.map(|_| ())
+                self.session.append_message(message).map(|_| ())
             }
-            PendingSessionWrite::ModelChange { provider, model_id } => self
-                .session
-                .append_model_change(provider, model_id)
-                .await
-                .map(|_| ()),
-            PendingSessionWrite::ThinkingLevelChange { thinking_level } => self
-                .session
-                .append_thinking_level_change(thinking_level)
-                .await
-                .map(|_| ()),
-            PendingSessionWrite::ActiveToolsChange { active_tool_names } => self
-                .session
-                .append_active_tools_change(active_tool_names)
-                .await
-                .map(|_| ()),
+            PendingSessionWrite::ModelChange { provider, model_id } => {
+                let entry = ProvisionedEntry::ModelChange(ProvisionedModelChangeEntry {
+                    id: self.session.new_id(),
+                    provider,
+                    model_id,
+                });
+                self.session.append_entry(&entry, "main").map(|_| ())
+            }
+            PendingSessionWrite::ThinkingLevelChange { thinking_level } => {
+                let entry = ProvisionedEntry::ThinkingLevel(ProvisionedThinkingLevelEntry {
+                    id: self.session.new_id(),
+                    thinking_level,
+                });
+                self.session.append_entry(&entry, "main").map(|_| ())
+            }
+            PendingSessionWrite::ActiveToolsChange { active_tool_names } => {
+                let entry = ProvisionedEntry::ActiveTools(ProvisionedActiveToolsEntry {
+                    id: self.session.new_id(),
+                    active_tool_names,
+                });
+                self.session.append_entry(&entry, "main").map(|_| ())
+            }
             PendingSessionWrite::Compaction {
                 summary,
-                first_kept_entry_id,
+                first_kept_entry_id: _,
                 tokens_before,
                 details,
-                from_hook,
-            } => self
-                .session
-                .append_compaction(
+                from_hook: _,
+            } => {
+                let entry = ProvisionedEntry::Compaction(ProvisionedCompactionEntry {
+                    id: self.session.new_id(),
                     summary,
-                    first_kept_entry_id,
+                    retained_tail: Vec::new(),
                     tokens_before,
                     details,
-                    from_hook,
-                )
-                .await
-                .map(|_| ()),
+                    usage: None,
+                });
+                self.session.append_entry(&entry, "main").map(|_| ())
+            }
             PendingSessionWrite::BranchSummary { .. } => Ok(()),
             PendingSessionWrite::Custom { custom_type, data } => self
                 .session
-                .append_custom_entry(custom_type, data)
-                .await
+                .append_custom_entry(&custom_type, data)
                 .map(|_| ()),
-            PendingSessionWrite::CustomMessage {
-                custom_type,
-                content,
-                display,
-                details,
-            } => self
-                .session
-                .append_custom_message_entry(custom_type, content, display, details)
-                .await
-                .map(|_| ()),
-            PendingSessionWrite::Label { target_id, label } => self
-                .session
-                .append_label(target_id, label)
-                .await
-                .map(|_| ()),
-            PendingSessionWrite::SessionInfo { name } => self
-                .session
-                .append_session_name(name.as_deref().unwrap_or(""))
-                .await
-                .map(|_| ()),
+            // v4 has no custom_message / label / session_info tree entries —
+            // custom entries cover application data; labels and the session name
+            // are lane-level mutation-log facts (0.84.2 contract).
+            PendingSessionWrite::CustomMessage { .. } => Ok(()),
+            PendingSessionWrite::Label { target_id, label } => {
+                self.session.set_label(&target_id, label.as_deref())
+            }
+            PendingSessionWrite::SessionInfo { name } => self.session.set_name(name.as_deref()),
             PendingSessionWrite::Leaf { target_id } => {
-                self.session.storage().set_leaf_id(target_id).await
+                self.session.move_lane("main", target_id.as_deref())
             }
         }
     }
@@ -310,7 +305,7 @@ impl<St: SessionStorage + Send + Sync + 'static> HarnessShared<St> {
 
         match &event {
             AgentEvent::MessageEnd { message } => {
-                let _ = self.session.append_message(message.clone()).await;
+                let _ = self.session.append_message(message.clone());
                 self.emit(HarnessEvent::Loop(event.clone())).await;
             }
             AgentEvent::TurnEnd { .. } => {
@@ -341,14 +336,14 @@ impl<St: SessionStorage + Send + Sync + 'static> HarnessShared<St> {
 // ===========================================================================
 
 /// Construction options for an [`AgentHarness`] (agent-harness.ts:183-206).
-pub struct AgentHarnessOptions<St: SessionStorage + Send + Sync + 'static> {
+pub struct AgentHarnessOptions<St: V4SessionStorage + Send + Sync + 'static> {
     /// The provider stream function (faux for tests). Wrapped internally to emit
     /// `after_provider_response`.
     pub provider: StreamFn,
     /// The active model.
     pub model: Model,
-    /// The session tree.
-    pub session: Session<St>,
+    /// The v4 mutation-log session.
+    pub session: V4Session<St>,
     /// Available tools.
     pub tools: Vec<Arc<dyn AgentTool>>,
     /// Active tool names (defaults to every tool's name).
@@ -359,9 +354,9 @@ pub struct AgentHarnessOptions<St: SessionStorage + Send + Sync + 'static> {
     pub thinking_level: ThinkingLevel,
 }
 
-impl<St: SessionStorage + Send + Sync + 'static> AgentHarnessOptions<St> {
+impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarnessOptions<St> {
     /// Minimal options with sensible defaults.
-    pub fn new(provider: StreamFn, model: Model, session: Session<St>) -> Self {
+    pub fn new(provider: StreamFn, model: Model, session: V4Session<St>) -> Self {
         Self {
             provider,
             model,
@@ -377,7 +372,7 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarnessOptions<St> {
 /// Batteries-included agent orchestrator (agent-harness.ts:157). Drives the loop
 /// directly, writes the session tree append-only, and emits the harness-own
 /// events on top of the loop tape.
-pub struct AgentHarness<St: SessionStorage + Send + Sync + 'static> {
+pub struct AgentHarness<St: V4SessionStorage + Send + Sync + 'static> {
     shared: Arc<HarnessShared<St>>,
     provider: StreamFn,
     model: Model,
@@ -387,7 +382,7 @@ pub struct AgentHarness<St: SessionStorage + Send + Sync + 'static> {
     active_tool_names: Vec<String>,
 }
 
-impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
+impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     /// Construct a harness (agent-harness.ts:183-206).
     pub fn new(options: AgentHarnessOptions<St>) -> Self {
         let active_tool_names = options
@@ -420,7 +415,7 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     }
 
     /// Borrow the session (read-only), e.g. to inspect entries in tests.
-    pub fn session(&self) -> &Session<St> {
+    pub fn session(&self) -> &V4Session<St> {
         &self.shared.session
     }
 
@@ -487,12 +482,7 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
                 let active_tools = active_tools.clone();
                 Box::pin(async move {
                     shared.flush_pending_session_writes().await;
-                    let messages = shared
-                        .session
-                        .build_context()
-                        .await
-                        .map(|c| c.messages)
-                        .unwrap_or_default();
+                    let messages = build_v4_context_messages(&shared.session).unwrap_or_default();
                     Some(AgentLoopTurnUpdate {
                         context: Some(AgentContext {
                             system_prompt,
@@ -564,7 +554,7 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     /// Build the turn state, seed the user prompt, drive the loop, and pluck the
     /// last assistant message (agent-harness.ts:531-606).
     async fn execute_turn(&self, text: &str) -> Result<AssistantMessage, AgentHarnessError> {
-        let context = self.shared.session.build_context().await.map_err(|e| {
+        let context = build_v4_context(&self.shared.session).map_err(|e| {
             AgentHarnessError::new(AgentHarnessErrorCode::Session, e.message.clone())
         })?;
         let ctx = AgentContext {
@@ -631,10 +621,10 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     }
 
     async fn compact_inner(&self) -> Result<CompactionOutcome, AgentHarnessError> {
-        let branch = self.shared.session.get_branch(None).await.map_err(|e| {
+        let branch = v4_branch_entries(&self.shared.session).map_err(|e| {
             AgentHarnessError::new(AgentHarnessErrorCode::Session, e.message.clone())
         })?;
-        let preparation = prepare_compaction(&branch, &DEFAULT_COMPACTION_SETTINGS)
+        let preparation = compaction_v4::prepare_compaction(&branch, &DEFAULT_COMPACTION_SETTINGS)
             .map_err(|e| AgentHarnessError::new(AgentHarnessErrorCode::Compaction, e.message))?;
         let Some(preparation) = preparation else {
             return Err(AgentHarnessError::new(
@@ -645,17 +635,19 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
         // LLM summary generation deferred (stub): use a placeholder. Pi calls
         // `compact(...)` here to produce the summary text via `models.completeSimple`.
         let summary = "[summary generation deferred]".to_string();
+        let entry = ProvisionedEntry::Compaction(ProvisionedCompactionEntry {
+            id: self.shared.session.new_id(),
+            summary: summary.clone(),
+            retained_tail: preparation.retained_tail.clone(),
+            tokens_before: preparation.tokens_before,
+            details: None,
+            usage: None,
+        });
         let entry_id = self
             .shared
             .session
-            .append_compaction(
-                summary.clone(),
-                preparation.first_kept_entry_id.clone(),
-                preparation.tokens_before,
-                None,
-                None,
-            )
-            .await
+            .append_entry(&entry, "main")
+            .map(|e| e.id().to_string())
             .map_err(|e| {
                 AgentHarnessError::new(AgentHarnessErrorCode::Session, e.message.clone())
             })?;
@@ -667,8 +659,8 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
             .await;
         Ok(CompactionOutcome {
             summary,
-            first_kept_entry_id: preparation.first_kept_entry_id,
             tokens_before: preparation.tokens_before,
+            retained_tail: preparation.retained_tail.clone(),
         })
     }
 
@@ -693,7 +685,7 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     }
 
     async fn navigate_tree_inner(&self, target_id: &str) -> Result<(), AgentHarnessError> {
-        let old_leaf_id = self.shared.session.get_leaf_id().await.map_err(|e| {
+        let old_leaf_id = self.shared.session.get_leaf_id().map_err(|e| {
             AgentHarnessError::new(AgentHarnessErrorCode::Session, e.message.clone())
         })?;
         if old_leaf_id.as_deref() == Some(target_id) {
@@ -701,12 +693,11 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
         }
         self.shared
             .session
-            .move_to(Some(target_id.to_string()), None)
-            .await
+            .move_lane("main", Some(target_id))
             .map_err(|e| {
                 AgentHarnessError::new(AgentHarnessErrorCode::BranchSummary, e.message.clone())
             })?;
-        let new_leaf_id = self.shared.session.get_leaf_id().await.map_err(|e| {
+        let new_leaf_id = self.shared.session.get_leaf_id().map_err(|e| {
             AgentHarnessError::new(AgentHarnessErrorCode::Session, e.message.clone())
         })?;
         self.shared
@@ -719,15 +710,17 @@ impl<St: SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     }
 }
 
-/// The result of a [`AgentHarness::compact`] run (agent-harness.ts:688 return).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The result of a [`AgentHarness::compact`] run — mirrors the v4 oracle's
+/// `CompactResult` (compaction.ts:99-109) minus the deferred `usage`/`details`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactionOutcome {
     /// The summary text (a deferred placeholder in this port).
     pub summary: String,
-    /// The entry id where retained history starts.
-    pub first_kept_entry_id: String,
     /// The estimated context tokens before compaction.
     pub tokens_before: i64,
+    /// Recent messages retained after compaction, stored on the compaction entry
+    /// (`retainedTail`).
+    pub retained_tail: Vec<AgentMessage>,
 }
 
 /// Build a `user` prompt message (agent-harness.ts:37-41).
@@ -745,4 +738,38 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Fetch the v4 main-lane branch entries, leaf-first (the mutation-log tree
+/// walks leaf → root). `buildSessionContext` needs root-first, so reverse.
+fn v4_branch_entries<St: V4SessionStorage + Send + Sync + 'static>(
+    session: &V4Session<St>,
+) -> Result<Vec<Entry>, SessionError> {
+    let mut entries = session.find_entries_on_branch(
+        &EntryQuery {
+            order: Some(EntryOrder::NewestFirst),
+            ..EntryQuery::default()
+        },
+        &Default::default(),
+    )?;
+    entries.reverse();
+    Ok(entries)
+}
+
+/// `buildSessionContext` over the v4 main-lane branch (0.84.2 oracle).
+fn build_v4_context<St: V4SessionStorage + Send + Sync + 'static>(
+    session: &V4Session<St>,
+) -> Result<crate::harness::session::v4::context::SessionContext, SessionError> {
+    let entries = v4_branch_entries(session)?;
+    Ok(crate::harness::session::v4::context::build_session_context(
+        &entries,
+        &Default::default(),
+    ))
+}
+
+/// The context messages for the harness's current branch (0.84.2 oracle).
+fn build_v4_context_messages<St: V4SessionStorage + Send + Sync + 'static>(
+    session: &V4Session<St>,
+) -> Result<Vec<AgentMessage>, SessionError> {
+    Ok(build_v4_context(session)?.messages)
 }
