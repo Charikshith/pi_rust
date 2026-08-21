@@ -183,7 +183,7 @@ fn init_output(model: &Model) -> AssistantMessage {
         content: Vec::new(),
         api: model.api.clone(),
         provider: model.provider.clone(),
-        model: model.id.clone(),
+        model: Some(model.id.clone()),
         response_model: None,
         diagnostics: None,
         usage: Usage {
@@ -205,7 +205,9 @@ fn init_output(model: &Model) -> AssistantMessage {
         stop_reason: StopReason::Stop,
         timestamp: now_millis(),
         response_id: None,
+        raw_stop_reason: None,
         error_message: None,
+        end_turn: None,
     }
 }
 
@@ -370,6 +372,15 @@ fn handle_message_start(model: &Model, output: &mut AssistantMessage, event: &Va
     let message = event.get("message");
     output.response_id = message
         .and_then(|m| m.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // 0.84.2 (`output.model = event.message.model`, anthropic-messages.ts:604): the
+    // wire's `message_start.message.model` now OVERWRITES the requested model id. When
+    // absent (fixture SSE has no `message.model`), the JS value becomes `undefined` and
+    // `JSON.stringify` drops the key — so here it maps to `None` and is omitted.
+    output.model = message
+        .and_then(|m| m.get("model"))
         .and_then(Value::as_str)
         .map(str::to_string);
 
@@ -652,6 +663,10 @@ fn handle_message_delta(
         .and_then(|d| d.get("stop_reason"))
         .and_then(Value::as_str)
     {
+        // 0.84.2 (`output.rawStopReason = event.delta.stop_reason`, :738): set BEFORE
+        // the mapped stopReason, so it lands between responseId and errorMessage in the
+        // runtime key order.
+        output.raw_stop_reason = Some(stop_reason.to_string());
         let stop_details = delta.and_then(|d| d.get("stop_details"));
         let mapped = map_stop_reason(stop_reason, stop_details)?;
         output.stop_reason = mapped.stop_reason;

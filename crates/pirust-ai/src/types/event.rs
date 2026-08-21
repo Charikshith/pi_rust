@@ -91,7 +91,7 @@ mod tests {
             content: vec![AssistantContent::Text(TextContent::new(""))],
             api: Api::from("anthropic-messages"),
             provider: ProviderId::from("anthropic"),
-            model: "claude".into(),
+            model: Some("claude".into()),
             response_model: None,
             response_id: None,
             diagnostics: None,
@@ -113,6 +113,8 @@ mod tests {
             },
             stop_reason: StopReason::Stop,
             error_message: None,
+            raw_stop_reason: None,
+            end_turn: None,
             timestamp: 0,
         }
     }

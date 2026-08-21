@@ -773,7 +773,8 @@ pub fn render_help(
   {app} update [source|self|pi]   Update pi, extensions, or model catalogs
   {app} list                      List installed extensions from settings
   {app} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
-  {app} <command> --help          Show help for install/remove/uninstall/update/list/config
+  {app} auth <command>            Print credentials or check provider readiness
+  {app} <command> --help          Show help for install/remove/uninstall/update/list/config/auth
 
 {h_options}
   --provider <name>              Provider name (default: google)
@@ -807,11 +808,13 @@ pub fn render_help(
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
   --no-prompt-templates, -np     Disable prompt template discovery and loading
   --theme <path>                 Load a theme file or directory (can be used multiple times)
+  --use-theme <name[/name]>      Set the initial interactive theme for this run
   --no-themes                    Disable theme discovery and loading
   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
+  --tui-mode <mode>              TUI mode: regular (default) or fullscreen
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
@@ -821,6 +824,12 @@ pub fn render_help(
 Extensions can register additional flags (e.g., --plan from plan-mode extension).{ext}
 
 {h_examples}
+  # Print a provider API key for an external client
+  {app} auth print-api-key --provider openai
+
+  # Print an OAuth bearer token for an external client (refreshes if expired)
+  {app} auth print-bearer-token --provider openai-codex
+
   # Interactive mode
   {app}
 
@@ -874,6 +883,7 @@ Extensions can register additional flags (e.g., --plan from plan-mode extension)
   {app} --export session.jsonl output.html
 
 {h_env}
+  ANTHROPIC_AUTH_TOKEN             - Anthropic bearer auth token
   ANTHROPIC_API_KEY                - Anthropic Claude API key
   ANTHROPIC_OAUTH_TOKEN            - Anthropic OAuth token (alternative to API key)
   ANT_LING_API_KEY                 - Ant Ling API key
@@ -891,6 +901,7 @@ Extensions can register additional flags (e.g., --plan from plan-mode extension)
   XAI_API_KEY                      - xAI Grok API key
   FIREWORKS_API_KEY                - Fireworks API key
   TOGETHER_API_KEY                 - Together AI API key
+  BASETEN_API_KEY                  - Baseten API key
   OPENROUTER_API_KEY               - OpenRouter API key
   AI_GATEWAY_API_KEY               - Vercel AI Gateway API key
   ZAI_API_KEY                      - ZAI Coding Plan API key (Global)
@@ -903,6 +914,8 @@ Extensions can register additional flags (e.g., --plan from plan-mode extension)
   CLOUDFLARE_API_KEY               - Cloudflare API token (Workers AI and AI Gateway)
   CLOUDFLARE_ACCOUNT_ID            - Cloudflare account id (required for both)
   CLOUDFLARE_GATEWAY_ID            - Cloudflare AI Gateway slug (required for AI Gateway)
+  QWEN_TOKEN_PLAN_API_KEY          - Qwen Token Plan API key (international region)
+  QWEN_TOKEN_PLAN_CN_API_KEY       - Qwen Token Plan API key (China region)
   XIAOMI_API_KEY                   - Xiaomi MiMo API key (api.xiaomimimo.com billing)
   XIAOMI_TOKEN_PLAN_CN_API_KEY     - Xiaomi MiMo Token Plan API key (China region)
   XIAOMI_TOKEN_PLAN_AMS_API_KEY    - Xiaomi MiMo Token Plan API key (Amsterdam region)

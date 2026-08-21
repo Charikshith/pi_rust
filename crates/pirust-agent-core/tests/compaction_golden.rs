@@ -64,14 +64,16 @@ fn assistant_raw(
         content,
         api: Api::from("anthropic-messages"),
         provider: ProviderId::from("anthropic"),
-        model: "claude-sonnet-4-5".into(),
+        model: Some("claude-sonnet-4-5".into()),
         response_model: None,
         diagnostics: None,
         usage,
         stop_reason: stop,
         timestamp: 0,
         response_id: None,
+        raw_stop_reason: None,
         error_message: None,
+        end_turn: None,
     }
 }
 

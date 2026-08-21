@@ -190,7 +190,7 @@ fn dropped_error() -> AssistantMessage {
         content: Vec::new(),
         api: Api::from(""),
         provider: ProviderId::from(""),
-        model: String::new(),
+        model: None,
         response_model: None,
         diagnostics: None,
         usage: Usage {
@@ -212,7 +212,9 @@ fn dropped_error() -> AssistantMessage {
         stop_reason: StopReason::Error,
         timestamp: 0,
         response_id: None,
+        raw_stop_reason: None,
         error_message: Some("stream producer dropped without completing".to_string()),
+        end_turn: None,
     }
 }
 
@@ -228,7 +230,7 @@ mod tests {
             content: vec![AssistantContent::Text(TextContent::new(text))],
             api: Api::from("anthropic-messages"),
             provider: ProviderId::from("anthropic"),
-            model: "claude".into(),
+            model: Some("claude".into()),
             response_model: None,
             diagnostics: None,
             usage: Usage {
@@ -250,7 +252,9 @@ mod tests {
             stop_reason: StopReason::Stop,
             timestamp: 0,
             response_id: None,
+            raw_stop_reason: None,
             error_message: None,
+            end_turn: None,
         }
     }
 

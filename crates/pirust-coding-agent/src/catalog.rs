@@ -2,12 +2,12 @@
 //!
 //! Run `cargo xtask gen-catalog` to regenerate. Every literal below comes from the
 //! `builtinCatalogFingerprint` record of
-//! `tests/fixtures/pi/cli/models.cases.jsonl`, captured from real Pi 0.80.10.
+//! `tests/fixtures/pi/cli/models.cases.jsonl`, captured from real Pi 0.84.2.
 //!
 //! Pi imports a generated 36-provider / 1062-model table from
 //! `@earendil-works/pi-ai/providers/all`. feat-008 owns the equivalent generator; until it
 //! lands, this file carries the **anthropic-only slice** — `anthropic-messages` is the only ported
-//! api adapter, so `anthropic` is the only provider whose 14 models can actually
+//! api adapter, so `anthropic` is the only provider whose 13 models can actually
 //! stream, and spec §9.5's "override the builtin `baseUrl`" shape keeps working.
 //!
 //! # Why one [`ProviderDescriptor`] and not 36
@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 
 use crate::models::{ModelCatalog, ProviderDescriptor};
 
-/// The builtin catalog `ModelRuntime::create` is handed — one provider, 14 models.
+/// The builtin catalog `ModelRuntime::create` is handed — one provider, 13 models.
 ///
 /// A plain constructor rather than a `static`: [`Model`] and [`ProviderDescriptor`] are
 /// `String`/`Vec`/`Value`-shaped, so no `const` form exists, and `ModelRuntime::create`
@@ -64,7 +64,7 @@ fn anthropic_provider() -> ProviderDescriptor {
     }
 }
 
-/// The 14 builtin `anthropic` models, in catalog order — which is load-bearing: it seeds
+/// The 13 builtin `anthropic` models, in catalog order — which is load-bearing: it seeds
 /// `getModels()`' order and therefore `availableModels[0]` in step 4 of
 /// `find_initial_model`.
 fn anthropic_models() -> Vec<Model> {
@@ -98,7 +98,17 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 1_000_000,
             max_tokens: 128_000,
             headers: None,
-            compat: compat_object([("forceAdaptiveThinking", Value::Bool(true))]),
+            compat: compat_object([
+                (
+                    "allowedFallbackModels",
+                    Value::Array(vec![
+                        Value::String("claude-opus-4-8".to_string()),
+                        Value::String("claude-opus-5".to_string()),
+                    ]),
+                ),
+                ("forceAdaptiveThinking", Value::Bool(true)),
+                ("supportsStrictTools", Value::Bool(true)),
+            ]),
         },
         Model {
             id: "claude-haiku-4-5".to_string(),
@@ -121,7 +131,7 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 200_000,
             max_tokens: 64_000,
             headers: None,
-            compat: None,
+            compat: compat_object([("supportsStrictTools", Value::Bool(true))]),
         },
         Model {
             id: "claude-haiku-4-5-20251001".to_string(),
@@ -144,53 +154,7 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 200_000,
             max_tokens: 64_000,
             headers: None,
-            compat: None,
-        },
-        Model {
-            id: "claude-opus-4-1".to_string(),
-            name: "Claude Opus 4.1 (latest)".to_string(),
-            api: Api::from("anthropic-messages"),
-            provider: ProviderId::from("anthropic"),
-            base_url: "https://api.anthropic.com".to_string(),
-            reasoning: true,
-            thinking_level_map: None,
-            input: vec![Modality::Text, Modality::Image],
-            cost: ModelCost {
-                rates: ModelCostRates {
-                    input: 15.0,
-                    output: 75.0,
-                    cache_read: 1.5,
-                    cache_write: 18.75,
-                },
-                tiers: None,
-            },
-            context_window: 200_000,
-            max_tokens: 32_000,
-            headers: None,
-            compat: None,
-        },
-        Model {
-            id: "claude-opus-4-1-20250805".to_string(),
-            name: "Claude Opus 4.1".to_string(),
-            api: Api::from("anthropic-messages"),
-            provider: ProviderId::from("anthropic"),
-            base_url: "https://api.anthropic.com".to_string(),
-            reasoning: true,
-            thinking_level_map: None,
-            input: vec![Modality::Text, Modality::Image],
-            cost: ModelCost {
-                rates: ModelCostRates {
-                    input: 15.0,
-                    output: 75.0,
-                    cache_read: 1.5,
-                    cache_write: 18.75,
-                },
-                tiers: None,
-            },
-            context_window: 200_000,
-            max_tokens: 32_000,
-            headers: None,
-            compat: None,
+            compat: compat_object([("supportsStrictTools", Value::Bool(true))]),
         },
         Model {
             id: "claude-opus-4-5".to_string(),
@@ -213,7 +177,7 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 200_000,
             max_tokens: 64_000,
             headers: None,
-            compat: None,
+            compat: compat_object([("supportsStrictTools", Value::Bool(true))]),
         },
         Model {
             id: "claude-opus-4-5-20251101".to_string(),
@@ -236,7 +200,7 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 200_000,
             max_tokens: 64_000,
             headers: None,
-            compat: None,
+            compat: compat_object([("supportsStrictTools", Value::Bool(true))]),
         },
         Model {
             id: "claude-opus-4-6".to_string(),
@@ -267,7 +231,10 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 1_000_000,
             max_tokens: 128_000,
             headers: None,
-            compat: compat_object([("forceAdaptiveThinking", Value::Bool(true))]),
+            compat: compat_object([
+                ("forceAdaptiveThinking", Value::Bool(true)),
+                ("supportsStrictTools", Value::Bool(true)),
+            ]),
         },
         Model {
             id: "claude-opus-4-7".to_string(),
@@ -301,6 +268,7 @@ fn anthropic_models() -> Vec<Model> {
             compat: compat_object([
                 ("forceAdaptiveThinking", Value::Bool(true)),
                 ("supportsTemperature", Value::Bool(false)),
+                ("supportsStrictTools", Value::Bool(true)),
             ]),
         },
         Model {
@@ -335,6 +303,46 @@ fn anthropic_models() -> Vec<Model> {
             compat: compat_object([
                 ("forceAdaptiveThinking", Value::Bool(true)),
                 ("supportsTemperature", Value::Bool(false)),
+                ("supportsStrictTools", Value::Bool(true)),
+            ]),
+        },
+        Model {
+            id: "claude-opus-5".to_string(),
+            name: "Claude Opus 5".to_string(),
+            api: Api::from("anthropic-messages"),
+            provider: ProviderId::from("anthropic"),
+            base_url: "https://api.anthropic.com".to_string(),
+            reasoning: true,
+            thinking_level_map: Some(ThinkingLevelMap {
+                off: None,
+                minimal: None,
+                low: None,
+                medium: None,
+                high: None,
+                xhigh: Some(Some("xhigh".to_string())),
+                max: Some(Some("max".to_string())),
+            }),
+            input: vec![Modality::Text, Modality::Image],
+            cost: ModelCost {
+                rates: ModelCostRates {
+                    input: 5.0,
+                    output: 25.0,
+                    cache_read: 0.5,
+                    cache_write: 6.25,
+                },
+                tiers: None,
+            },
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            headers: None,
+            compat: compat_object([
+                (
+                    "allowedFallbackModels",
+                    Value::Array(vec![Value::String("claude-opus-4-8".to_string())]),
+                ),
+                ("forceAdaptiveThinking", Value::Bool(true)),
+                ("supportsTemperature", Value::Bool(false)),
+                ("supportsStrictTools", Value::Bool(true)),
             ]),
         },
         Model {
@@ -358,7 +366,7 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 1_000_000,
             max_tokens: 64_000,
             headers: None,
-            compat: None,
+            compat: compat_object([("supportsStrictTools", Value::Bool(true))]),
         },
         Model {
             id: "claude-sonnet-4-5-20250929".to_string(),
@@ -381,7 +389,7 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 1_000_000,
             max_tokens: 64_000,
             headers: None,
-            compat: None,
+            compat: compat_object([("supportsStrictTools", Value::Bool(true))]),
         },
         Model {
             id: "claude-sonnet-4-6".to_string(),
@@ -412,7 +420,10 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 1_000_000,
             max_tokens: 128_000,
             headers: None,
-            compat: compat_object([("forceAdaptiveThinking", Value::Bool(true))]),
+            compat: compat_object([
+                ("forceAdaptiveThinking", Value::Bool(true)),
+                ("supportsStrictTools", Value::Bool(true)),
+            ]),
         },
         Model {
             id: "claude-sonnet-5".to_string(),
@@ -443,7 +454,10 @@ fn anthropic_models() -> Vec<Model> {
             context_window: 1_000_000,
             max_tokens: 128_000,
             headers: None,
-            compat: compat_object([("forceAdaptiveThinking", Value::Bool(true))]),
+            compat: compat_object([
+                ("forceAdaptiveThinking", Value::Bool(true)),
+                ("supportsStrictTools", Value::Bool(true)),
+            ]),
         },
     ]
 }

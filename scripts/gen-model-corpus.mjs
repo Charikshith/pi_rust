@@ -29,8 +29,14 @@ if (!existsSync(dataDir)) {
 
 const out = [];
 for (const file of readdirSync(dataDir).sort()) {
-  if (!file.endsWith(".json")) continue;
-  const models = JSON.parse(readFileSync(join(dataDir, file), "utf8"));
+  if (!file.endsWith(".json") || file.startsWith(".")) continue;
+  // (skips .manifest.json — a hash of the data files, not model rows)
+  const groups = JSON.parse(readFileSync(join(dataDir, file), "utf8"));
+  // Pi's data/*.json is grouped {api: {modelId: model}}; flattenModelCatalog
+  // merges every group with Object.assign({}, ...Object.values(groups)). The
+  // 0.84.2 model objects already carry id/provider/api, so each row is emitted
+  // verbatim (0.80.10-era flat layout would hit the same code path).
+  const models = Object.assign({}, ...Object.values(groups));
   for (const id of Object.keys(models)) {
     out.push(JSON.stringify(models[id]));
   }

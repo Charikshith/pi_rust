@@ -65,10 +65,11 @@ pub struct UserMessage {
 /// interface's declaration order (spec §4e, `docs/analysis/06-anthropic-runtime-spec.md`):
 /// the adapter's initial object literal is `role, content, api, provider, model, usage,
 /// stopReason, timestamp`, then `responseId` is inserted in `message_start` (AFTER
-/// `timestamp`) and `errorMessage` in the refusal/catch paths (AFTER `responseId`). So
-/// `response_id` is declared after `timestamp`. `response_model`/`diagnostics` are never
-/// set by this adapter and are absent (`skip_serializing_if`) in every current oracle, so
-/// their position (before `usage`) is byte-irrelevant today; kept there per the TS layout.
+/// `timestamp`), `rawStopReason`/`endTurn` in `message_delta`, and `errorMessage` in the
+/// refusal/catch paths (AFTER `responseId`). So `response_id` is declared after `timestamp`.
+/// `response_model`/`diagnostics` are never set by this adapter and are absent
+/// (`skip_serializing_if`) in every current oracle, so their position (before `usage`)
+/// is byte-irrelevant today; kept there per the TS layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
@@ -77,7 +78,13 @@ pub struct AssistantMessage {
     pub content: Vec<AssistantContent>,
     pub api: Api,
     pub provider: ProviderId,
-    pub model: String,
+    /// Requested model id. NOTE: 0.84.2's adapter overwrites this from the wire's
+    /// `message_start.message.model` (anthropic-messages.ts:604); when that field is
+    /// absent the value becomes `undefined` and `JSON.stringify` omits the key, so it
+    /// must be optional (the 0.84.2 oracle fixtures omit it when the SSE has no
+    /// `message.model`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Concrete resolved model when it differs from the requested one (e.g. OpenRouter `auto`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
@@ -93,11 +100,21 @@ pub struct AssistantMessage {
     /// `message_start`, after the initial literal that ends with `timestamp` (spec §4e).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
+    /// Provider stop reason as the wire reported it (TS `rawStopReason`). INSERTED by the
+    /// Anthropic adapter in `message_delta` (`output.rawStopReason = event.delta.stop_reason`),
+    /// i.e. AFTER `responseId` and BEFORE `errorMessage` — must match that runtime key order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_stop_reason: Option<String>,
     /// NOTE: declared after `response_id` to match Pi's *runtime* object key order
     /// (the TS interface lists it before `timestamp`, but the constructed object — and
     /// thus `JSON.stringify` — emits it last; verified against real session fixtures).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// Provider indication of whether the model explicitly ended its turn (TS `endTurn`).
+    /// Declared last to match the TS interface's tail position; not set by the anthropic
+    /// adapter today, so absent from every current oracle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_turn: Option<bool>,
 }
 
 /// The result of executing a tool call (TS `ToolResultMessage`, minus the `role` tag).
@@ -192,7 +209,7 @@ mod tests {
             ],
             api: Api::from("anthropic-messages"),
             provider: ProviderId::from("anthropic"),
-            model: "claude".into(),
+            model: Some("claude".into()),
             response_model: None,
             response_id: None,
             diagnostics: None,
@@ -214,6 +231,8 @@ mod tests {
             },
             stop_reason: StopReason::ToolUse,
             error_message: None,
+            raw_stop_reason: None,
+            end_turn: None,
             timestamp: 1,
         });
         let json = serde_json::to_string(&msg).unwrap();

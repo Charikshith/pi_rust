@@ -1460,7 +1460,7 @@ fn meridian_local_proxy_keeps_model_headers_null() {
     let anthropic = runtime.get_provider("anthropic").expect("present");
     assert_eq!(anthropic.name, "Anthropic", "the builtin name is kept");
     assert_eq!(anthropic.base_url.as_deref(), Some("http://127.0.0.1:3456"));
-    assert_eq!(anthropic.models.len(), 14);
+    assert_eq!(anthropic.models.len(), 13);
     for model in &anthropic.models {
         assert_eq!(
             model.base_url, "http://127.0.0.1:3456",

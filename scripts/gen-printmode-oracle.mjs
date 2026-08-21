@@ -302,6 +302,7 @@ const PKG_ROOTS = {
 	"@earendil-works/pi-ai": join(PKGS, "ai", "src"),
 	"@earendil-works/pi-agent-core": join(PKGS, "agent", "src"),
 	"@earendil-works/pi-tui": join(PKGS, "tui", "src"),
+	"@earendil-works/pi-telemetry": join(PKGS, "telemetry", "src"),
 };
 
 const APPENDED_EXPORTS = {

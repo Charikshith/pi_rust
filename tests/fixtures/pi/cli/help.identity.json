@@ -4,7 +4,7 @@
   "APP_NAME": "pi",
   "APP_TITLE": "π",
   "CONFIG_DIR_NAME": ".pi",
-  "VERSION": "0.80.10",
+  "VERSION": "0.84.2",
   "ENV_AGENT_DIR": "PI_CODING_AGENT_DIR",
   "ENV_SESSION_DIR": "PI_CODING_AGENT_SESSION_DIR",
   "isBunBinary": false,

@@ -71,22 +71,21 @@ fn fixture_models(record: &Value) -> Vec<Model> {
         .collect()
 }
 
-/// The 14 ids `cargo xtask gen-catalog` emitted, in catalog order.
+/// The 13 ids `cargo xtask gen-catalog` emitted, in catalog order.
 ///
 /// Pinned as a literal *and* asserted against the fixture, so neither side can drift alone.
 /// Order is load-bearing: it seeds `getModels()` and therefore `availableModels[0]` in step 4
 /// of `find_initial_model`.
-const ANTHROPIC_MODEL_IDS: [&str; 14] = [
+const ANTHROPIC_MODEL_IDS: [&str; 13] = [
     "claude-fable-5",
     "claude-haiku-4-5",
     "claude-haiku-4-5-20251001",
-    "claude-opus-4-1",
-    "claude-opus-4-1-20250805",
     "claude-opus-4-5",
     "claude-opus-4-5-20251101",
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
     "claude-sonnet-4-5",
     "claude-sonnet-4-5-20250929",
     "claude-sonnet-4-6",

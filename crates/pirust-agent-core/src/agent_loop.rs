@@ -1125,14 +1125,16 @@ fn error_stream(model: &Model, message: &str) -> AssistantMessageEventStream {
         content: Vec::new(),
         api: model.api.clone(),
         provider: model.provider.clone(),
-        model: model.id.clone(),
+        model: Some(model.id.clone()),
         response_model: None,
         diagnostics: None,
         usage: zero_usage(),
         stop_reason: StopReason::Error,
         timestamp: now_millis(),
         response_id: None,
+        raw_stop_reason: None,
         error_message: Some(message.to_string()),
+        end_turn: None,
     };
     sink.push(AssistantMessageEvent::Error {
         reason: StopReason::Error,

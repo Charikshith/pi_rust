@@ -738,37 +738,38 @@ impl Settings {
 }
 
 // =============================================================================
-// deepMergeSettings (`settings-manager.ts:132-160`)
+// deepMergeSettings (`settings-manager.ts:146-164`)
 // =============================================================================
 
-/// `deepMergeSettings(base, overrides)` — **one level deep, arrays replace**.
+/// `deepMergeSettings(base, overrides)` — **recursive for mergeable objects, arrays replace**.
 ///
-/// Pi's own doc comment says "nested objects merge recursively" and is **wrong**: the body
-/// is a single `{...baseValue, ...overrideValue}` spread (`:152`), not a recursive call.
-/// Runtime wins, and the fixture exists to keep it that way. The six branches, in the order
-/// the code tests them:
+/// 0.84.2's `deepMergeObjects` (`:146-160`): the result starts as `{...base}`; every
+/// override key whose value is `undefined` is **skipped**; otherwise, when BOTH the base and
+/// the override values are mergeable objects (plain object, not null, not array), the two are
+/// merged **recursively**; anything else — scalars, arrays, null — the override wins
+/// wholesale. The branches, in code order:
 ///
 /// | case | result |
 /// |---|---|
 /// | key absent from `overrides` | base value kept (never iterated) |
-/// | `overrides[key] === undefined` | **skipped** (`:139-141`) — base value kept, even when the key is otherwise unknown |
-/// | `overrides[key] === null` | override wins → `null` (fails `!== null`, falls to the else) |
+/// | `overrides[key] === undefined` | **skipped** — base value kept, even when the key is otherwise unknown |
+/// | `overrides[key] === null` | override wins → `null` (not mergeable) |
 /// | scalar/array over anything, anything over scalar/array | override **replaces** wholesale |
-/// | object over object (both plain, non-array, non-null) | **one-level** spread |
-/// | object over object, **two levels deep** | the inner object is replaced wholesale |
+/// | object over object (both plain, non-array, non-null) | **recursive** deep merge — nested keys merge, never lost |
 ///
-/// The two consequences the fixture flags `CRITICAL-`:
+/// The consequences the fixture pins:
 ///
-/// - **`CRITICAL-two-levels-deep-is-NOT-merged`.** Global
-///   `retry:{enabled:true,maxRetries:5,provider:{timeoutMs:1000,maxRetries:2}}` plus project
-///   `retry:{provider:{maxRetries:9}}` yields
-///   `retry:{enabled:true,maxRetries:5,provider:{maxRetries:9}}` — `provider.timeoutMs` is
-///   **LOST**. That data loss is the contract; a recursive merge would keep it and is wrong.
+/// - **`CRITICAL-two-levels-deep-IS-merged`** (0.84.2 reversal of 0.80.10's
+///   "NOT-merged"): global `retry:{enabled:true,maxRetries:5,provider:{timeoutMs:1000,
+///   maxRetries:2}}` plus project `retry:{provider:{maxRetries:9}}` yields
+///   `retry:{enabled:true,maxRetries:5,provider:{timeoutMs:1000,maxRetries:9}}` —
+///   `provider.timeoutMs` is KEPT. The one-level `{...baseValue,...overrideValue}` spread
+///   of 0.80.10 is gone.
 /// - **`CRITICAL-array-in-both-is-REPLACED`.** Both `Array.isArray` guards exclude arrays
 ///   from the object branch, so an override array wins wholesale: never concatenated, never
-///   element-merged, never deduplicated. `[]` therefore *clears* a list. This governs
-///   `packages`, `extensions`, `skills`, `prompts`, `themes`, `enabledModels` and
-///   `npmCommand` alike.
+///   element-merged, never deduplicated. `[]` therefore *clears* a list.
+/// - **`nested-undefined-value`**: an `undefined` override value is skipped at every
+///   depth (the base's value survives) — never materialized as a `$undefined` marker.
 ///
 /// Key order: the result starts as `{...base}`, so base keys come first and an overridden
 /// key keeps its **base** position; keys only the override has append in override order.
@@ -777,14 +778,14 @@ impl Settings {
 /// top-level array (`malformed:global-is-a-json-array`): `{...[]}` is `{}` and
 /// `Object.keys([])` is empty, so such a scope contributes nothing without a special case.
 pub fn deep_merge_settings(base: &Value, overrides: &Value) -> SettingsMap {
-    // `const result: Settings = { ...base };` (:133) — this is what copies a base key whose
+    // `const result: Settings = { ...base };` (:147) — this copies a base key whose
     // value is `undefined` as a PRESENT key (fixture:
     // `undefined-in-global-is-COPIED-BY-THE-SPREAD`).
     let mut result = spread(base);
 
-    // `for (const key of Object.keys(overrides))` (:135)
+    // `for (const key of Object.keys(overrides))` (:149)
     for (key, override_value) in own_enumerable_entries(overrides) {
-        // `if (overrideValue === undefined) continue;` (:139-141). The `continue` happens
+        // `if (overrideValue === undefined) continue;` (:151-153). The `continue` happens
         // before any assignment, so an `undefined` override never even creates the key.
         if is_js_undefined(&override_value) {
             continue;
@@ -792,16 +793,15 @@ pub fn deep_merge_settings(base: &Value, overrides: &Value) -> SettingsMap {
 
         let base_value = js_get(base, &key);
 
-        // (:144-151) — six conditions, all six required for the object branch.
+        // (:155-158) — mergeable-on-both-sides gates the recursive branch.
         if is_js_plain_object(&override_value) && base_value.is_some_and(is_js_plain_object) {
-            // `{ ...baseValue, ...overrideValue }` (:152) — ONE spread. The inner spread
-            // does not skip `undefined`, so `terminal.showImages: undefined` in the
-            // override really does blank the base's value.
-            let mut nested = spread(base_value.expect("guarded by is_some_and"));
-            spread_into(&mut nested, &override_value);
+            // `deepMergeObjects(baseValue, overrideValue)` (:157) — RECURSIVE; the inner
+            // result is a full [`SettingsMap`].
+            let nested =
+                deep_merge_settings(base_value.expect("guarded by is_some_and"), &override_value);
             result.insert(key, Value::Object(nested));
         } else {
-            // "For primitives and arrays, override value wins" (:155).
+            // "For primitives and arrays, override value wins" (:159).
             result.insert(key, override_value);
         }
     }
@@ -2592,8 +2592,9 @@ mod tests {
         );
         assert_eq!(manager.get_default_model(), Some("b"));
         let provider = manager.get_provider_retry_settings();
-        // The CRITICAL case, live: `retry.provider` was replaced, so `timeoutMs` is gone.
-        assert_eq!(provider.timeout_ms, None);
+        // 0.84.2 recursive merge: `retry.provider.timeoutMs` is KEPT from global and
+        // merged with the project's `maxRetries`.
+        assert_eq!(provider.timeout_ms, Some(1000.0));
         assert_eq!(provider.max_retries, Some(9.0));
         assert_eq!(
             provider.max_retry_delay_ms,

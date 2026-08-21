@@ -124,14 +124,16 @@ pub fn faux_assistant_message(
         content: normalize_content(content),
         api: Api::from(DEFAULT_API),
         provider: ProviderId::from(DEFAULT_PROVIDER),
-        model: DEFAULT_MODEL_ID.to_string(),
+        model: Some(DEFAULT_MODEL_ID.to_string()),
         response_model: None,
         diagnostics: None,
         usage: default_usage(),
         stop_reason: options.stop_reason.unwrap_or(StopReason::Stop),
         timestamp: options.timestamp.unwrap_or_else(now_millis),
         response_id: options.response_id,
+        raw_stop_reason: None,
         error_message: options.error_message,
+        end_turn: None,
     }
 }
 
@@ -334,7 +336,7 @@ impl Faux {
     fn clone_message(&self, mut message: AssistantMessage, model: &Model) -> AssistantMessage {
         message.api = self.api.clone();
         message.provider = self.provider.clone();
-        message.model = model.id.clone();
+        message.model = Some(model.id.clone());
         message
     }
 
@@ -406,14 +408,16 @@ impl Faux {
             content: Vec::new(),
             api: self.api.clone(),
             provider: self.provider.clone(),
-            model: model.id.clone(),
+            model: Some(model.id.clone()),
             response_model: None,
             diagnostics: None,
             usage: default_usage(),
             stop_reason: StopReason::Error,
             timestamp: now_millis(),
             response_id: None,
+            raw_stop_reason: None,
             error_message: Some(error.to_string()),
+            end_turn: None,
         }
     }
 }

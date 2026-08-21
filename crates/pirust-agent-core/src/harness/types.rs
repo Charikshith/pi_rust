@@ -355,6 +355,7 @@ impl AgentHarnessError {
 /// with the exact §1.4 key order per variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)] // `Message` variant carries the full AgentMessage (see mod.rs:92 precedent)
 pub enum SessionTreeEntry {
     /// A conversation message (types.ts:341-344).
     #[serde(rename = "message")]
@@ -562,6 +563,7 @@ pub struct SessionHeader {
 /// `timestamp` (types.ts:496-500). The harness fills those in when flushing the
 /// write at a turn boundary.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // `Message` variant carries the full AgentMessage (see mod.rs:92 precedent)
 pub enum PendingSessionWrite {
     Message {
         message: AgentMessage,

@@ -152,7 +152,7 @@ pub const DEFAULT_THINKING_LEVEL: ThinkingLevel = ThinkingLevel::Medium;
 /// Spec §9.4 suggests narrowing this to the single `anthropic` entry; the fixture keeps all
 /// 36, and `step4:scans-defaultModelPerProvider-IN-KEY-ORDER` only means something with the
 /// full table, so the full table is kept. Adding a provider stays data-only.
-pub const DEFAULT_MODEL_PER_PROVIDER: [(&str, &str); 36] = [
+pub const DEFAULT_MODEL_PER_PROVIDER: [(&str, &str); 40] = [
     ("amazon-bedrock", "us.anthropic.claude-opus-4-6-v1"),
     ("ant-ling", "Ring-2.6-1T"),
     ("anthropic", "claude-opus-4-8"),
@@ -167,11 +167,11 @@ pub const DEFAULT_MODEL_PER_PROVIDER: [(&str, &str); 36] = [
     ("github-copilot", "gpt-5.4"),
     ("openrouter", "moonshotai/kimi-k2.6"),
     ("vercel-ai-gateway", "zai/glm-5.1"),
-    ("xai", "grok-4.5"),
+    ("xai", "grok-4.6"),
     ("groq", "openai/gpt-oss-120b"),
-    ("cerebras", "zai-glm-4.7"),
-    ("zai", "glm-5.1"),
-    ("zai-coding-cn", "glm-5.1"),
+    ("cerebras", "gpt-oss-120b"),
+    ("zai", "glm-5.3"),
+    ("zai-coding-cn", "glm-5.3"),
     ("mistral", "devstral-medium-latest"),
     ("minimax", "MiniMax-M2.7"),
     ("minimax-cn", "MiniMax-M2.7"),
@@ -180,6 +180,7 @@ pub const DEFAULT_MODEL_PER_PROVIDER: [(&str, &str); 36] = [
     ("huggingface", "moonshotai/Kimi-K2.6"),
     ("fireworks", "accounts/fireworks/models/kimi-k2p6"),
     ("together", "moonshotai/Kimi-K2.6"),
+    ("baseten", "zai-org/GLM-5.2"),
     ("opencode", "kimi-k2.6"),
     ("opencode-go", "kimi-k2.6"),
     ("kimi-coding", "kimi-for-coding"),
@@ -188,6 +189,9 @@ pub const DEFAULT_MODEL_PER_PROVIDER: [(&str, &str); 36] = [
         "cloudflare-ai-gateway",
         "workers-ai/@cf/moonshotai/kimi-k2.6",
     ),
+    ("qwen-token-plan", "qwen3.7-max"),
+    ("qwen-token-plan-cn", "qwen3.7-max"),
+    ("qwen-token-plan-individual", "qwen3.8-max"),
     ("xiaomi", "mimo-v2.5-pro"),
     ("xiaomi-token-plan-cn", "mimo-v2.5-pro"),
     ("xiaomi-token-plan-ams", "mimo-v2.5-pro"),
@@ -948,11 +952,54 @@ pub fn resolve_cli_model(
         }
     }
 
-    // 5. Exact match with no provider inference at all (`:425-433`).
+    // 5. Exact match with no provider inference at all (`:459-497`). 0.84.2:
+    // ambiguous bare ids are REJECTED with an error (not silently passed to the
+    // substring fallback), with an authenticated-provider preference: a sole
+    // authenticated match wins; 0 or 2+ authenticated matches produce the
+    // ambiguity error.
     if provider.is_none() {
-        if let Some(exact) = find_exact_id_or_canonical(cli_model, available_models) {
+        let lower = cli_model.to_lowercase();
+        let exact_matches: Vec<&Model> = available_models
+            .iter()
+            .filter(|m| {
+                m.id.to_lowercase() == lower
+                    || format!("{}/{}", m.provider.0, m.id).to_lowercase() == lower
+            })
+            .collect();
+        if exact_matches.len() == 1 {
             return ResolveCliModelResult {
-                model: Some(exact.clone()),
+                model: Some(exact_matches[0].clone()),
+                ..Default::default()
+            };
+        }
+        if exact_matches.len() > 1 {
+            let authenticated: Vec<&Model> = exact_matches
+                .iter()
+                .copied()
+                .filter(|m| source.has_configured_auth(&m.provider.0))
+                .collect();
+            if authenticated.len() == 1 {
+                return ResolveCliModelResult {
+                    model: Some(authenticated[0].clone()),
+                    ..Default::default()
+                };
+            }
+            let mut matches: Vec<String> = exact_matches
+                .iter()
+                .map(|m| format!("{}/{}", m.provider.0, m.id))
+                .collect();
+            matches.sort_by(|a, b| locale_compare(a, b));
+            let matches = matches.join(", ");
+            let auth_hint = if authenticated.is_empty() {
+                "No matching provider is authenticated."
+            } else {
+                "More than one matching provider is authenticated."
+            };
+            return ResolveCliModelResult {
+                error: Some(format!(
+                    "Model \"{cli_model}\" is ambiguous across providers: {matches}. {auth_hint} \
+                     Use --provider or provider/model."
+                )),
                 ..Default::default()
             };
         }
@@ -4074,11 +4121,15 @@ mod tests {
     fn default_model_per_provider_keeps_the_literals_key_order() {
         // The fixture's `constants.defaultModelPerProviderKeyOrder`, which step 4 of
         // findInitialModel scans in exactly this order.
-        assert_eq!(DEFAULT_MODEL_PER_PROVIDER.len(), 36);
+        assert_eq!(DEFAULT_MODEL_PER_PROVIDER.len(), 40);
         assert_eq!(DEFAULT_MODEL_PER_PROVIDER[0].0, "amazon-bedrock");
         assert_eq!(DEFAULT_MODEL_PER_PROVIDER[1].0, "ant-ling");
         assert_eq!(DEFAULT_MODEL_PER_PROVIDER[2].0, "anthropic");
-        assert_eq!(DEFAULT_MODEL_PER_PROVIDER[35].0, "xiaomi-token-plan-sgp");
+        assert_eq!(
+            DEFAULT_MODEL_PER_PROVIDER[35].0,
+            "qwen-token-plan-individual"
+        );
+        assert_eq!(DEFAULT_MODEL_PER_PROVIDER[39].0, "xiaomi-token-plan-sgp");
         // NOT alphabetical: `openai` precedes `azure-openai-responses`.
         assert_eq!(DEFAULT_MODEL_PER_PROVIDER[3].0, "openai");
         assert_eq!(

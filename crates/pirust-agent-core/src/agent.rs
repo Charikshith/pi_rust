@@ -675,7 +675,7 @@ impl AgentInner {
             content: vec![AssistantContent::Text(TextContent::new(""))],
             api: model.api.clone(),
             provider: model.provider.clone(),
-            model: model.id.clone(),
+            model: Some(model.id.clone()),
             response_model: None,
             diagnostics: None,
             usage: empty_usage(),
@@ -686,7 +686,9 @@ impl AgentInner {
             },
             timestamp: now_millis(),
             response_id: None,
+            raw_stop_reason: None,
             error_message: Some(error),
+            end_turn: None,
         };
         let message = AgentMessage::Llm(Message::Assistant(failure));
         let _ = self

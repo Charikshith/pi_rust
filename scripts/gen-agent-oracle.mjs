@@ -154,9 +154,9 @@ async function genUuidVectors() {
 // FIXTURE 1: v3 SessionTreeEntry byte corpus + header golden (§11.A, §1.4)
 // ===========================================================================
 async function genCorpus() {
-	const { InMemorySessionStorage } = await imp(AGENT_SRC, "harness/session/memory-storage.ts");
+	const { InMemorySessionStorage } = await imp(AGENT_SRC, "harness/session/memory.ts");
 	const { Session } = await imp(AGENT_SRC, "harness/session/session.ts");
-	const { JsonlSessionStorage } = await imp(AGENT_SRC, "harness/session/jsonl-storage.ts");
+	const { JsonlSessionRepo } = await imp(AGENT_SRC, "harness/session/jsonl.ts");
 
 	// Fixed clock for every outer-entry timestamp; seeded PRNG for entry short-ids.
 	clock.now = 1700000000000; // -> "2023-11-14T22:13:20.000Z"
@@ -469,7 +469,7 @@ async function genLoop() {
 	const { fauxProvider, fauxAssistantMessage, fauxToolCall } = await imp(AI_SRC, "providers/faux.ts");
 	const { AgentHarness } = await imp(AGENT_SRC, "harness/agent-harness.ts");
 	const { NodeExecutionEnv } = await imp(AGENT_SRC, "harness/env/nodejs.ts");
-	const { InMemorySessionStorage } = await imp(AGENT_SRC, "harness/session/memory-storage.ts");
+	const { InMemorySessionStorage } = await imp(AGENT_SRC, "harness/session/memory.ts");
 	const { Session } = await imp(AGENT_SRC, "harness/session/session.ts");
 
 	const models = createModels();

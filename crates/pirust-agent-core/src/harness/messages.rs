@@ -153,6 +153,7 @@ pub struct CompactionSummaryMessage {
 /// only capture their own `role` strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)] // `Llm(Message)` dwarfs the four small variants (see mod.rs:92 precedent)
 pub enum AgentMessage {
     /// `user` / `assistant` / `toolResult` — reuses pi-ai's byte-verified `Message`.
     Llm(Message),

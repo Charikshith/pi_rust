@@ -293,7 +293,7 @@ fn derive_session_context_state(
             } => {
                 model = Some(SessionContextModel {
                     provider: a.provider.0.clone(),
-                    model_id: a.model.clone(),
+                    model_id: a.model.clone().unwrap_or_default(),
                 });
             }
             SessionTreeEntry::ActiveToolsChange {

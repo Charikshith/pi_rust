@@ -317,6 +317,7 @@ const PKG_ROOTS = {
 	"@earendil-works/pi-ai": join(PKGS, "ai", "src"),
 	"@earendil-works/pi-agent-core": join(PKGS, "agent", "src"),
 	"@earendil-works/pi-tui": join(PKGS, "tui", "src"),
+	"@earendil-works/pi-telemetry": join(PKGS, "telemetry", "src"),
 };
 
 const APPENDED_EXPORTS = {
@@ -940,6 +941,16 @@ async function genSessionDirCases() {
 	const migrations = await impPi("migrations.ts");
 	const sessionManager = await impPi("core/session-manager.ts");
 
+	// Deterministic capture cwd: on win32, `path.resolve()` of a rooted-but-driveless
+	// input adopts process.cwd()'s drive, so the encoded dir name would embed the
+	// machine's drive. Chdir to a FIXED dir so `resolveCwd`/`cwdDriveInjected` are
+	// reproducible on any host (the Rust test's PROCESS_CWD mirrors this). `C:\oracle`
+	// also hosts the fixedAgentDir below; ensure it exists (it is under the C: drive
+	// convention, never a real user/agent dir).
+	const prevCwd = process.cwd();
+	mkdirSync("C:\\oracle", { recursive: true });
+	process.chdir("C:\\oracle");
+
 	const HEADER_EXTRA = { version: 2, id: "0198c0de-0000-4000-8000-000000000001" };
 	const cases = [
 		{ name: "posix-path", note: "a plain POSIX absolute path; the single leading slash is stripped", cwd: "/home/user/project" },
@@ -1057,6 +1068,7 @@ async function genSessionDirCases() {
 	}
 
 	emit("session_dir.cases.jsonl", jsonl(records.map(normalizeDeep)));
+	process.chdir(prevCwd);
 	return records;
 }
 
@@ -2152,7 +2164,7 @@ async function genMigrationCases() {
 	// -- showDeprecationWarnings (captured in a child; it blocks on a keypress) --
 	const { spawnSync } = await import("node:child_process");
 	const dep = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--emit-help", "deprecation"], {
-		env: { ...process.env, NO_COLOR: "1" },
+		env: { ...process.env, NO_COLOR: "1", NODE_NO_WARNINGS: "1" },
 		input: Buffer.from("x", "utf-8"),
 		maxBuffer: 1024 * 1024,
 	});
@@ -2244,6 +2256,9 @@ function stubRuntime({ models, available, configuredProviders }) {
 		getModels: () => models,
 		getModel: (provider, id) => models.find((m) => m.provider === provider && m.id === id),
 		getAvailable: async () => available ?? models.filter((m) => authed.has(m.provider)),
+		// 0.84.2 registeredModelFallback in model-resolver.ts calls this synchronously;
+		// the snapshot is the last materialized getAvailable() (MUST agree with it).
+		getAvailableSnapshot: () => available ?? models.filter((m) => authed.has(m.provider)),
 		hasConfiguredAuth: (provider) => authed.has(provider),
 	};
 }
