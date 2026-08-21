@@ -1234,3 +1234,57 @@ except the same 3 pre-existing env-polluted pirust-tools find tests.
 **Next (unchanged):** v4 `memory.ts`/`context.ts`, then the v3→v4 trait swap in
 harness + coding-agent session.rs, then `gen-agent-oracle` rework, then
 `gen-printmode-oracle` + printmode regen.
+
+## 2026-08-21 — v4 session port step 4: Session generics + memory.ts + context.ts DONE (oracle-verified)
+
+**`SessionStorage`/`SessionRepo` traits + generic `Session` (session/types.ts:290-378):**
+- `v4/types.rs`: `SessionStorage` trait (getMetadata/getLanes/createLane/moveLane/
+  appendEntry/appendRecord/getEntry/findEntries/findEntriesOnBranch/findRecords/
+  findOpenOperations/getLog/getName/setName/getLabel/setLabel/getStats) with
+  associated `Metadata`; `SessionRepo` trait (create/open/list/delete/fork) with
+  associated Session/Metadata/CreateOptions/ListOptions/ForkOptions.
+- `v4/session.rs`: `Session<S: SessionStorage>` made generic (was concrete over
+  JsonlSessionStorage); `LaneView<'a, S>` generic; `Session::new`/`with_id_generator`
+  unchanged semantics. `JsonlSessionStorage` + `JsonlSessionRepo` now implement the
+  traits (impl blocks in storage.rs / repo.rs).
+- `SessionRepo::fork` uses a backend-specific `ForkOptions` associated type
+  (`JsonlSessionForkOptions` = TS `ForkOptions & JsonlSessionCreateOptions`,
+  `MemoryForkOptions` = `ForkOptions & SessionCreateOptions`) — no invalid Rust
+  intersection types.
+
+**`v4/memory.rs` (NEW — memory.ts:16-171):**
+- `InMemorySessionStorage`: metadata + `Mutex<SessionState>`; all 15 SessionStorage
+  methods replicate the mutation/replay contract exactly (createLane/moveLane
+  validate + apply Lane mutation, appendEntry promotes with parentId/seq/timestamp,
+  appendRecord rejects a second open operation per lane with Pi's exact message
+  `Lane {lane} already has an open operation {id}`, name/label via FactName/
+  FactLabel mutations, structuredClone semantics via Clone).
+- `InMemorySessionRepo`: holds `Arc<InMemorySessionStorage>` in the map so a
+  Session handle and the repo entry share ONE state object (JS by-reference; a
+  deep-clone would make fork see an empty source). create/open/list/delete/fork
+  with duplicate → already_exists `Session already exists: {id}`, missing →
+  not_found `Session not found: {id}`. uuidv7 default ids.
+
+**`v4/context.rs` (NEW — context.ts:33-104):**
+- `build_session_context` / `default_context_entry_transform` /
+  `build_context_entries` / `session_entry_to_context_messages`.
+- Compaction collapse: last compaction + everything after it (pre-compaction
+  messages dropped); thinkingLevel/model/activeToolNames derived from last
+  occurrence in path; deferred assistant messages dropped (rawStopReason ==
+  "deferred" — the port's StopReason enum lacks the variant, wire value deferred
+  to adapter); custom-entry projectors (fn pointers in a HashMap).
+
+**Oracle:** `scripts/gen-v4-memory-oracle.mjs` drives Pi's REAL memory.ts +
+context.ts → 5-record fixture `memory.cases.jsonl` (memory-storage, memory-repo,
+memory-repo-fork, context-path, context-deferred). Normalization: timestamp/
+createdAt → 0, uuidv7 → `<UUID>`. --check wired into init.sh, gated by
+`v4_memory_golden.rs` (5 tests). **Oracle caught the Arc-sharing requirement** —
+fork returned 0 entries until the repo stored Arc<storage> (JS by-reference).
+
+**Gate:** fmt clean, clippy -D warnings clean, `cargo test --workspace` green
+except the same 3 pre-existing env-polluted pirust-tools find tests. All 4 v4
+oracle --checks green + deterministic (codec 25 / storage 8 / repo 10 / memory 5).
+
+**Next:** v3→v4 replacement of the SessionStorage trait + harness + coding-agent
+session.rs wiring, then `gen-agent-oracle` rework, then `gen-printmode-oracle`
++ printmode regen.

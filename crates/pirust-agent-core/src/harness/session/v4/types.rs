@@ -1149,7 +1149,111 @@ pub struct JsonlSessionListOptions {
     pub cwd: Option<String>,
 }
 
+/// Fork options for the JSON repo — TS `ForkOptions & JsonlSessionCreateOptions`
+/// (jsonl/repo.ts:142-143): the fork scope plus create fields (id, parent),
+/// flattened into one object.
+#[derive(Debug, Clone, Default)]
+pub struct JsonlSessionForkOptions {
+    pub fork: Option<ForkOptions>,
+    pub id: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub cwd: String,
+    pub metadata: Option<serde_json::Map<String, Value>>,
+}
+
+/// Fork options for the in-memory repo — TS `ForkOptions & SessionCreateOptions`
+/// (memory.ts:160): fork scope + id + parentSessionId, flattened.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryForkOptions {
+    pub fork: Option<ForkOptions>,
+    pub id: Option<String>,
+    pub parent_session_id: Option<String>,
+}
+
 /// Error helper for the v4 session layer (types.ts:360-371).
 pub fn v4_error(code: SessionErrorCode, message: impl Into<String>) -> SessionError {
     SessionError::new(code, message)
+}
+
+// ===========================================================================
+// Storage / repo traits (session/types.ts:290-378)
+// ===========================================================================
+
+/// `SessionStorage<TMetadata>` (session/types.ts:290-327) — the read/write
+/// contract every v4 session backend implements. Mirrors the v3 trait in
+/// `harness::types` but with the v4 mutation-log vocabulary (lanes, records,
+/// log, open operations).
+pub trait SessionStorage: Send + Sync {
+    /// Metadata type for this backend (TS `TMetadata extends SessionMetadata`).
+    type Metadata: Send + Sync;
+
+    /// `getMetadata`.
+    fn get_metadata(&self) -> Result<Self::Metadata, SessionError>;
+
+    // Lanes
+    fn get_lanes(&self) -> Result<Vec<LanePointer>, SessionError>;
+    fn create_lane(&self, lane: &str, at: Option<&str>) -> Result<(), SessionError>;
+    fn move_lane(&self, lane: &str, to: Option<&str>) -> Result<(), SessionError>;
+
+    // Entries and Records
+    fn append_entry(&self, entry: &ProvisionedEntry, lane: &str) -> Result<Entry, SessionError>;
+    fn append_record(&self, record: &NewRecord) -> Result<LaneRecord, SessionError>;
+
+    // Reads
+    fn get_entry(&self, id: &str) -> Result<Option<Entry>, SessionError>;
+    fn find_entries(&self, query: &EntryQuery) -> Result<Vec<Entry>, SessionError>;
+    /// `start` is mandatory here (as opposed to the tree's findEntriesOnBranch).
+    fn find_entries_on_branch(
+        &self,
+        query: &EntryQuery,
+        bounds: &BranchBounds,
+        start: &str,
+    ) -> Result<Vec<Entry>, SessionError>;
+    fn find_records(&self, query: &RecordQuery) -> Result<Vec<LaneRecord>, SessionError>;
+    fn find_open_operations(
+        &self,
+        lane: &str,
+        options: Option<usize>,
+    ) -> Result<Vec<OperationStartedRecord>, SessionError>;
+    fn get_log(&self, options: &LogOptions) -> Result<Vec<LogItem>, SessionError>;
+
+    // Global facts
+    fn get_name(&self) -> Result<Option<String>, SessionError>;
+    fn set_name(&self, name: Option<&str>) -> Result<(), SessionError>;
+    fn get_label(&self, id: &str) -> Result<Option<String>, SessionError>;
+    fn set_label(&self, id: &str, label: Option<&str>) -> Result<(), SessionError>;
+    fn get_stats(&self) -> Result<SessionStats, SessionError>;
+}
+
+/// `SessionCreateOptions` (session/types.ts:333-336).
+#[derive(Debug, Clone, Default)]
+pub struct SessionCreateOptions {
+    pub id: Option<String>,
+    pub parent_session_id: Option<String>,
+}
+
+/// `SessionRepo<TMetadata, TCreateOptions, TListOptions>`
+/// (session/types.ts:361-378).
+pub trait SessionRepo: Send + Sync {
+    /// Concrete session handle produced by this repo.
+    type Session: Send + Sync;
+    /// Metadata describing a stored session.
+    type Metadata: Send + Sync;
+    /// Backend-specific create options (TS `TCreateOptions`).
+    type CreateOptions: Send + Sync;
+    /// Backend-specific list filter (TS `TListOptions`).
+    type ListOptions: Send + Sync;
+    /// Fork options — TS `ForkOptions & TCreateOptions` (flattened).
+    type ForkOptions: Send + Sync;
+
+    fn create(&self, options: Self::CreateOptions) -> Result<Self::Session, SessionError>;
+    fn open(&self, metadata: Self::Metadata) -> Result<Self::Session, SessionError>;
+    fn list(&self, options: Option<Self::ListOptions>)
+        -> Result<Vec<Self::Metadata>, SessionError>;
+    fn delete(&self, metadata: Self::Metadata) -> Result<(), SessionError>;
+    fn fork(
+        &self,
+        source: Self::Metadata,
+        options: Self::ForkOptions,
+    ) -> Result<Self::Session, SessionError>;
 }

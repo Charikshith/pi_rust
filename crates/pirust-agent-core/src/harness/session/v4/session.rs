@@ -10,11 +10,10 @@ use std::sync::Arc;
 
 use crate::harness::messages::AgentMessage;
 
-use super::storage::JsonlSessionStorage;
 use super::types::{
-    BranchBounds, Entry, EntryQuery, JsonlSessionMetadata, LanePointer, LaneRecord, LogItem,
-    LogOptions, NewRecord, OperationStartedRecord, ProvisionedCustomEntry, ProvisionedEntry,
-    ProvisionedMessageEntry, RecordQuery, SessionStats,
+    BranchBounds, Entry, EntryQuery, LanePointer, LaneRecord, LogItem, LogOptions, NewRecord,
+    OperationStartedRecord, ProvisionedCustomEntry, ProvisionedEntry, ProvisionedMessageEntry,
+    RecordQuery, SessionStats, SessionStorage,
 };
 use crate::harness::session::uuid::uuidv7;
 use crate::harness::types::{SessionError, SessionErrorCode};
@@ -34,12 +33,12 @@ impl IdGenerator for UuidGenerator {
 }
 
 /// A `SessionTree`-style view bound to one lane (session.ts:163-194).
-pub struct LaneView<'a> {
-    session: &'a Session,
+pub struct LaneView<'a, S: SessionStorage> {
+    session: &'a Session<S>,
     lane: String,
 }
 
-impl<'a> LaneView<'a> {
+impl<'a, S: SessionStorage> LaneView<'a, S> {
     /// Current leaf of this lane, or `None` when empty (session.ts:164).
     pub fn get_leaf_id(&self) -> Result<Option<String>, SessionError> {
         self.session.get_leaf_id_for_lane(&self.lane)
@@ -123,21 +122,22 @@ impl<'a> LaneView<'a> {
     }
 }
 
-/// `Session` (session.ts:137-324) — the repo-produced `Session<JsonlSessionMetadata>`.
-pub struct Session {
-    storage: Arc<JsonlSessionStorage>,
+/// `Session` (session.ts:137-324) — the repo-produced session handle, generic
+/// over the storage backend (Pi's `Session<TMetadata>`).
+pub struct Session<S: SessionStorage> {
+    storage: Arc<S>,
     id_generator: Arc<dyn IdGenerator>,
 }
 
-impl std::fmt::Debug for Session {
+impl<S: SessionStorage> std::fmt::Debug for Session<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session").finish_non_exhaustive()
     }
 }
 
-impl Session {
+impl<S: SessionStorage> Session<S> {
     /// Wrap `storage` with Pi's default ([`uuidv7`]) id generator.
-    pub fn new(storage: Arc<JsonlSessionStorage>) -> Self {
+    pub fn new(storage: Arc<S>) -> Self {
         Self {
             storage,
             id_generator: Arc::new(UuidGenerator),
@@ -145,10 +145,7 @@ impl Session {
     }
 
     /// `Session` constructor with an injected id generator (session.ts:153-157).
-    pub fn with_id_generator(
-        storage: Arc<JsonlSessionStorage>,
-        id_generator: Arc<dyn IdGenerator>,
-    ) -> Self {
+    pub fn with_id_generator(storage: Arc<S>, id_generator: Arc<dyn IdGenerator>) -> Self {
         Self {
             storage,
             id_generator,
@@ -156,17 +153,17 @@ impl Session {
     }
 
     /// Borrow the underlying storage.
-    pub fn storage(&self) -> &Arc<JsonlSessionStorage> {
+    pub fn storage(&self) -> &Arc<S> {
         &self.storage
     }
 
     /// `getMetadata` (session.ts:159-161).
-    pub fn get_metadata(&self) -> Result<JsonlSessionMetadata, SessionError> {
+    pub fn get_metadata(&self) -> Result<S::Metadata, SessionError> {
         self.storage.get_metadata()
     }
 
     /// Per-lane tree view — `view` (session.ts:163-194). `main` is the session.
-    pub fn view(&self, lane: &str) -> LaneView<'_> {
+    pub fn view(&self, lane: &str) -> LaneView<'_, S> {
         LaneView {
             session: self,
             lane: lane.to_string(),

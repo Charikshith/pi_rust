@@ -7,6 +7,8 @@
 //! port fully lands.
 
 pub mod codec;
+pub mod context;
+pub mod memory;
 pub mod repo;
 pub mod session;
 pub mod state;

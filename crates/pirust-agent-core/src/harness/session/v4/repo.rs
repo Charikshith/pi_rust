@@ -116,7 +116,10 @@ impl JsonlSessionRepo {
     }
 
     /// `create` (repo.ts:121-124).
-    pub fn create(&self, options: &JsonlSessionCreateOptions) -> Result<Session, SessionError> {
+    pub fn create(
+        &self,
+        options: &JsonlSessionCreateOptions,
+    ) -> Result<Session<JsonlSessionStorage>, SessionError> {
         let destination = self.resolve_create_destination(options)?;
         self.claim_create_destination(&destination, || {
             let (header, path) = self.prepare_create(&destination, options)?;
@@ -126,7 +129,10 @@ impl JsonlSessionRepo {
     }
 
     /// `open` (repo.ts:126-128).
-    pub fn open(&self, metadata: &JsonlSessionMetadata) -> Result<Session, SessionError> {
+    pub fn open(
+        &self,
+        metadata: &JsonlSessionMetadata,
+    ) -> Result<Session<JsonlSessionStorage>, SessionError> {
         let storage = self.load_storage(metadata)?;
         Ok(Session::new(Arc::new(storage)))
     }
@@ -153,7 +159,7 @@ impl JsonlSessionRepo {
         source: &JsonlSessionMetadata,
         options: &JsonlSessionCreateOptions,
         fork_options: &super::types::ForkOptions,
-    ) -> Result<Session, SessionError> {
+    ) -> Result<Session<JsonlSessionStorage>, SessionError> {
         let source_storage = self.load_storage(source)?;
         let create_options = JsonlSessionCreateOptions {
             id: options.id.clone(),
@@ -443,4 +449,50 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// `SessionRepo` impl (session/types.ts:361-378)
+// ---------------------------------------------------------------------------
+
+impl super::types::SessionRepo for JsonlSessionRepo {
+    type Session = Session<JsonlSessionStorage>;
+    type Metadata = JsonlSessionMetadata;
+    type CreateOptions = JsonlSessionCreateOptions;
+    type ListOptions = JsonlSessionListOptions;
+    type ForkOptions = super::types::JsonlSessionForkOptions;
+
+    fn create(&self, options: Self::CreateOptions) -> Result<Self::Session, SessionError> {
+        self.create(&options)
+    }
+
+    fn open(&self, metadata: Self::Metadata) -> Result<Self::Session, SessionError> {
+        self.open(&metadata)
+    }
+
+    fn list(
+        &self,
+        options: Option<Self::ListOptions>,
+    ) -> Result<Vec<Self::Metadata>, SessionError> {
+        self.list(&options.unwrap_or_default())
+    }
+
+    fn delete(&self, metadata: Self::Metadata) -> Result<(), SessionError> {
+        self.delete(&metadata)
+    }
+
+    fn fork(
+        &self,
+        source: Self::Metadata,
+        options: Self::ForkOptions,
+    ) -> Result<Self::Session, SessionError> {
+        let create_options = JsonlSessionCreateOptions {
+            id: options.id,
+            parent_session_id: options.parent_session_id,
+            cwd: options.cwd,
+            metadata: options.metadata,
+        };
+        let fork_options = options.fork.unwrap_or(super::types::ForkOptions::Tree);
+        self.fork(&source, &create_options, &fork_options)
+    }
 }

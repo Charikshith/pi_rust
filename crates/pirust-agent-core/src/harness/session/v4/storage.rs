@@ -431,3 +431,88 @@ pub fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+// ---------------------------------------------------------------------------
+// `SessionStorage` impl (session/types.ts:290-327)
+// ---------------------------------------------------------------------------
+
+impl super::types::SessionStorage for JsonlSessionStorage {
+    type Metadata = JsonlSessionMetadata;
+
+    fn get_metadata(&self) -> Result<Self::Metadata, SessionError> {
+        self.get_metadata()
+    }
+
+    fn get_lanes(&self) -> Result<Vec<LanePointer>, SessionError> {
+        self.get_lanes()
+    }
+
+    fn create_lane(&self, lane: &str, at: Option<&str>) -> Result<(), SessionError> {
+        self.create_lane(lane, at)
+    }
+
+    fn move_lane(&self, lane: &str, to: Option<&str>) -> Result<(), SessionError> {
+        self.move_lane(lane, to)
+    }
+
+    fn append_entry(&self, entry: &ProvisionedEntry, lane: &str) -> Result<Entry, SessionError> {
+        self.append_entry(entry, lane)
+    }
+
+    fn append_record(&self, record: &NewRecord) -> Result<LaneRecord, SessionError> {
+        self.append_record(record)
+    }
+
+    fn get_entry(&self, id: &str) -> Result<Option<Entry>, SessionError> {
+        self.get_entry(id)
+    }
+
+    fn find_entries(&self, query: &EntryQuery) -> Result<Vec<Entry>, SessionError> {
+        self.find_entries(query)
+    }
+
+    fn find_entries_on_branch(
+        &self,
+        query: &EntryQuery,
+        bounds: &BranchBounds,
+        start: &str,
+    ) -> Result<Vec<Entry>, SessionError> {
+        self.find_entries_on_branch(query, bounds, start)
+    }
+
+    fn find_records(&self, query: &RecordQuery) -> Result<Vec<LaneRecord>, SessionError> {
+        self.find_records(query)
+    }
+
+    fn find_open_operations(
+        &self,
+        lane: &str,
+        options: Option<usize>,
+    ) -> Result<Vec<OperationStartedRecord>, SessionError> {
+        self.find_open_operations(lane, options)
+    }
+
+    fn get_log(&self, options: &LogOptions) -> Result<Vec<LogItem>, SessionError> {
+        self.get_log(options)
+    }
+
+    fn get_name(&self) -> Result<Option<String>, SessionError> {
+        self.get_name()
+    }
+
+    fn set_name(&self, name: Option<&str>) -> Result<(), SessionError> {
+        self.set_name(name)
+    }
+
+    fn get_label(&self, id: &str) -> Result<Option<String>, SessionError> {
+        self.get_label(id)
+    }
+
+    fn set_label(&self, id: &str, label: Option<&str>) -> Result<(), SessionError> {
+        self.set_label(id, label)
+    }
+
+    fn get_stats(&self) -> Result<SessionStats, SessionError> {
+        self.get_stats()
+    }
+}

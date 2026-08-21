@@ -53,7 +53,7 @@ fn ordered<T>(items: &[T], order: Option<EntryOrder>) -> Vec<&T> {
 }
 
 /// The in-memory session state (state.ts:42-51).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SessionState {
     sequence: i64,
     used_ids: HashSet<String>,

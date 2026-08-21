@@ -63,6 +63,11 @@ if command -v node >/dev/null 2>&1; then
   if [ -f scripts/gen-v4-repo-oracle.mjs ]; then
     node scripts/gen-v4-repo-oracle.mjs --check || echo "WARN: v4 repo fixtures differ; run node scripts/gen-v4-repo-oracle.mjs"
   fi
+  # 0.84.2 v4 in-memory storage/repo/context fixtures: drives real Pi's
+  # memory.ts + context.ts, gated by v4_memory_golden.rs.
+  if [ -f scripts/gen-v4-memory-oracle.mjs ]; then
+    node scripts/gen-v4-memory-oracle.mjs --check || echo "WARN: v4 memory fixtures differ; run node scripts/gen-v4-memory-oracle.mjs"
+  fi
   # events.corpus.jsonl is a frozen capture (non-deterministic ids) — not --check'd.
 fi
 # agent-core oracle fixtures (tests/fixtures/pi/agent/*: entries/header/uuid/loop/compaction)

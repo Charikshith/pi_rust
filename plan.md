@@ -63,11 +63,28 @@ porting feat-008. This is a distinct prerequisite wave:
    `repo.cases.jsonl` (timestamps/ISO-filenames/uuidv7 normalized), --check wired
    into init.sh, gated by `v4_repo_golden.rs` (10 tests). Oracle caught 2 mock-FS
    bugs (missing dir-name registration + recursive createDir) before the fixture
-   reflected real Pi behavior. Full workspace gate green (3 pre-existing
-   env-polluted pirust-tools find tests only).
-   STILL TO GO: v4 `memory.ts`/`context.ts`, then the v3→v4 replacement of the
-   SessionStorage trait + harness + coding-agent session.rs wiring, then rework
-   `gen-agent-oracle` against the v4 APIs.
+   reflected real Pi behavior.
+   DONE (this commit): **v4 Session generics + `memory.ts` + `context.ts`** —
+   `SessionStorage`/`SessionRepo` traits added to v4/types.rs (mirroring
+   session/types.ts:290-378), `Session<S: SessionStorage>` made generic (was
+   concrete over JsonlSessionStorage), `JsonlSessionStorage`/`JsonlSessionRepo`
+   impl the traits; `v4/memory.rs` (NEW) `InMemorySessionStorage` +
+   `InMemorySessionRepo` (mutation/replay over SessionState, repo holds
+   Arc<storage> so Session + map share state — JS by-reference semantics);
+   `v4/context.rs` (NEW) `build_session_context`/
+   `default_context_entry_transform`/`session_entry_to_context_messages`
+   (compaction collapse, thinking/model/activeTools derivation, deferred
+   assistant drop via rawStopReason, custom-entry projectors). Oracle:
+   `scripts/gen-v4-memory-oracle.mjs` drives Pi's real memory.ts + context.ts
+   → 5-record fixture `memory.cases.jsonl` (timestamps/createdAt→0, uuidv7→
+   `<UUID>`), --check wired into init.sh, gated by `v4_memory_golden.rs` (5 tests).
+   Oracle caught the Session/map sharing requirement (fork entries empty without
+   Arc). Full workspace gate green (3 pre-existing env-polluted pirust-tools
+   find tests only); all 4 v4 oracle --checks green (codec 25 / storage 8 /
+   repo 10 / memory 5).
+   STILL TO GO: the v3→v4 replacement of the SessionStorage trait + harness +
+   coding-agent session.rs wiring, then rework `gen-agent-oracle` against the v4
+   APIs.
 3. `gen-agent-oracle` rework against the v4 session APIs once the port lands.
 
 ## feat-008 waves (on the 0.84.2 baseline)
