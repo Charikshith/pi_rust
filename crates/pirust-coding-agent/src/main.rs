@@ -271,7 +271,9 @@ async fn run(parsed: args::Args) -> i32 {
     // Step 18 (`main.ts:602-613`): trust store + resource-path lists — stubbed, see the
     // module docs. Nothing to do here beyond what `project_trusted` above already decided.
 
-    // Step 19 (`main.ts:615-739`): build the model runtime (services), anthropic-only.
+    // Step 19 (`main.ts:615-739`): build the model runtime (services), with the full
+    // generated builtin catalog (40 providers / 1306 models); only the anthropic-messages api
+    // adapter streams yet (feat-008 adapter waves land later).
     let auth_path = match config_env.auth_path() {
         Ok(path) => PathBuf::from(path),
         Err(error) => {

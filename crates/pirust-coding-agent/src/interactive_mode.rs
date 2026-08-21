@@ -353,9 +353,7 @@ impl InteractiveMode {
         }
     }
 
-    /// Run one user turn: add the user's text to the chat, then block on
-    /// `session.prompt` (events stream in via the subscription during the
-    /// turn and are rendered by [`Self::render_event`]).
+    /// Start one turn by running the async session prompt.
     fn run_turn(&mut self, text: &str) {
         // User message line (Pi adds the user message on `message_start`
         // with role user; we mirror that by appending it before the turn).
@@ -367,12 +365,16 @@ impl InteractiveMode {
         self.tui.borrow_mut().request_render(true);
         self.tui.borrow_mut().poll();
 
-        // Run the turn (blocks the loop, like Pi's `await prompt`).
+        // The production TUI is entered from Tokio. `block_in_place` lets the
+        // multithreaded runtime continue driving the prompt without nesting a runtime.
         let session = Arc::clone(&self.session);
         let text = text.to_string();
-        let _ = self
-            .runtime
-            .block_on(async move { session.prompt(&text, None).await });
+        let prompt = async move { session.prompt(&text, None).await };
+        let _ = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.runtime.block_on(prompt))
+        } else {
+            self.runtime.block_on(prompt)
+        };
     }
 
     /// Render one session event into the chat container.

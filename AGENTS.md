@@ -184,6 +184,20 @@ Before ending a session:
   never the spec ideal)
 - Anything the user explicitly asked to keep
 
+## TUI / Harness Architecture Guardrails
+
+The interactive TUI is an active risk area. Read `docs/tui-design-audit.md`, `docs/tui-design-samples.html`, and `plan.md` before changing `InteractiveMode` or the harness boundary.
+
+- Preserve Pi's observable behavior and persisted/wire formats, but do **not** copy JavaScript runtime mechanics into Rust when they create blocking or lifecycle problems.
+- `AgentHarness` remains UI-agnostic: it owns agent execution, turn lifecycle, tool events, cancellation, and session state. `InteractiveMode` owns terminal input, focus, layout, palettes, and rendering.
+- Never call `Handle::block_on` from an already-running Tokio runtime. The current `block_in_place` path is only a temporary panic workaround; the target is a non-blocking async turn state machine.
+- Do not claim the TUI is customer-ready based only on component/unit tests. Require delayed-provider black-box coverage for submit, streaming, cancellation, errors, tools, resize, and clean shutdown.
+- Keep cwd, session id, provider/model, reasoning level, context usage, cost, tool state, and connection/turn state visible in the interactive status surface.
+- Slash-command autocomplete must use the same registered handlers as command execution; model selection and session resume must update the active session and status projection.
+- Use typed lifecycle events/state, explicit turn ids and ordering, bounded/coalesced event delivery, cancellation tokens, and RAII cleanup for terminal/runtime/subscription/task ownership.
+- Rust-specific goals are part of correctness: responsive async execution, bounded memory, deterministic cleanup, and measured startup/idle/streaming performance. Rust must not merely reproduce Pi's blocking behavior.
+- A fresh rewrite is not authorized. Refactor the existing TUI subsystem incrementally, preserving verified harness/session behavior and adding regression tests before architectural changes.
+
 ## Verification Commands
 
 ```bash

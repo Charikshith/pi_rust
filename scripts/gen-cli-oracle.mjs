@@ -2930,7 +2930,7 @@ async function genModelRuntimeCases() {
 		envAllowlist: MODELS_CHILD_ENV_KEYS,
 		envSet: { NO_COLOR: "1", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: "<per-case temp dir>" },
 		offline: true,
-		childStderr: res.stderr.toString("utf-8"),
+		childStderr: res.stderr.toString("utf-8").replace(/\(node:\d+\)/g, "(node:<pid>)"),
 	});
 	return records;
 }
@@ -3065,16 +3065,30 @@ async function emitModelRuntimeRecords(root, outFile) {
 			modelsPath: join(dir, "models.json"),
 			modelsStorePath: join(dir, "models-store.json"),
 		});
+		// Every builtin provider's static shape: id, display name, baseUrl, whether it
+		// inherits api-key / oauth auth, and its api-key auth's display name. `apiKeyEnv`
+		// (the env-var precedence list) is not exposed on the runtime object, so it is not
+		// captured here — the Rust catalog generator reads it from the checked-in data
+		// files + the `envApiKeyAuth` factory arguments in the provider source instead.
+		const providers = runtime.getProviders().map((p) => ({
+			id: p.id,
+			name: p.name ?? null,
+			baseUrl: p.baseUrl ?? null,
+			hasApiKeyAuth: Boolean(p.auth?.apiKey),
+			hasOauthAuth: Boolean(p.auth?.oauth),
+			apiKeyName: p.auth?.apiKey?.name ?? null,
+		}));
 		records.push({
 			fn: "builtinCatalogFingerprint",
 			catalogSource: "builtin",
-			note: "Shape of the untouched builtin catalog with NO models.json. The catalog is GENERATED and grows with every pi release, so these numbers are version-dependent - treat them as a drift signal, not a contract. Only the anthropic provider (the one pirust ports) is enumerated; every other provider is reduced to its id.",
+			note: "Shape of the untouched builtin catalog with NO models.json. The catalog is GENERATED and grows with every pi release, so these numbers are version-dependent - treat them as a drift signal, not a contract. `providers` enumerates every builtin provider's static metadata (id/name/baseUrl/auth flags); `anthropic` carries the full model list (the one provider whose models are enumerated for byte-level checks).",
 			offline: true,
 			piVersion: (await impPi("config.ts")).VERSION,
 			totalProviders: runtime.getProviders().length,
 			totalModels: runtime.getModels().length,
 			providerIds: runtime.getProviders().map((p) => p.id).sort(),
 			availableModels: (await runtime.getAvailable()).length,
+			providers,
 			anthropic: {
 				name: runtime.getProvider("anthropic")?.name ?? null,
 				baseUrl: runtime.getProvider("anthropic")?.baseUrl ?? null,

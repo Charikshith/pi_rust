@@ -1,9 +1,9 @@
 //! Oracle replay for `models.rs` against `tests/fixtures/pi/cli/models.cases.jsonl`.
 //!
-//! 158 records captured by executing **real Pi 0.80.10** — 111 pure-function rows against a
-//! synthetic catalog the fixture itself supplies, 18 rows from a real `ModelRuntime` against
-//! the real 36-provider / 1062-model builtin catalog, 6 `--list-models` renders, and 3
-//! metadata rows (`constants`, `syntheticCatalog`, `captureEnvironment`) that are *inputs*
+//! 158 records captured by executing **real Pi 0.80.10 → 0.84.2** — 111 pure-function rows
+//! against a synthetic catalog the fixture itself supplies, 18 rows from a real `ModelRuntime`
+//! against the real 40-provider / 1306-model builtin catalog, 6 `--list-models` renders, and
+//! 3 metadata rows (`constants`, `syntheticCatalog`, `captureEnvironment`) that are *inputs*
 //! rather than assertions.
 //!
 //! Rules this suite follows, deliberately:
@@ -1072,10 +1072,12 @@ fn models_json_strips_line_comments_but_not_block_comments() {
 /// The `builtinCatalogFingerprint` record, rebuilt as a [`ModelCatalog`].
 ///
 /// This is where the 18 `ModelRuntime.create` records get their base layer: **Pi's real
-/// anthropic provider**, with its real 14 models, name and `baseUrl`, straight out of the
-/// capture. The other 35 providers are id-only shells — the fingerprint enumerates their ids
-/// but reduces each to just that ("Only the anthropic provider (the one pirust ports) is
-/// enumerated"), so their model lists are genuinely unknown here.
+/// anthropic provider**, with its real 13 models, name and `baseUrl`, straight out of the
+/// capture. The other providers are id-only shells with empty model lists — the fingerprint
+/// enumerates their ids but reduces each to just that, so their model lists are not driven
+/// through these runtime records. (The full real catalog now lives in the generated
+/// `catalog.rs`; this helper predates it and is kept to replay the recorded rows against a
+/// known fixed base rather than the generator's output.)
 ///
 /// `api_key_env` carries anthropic's real env precedence so `check_auth`'s last resort is
 /// exercised; the capture ran with every provider credential var **absent**
@@ -1148,12 +1150,12 @@ fn builtin_catalog() -> (ModelCatalog, usize) {
 /// The `builtinCatalogFingerprint` record is explicitly "a drift signal, not a contract" — the
 /// catalog is generated and grows every Pi release. So this test asserts what *is* a contract:
 ///
-/// - the 1062 real anthropic model fields round-trip through `pirust_ai::types::Model`;
+/// - the 1306 real model fields round-trip through `pirust_ai::types::Model`;
 /// - a runtime with **no** `models.json` leaves the provider untouched (`recomposeProvider`'s
-///   fast path), so name, `baseUrl` and all 14 models come through unchanged;
+///   fast path), so name, `baseUrl` and all 13 anthropic models come through unchanged;
 /// - with no credentials anywhere, `availableModels` is 0.
 ///
-/// `totalProviders: 36` and `totalModels: 1062` are **recorded, not required**: they are
+/// `totalProviders: 40` and `totalModels: 1306` are **recorded, not required**: they are
 /// printed on failure of the derived checks but never asserted as equalities.
 #[test]
 fn builtin_catalog_composes_untouched_when_there_is_no_models_json() {
@@ -1348,9 +1350,9 @@ fn model_runtime_create_matches_all_18_records() {
             ),
         );
 
-        // `totals.models` counts all 1062 real builtin models; this port holds only the 14
-        // anthropic ones (the fingerprint reduces the other 35 providers to their ids), so the
-        // *delta* from the no-models.json baseline is what is comparable — and it is exactly
+        // `totals.models` counts all 1306 real builtin models; this test-side fixture holds
+        // only the 13 anthropic ones (the fingerprint enumerates the rest as id shells), so
+        // the *delta* from the no-models.json baseline is what is comparable — and it is exactly
         // what composition controls: +3 for three inline models, +1 for one appended id, 0
         // when a provider is replaced in place or deleted.
         let want_delta = totals["models"].as_i64().unwrap_or_default() - recorded_baseline_models;

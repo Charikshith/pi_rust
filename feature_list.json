@@ -111,8 +111,8 @@
       "dependencies": [
         "feat-007"
       ],
-      "status": "not-started",
-      "evidence": "PREREQ (v4 harness-swap wave) DONE 2026-08-22: AgentHarness now drives the v4 mutation-log Session (0.84.2 contract). New harness/compaction/v4.rs (prepare_compaction with virtualRetainedEntries + retainedTail); harness/mod.rs re-bound to V4SessionStorage+V4Session (pending writes → append_message/append_entry/set_label/set_name/move_lane; context via build_session_context; compact → v4 prepare_compaction + retainedTail; navigate → move_lane); v4/session.rs +new_id(). harness_golden.rs → v4 storage + new v4 entry-shape golden. Gate: agent-core tests green (harness_golden 2/2), fmt+clippy clean, 4 v4 oracle --checks green (25/8/10/5). ./init.sh halted only by 3 pre-existing pirust-tools find env tests (verified failing on clean stash). DEFERRED: session-manager.ts (v3-tree coding-agent layer, harness never used it), gen-agent-oracle rework (0.84.2 harness is a stub — no tape), LLM summary, fileOps (compaction/utils.ts). WAITING: feat-008 provider waves (remaining adapters + catalog generator)."
+      "status": "in-progress",
+      "evidence": "PREREQ (v4 harness-swap wave) DONE 2026-08-22: AgentHarness now drives the v4 mutation-log Session (0.84.2 contract). New harness/compaction/v4.rs (prepare_compaction with virtualRetainedEntries + retainedTail); harness/mod.rs re-bound to V4SessionStorage+V4Session (pending writes → append_message/append_entry/set_label/set_name/move_lane; context via build_session_context; compact → v4 prepare_compaction + retainedTail; navigate → move_lane); v4/session.rs +new_id(). harness_golden.rs → v4 storage + new v4 entry-shape golden. Gate: agent-core tests green (harness_golden 2/2), fmt+clippy clean, 4 v4 oracle --checks green (25/8/10/5). ./init.sh halted only by 3 pre-existing pirust-tools find env tests (verified failing on clean stash). DEFERRED: session-manager.ts (v3-tree coding-agent layer, harness never used it), gen-agent-oracle rework (0.84.2 harness is a stub — no tape), LLM summary, fileOps (compaction/utils.ts). CATALOG WAVE 1 DONE 2026-08-22: xtask gen-catalog now consumes real Pi 0.84.2 provider data (40 providers, 1306 models) plus oracle-captured provider metadata and emits the full catalog. catalog_golden.rs verifies provider order and every generated model field; models_golden.rs keeps its anthropic fixture helper explicitly test-only. gen-catalog --check and oracle --check pass; pirust-coding-agent tests (88 unit + integration suites) and clippy/fmt/build pass. Workspace has only the 3 pre-existing pirust-tools find failures caused by the repository ancestor .git environment. The rustfmt invocation in xtask makes generated output idempotent. REMAINING: provider streaming adapters and OAuth flows."
     },
     {
       "id": "feat-009",
@@ -144,6 +144,17 @@
       ],
       "status": "not-started",
       "evidence": ""
+    },
+    {
+      "id": "feat-013",
+      "name": "TUI customer readiness and harness integration",
+      "description": "Make the interactive TUI customer-ready: fix the nested Tokio runtime panic, integrate UI-neutral AgentHarness/session events, expose cwd/session/provider/model/reasoning/context status, add discoverable slash commands and model picker, clarify tool approval/errors/cancellation/compaction, and verify responsive terminal behavior.",
+      "dependencies": [
+        "feat-003",
+        "feat-007"
+      ],
+      "status": "not-started",
+      "evidence": "Plan: plan.md. Design reference: docs/tui-design-samples.html."
     }
   ]
 }

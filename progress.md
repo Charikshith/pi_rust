@@ -8,6 +8,17 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
+## 2026-08-22 — TUI ARCHITECTURE AUDIT SAVED
+
+- User-facing TUI review completed. The existing code should continue; a fresh rewrite is not recommended.
+- Confirmed root issue: `InteractiveMode` calls a blocking runtime bridge during an already-running Tokio runtime. The `block_in_place` workaround prevents the nested-runtime panic, but the TUI still freezes during a model turn. The correct next implementation is a non-blocking async turn state machine.
+- Saved full audit and development backlog to `docs/tui-design-audit.md`, including event/state ownership, cancellation, slash-command dispatch, selected model/cwd/session status, tool approval, resize, persistence, event ordering/backpressure, lifecycle cleanup, security boundaries, black-box tests, and Rust-specific performance/memory goals.
+- Saved visual/customer requirements to `docs/tui-design-samples.html` and the current slash palette screenshot to `docs/tui-current-command-palette.png`.
+- Added `feat-013` to `feature_list.json`: TUI customer readiness and harness integration; `plan.md` contains the implementation plan.
+- Current verified state after restoring the partial async experiment: `cargo check -p pirust-coding-agent` passes and `interactive_mode_smoke` passes 5/5. The full non-blocking turn refactor is unfinished and must be implemented as one coherent wave, not piecemeal patches.
+- Resume point: begin feat-013 step 1 with a delayed-provider black-box test, then replace the blocking `run_turn` path with an async task/state machine while keeping `AgentHarness` UI-agnostic.
+
+
 ## Current State
 
 **Last Updated:** 2026-08-22
@@ -1323,6 +1334,14 @@ This is a full multi-step wave, deferred to next session start.
 green except the same 3 pre-existing env-polluted pirust-tools find tests; all
 4 v4 oracle `--check`s green (codec 25 / storage 8 / repo 10 / memory 5).
 Tree clean at `ca340bf`; nothing pushed.
+
+## 2026-08-22 — feat-008 CATALOG WAVE 1 DONE
+
+- Ported the full Pi 0.84.2 builtin catalog: 40 providers / 1306 models from the real `../pi/packages/ai/src/providers/data/*.json` output.
+- `xtask gen-catalog` now emits provider metadata from the oracle fingerprint, model data from the Pi files, and is rustfmt-canonical/idempotent under `gen-catalog --check`.
+- Catalog and model goldens pass; `cargo fmt --check`, workspace clippy, coding-agent tests, workspace build, and `node scripts/gen-cli-oracle.mjs --check` pass.
+- Workspace test caveat unchanged: 3 pre-existing `pirust-tools` `find` failures caused by the repository `.git` ancestor environment; verified unrelated on a clean stash.
+- Remaining feat-008 work: streaming adapters and OAuth flows.
 
 ## 2026-08-22 â€” v4 HARNESS SWAP DONE (oracle-mapped against 0.84.2)
 

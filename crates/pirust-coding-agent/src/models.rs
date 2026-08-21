@@ -1,11 +1,13 @@
 //! Port of `core/models-store.ts` + model resolution — `models.json`, custom-provider
 //! merging, `--model`/`--provider`/settings precedence, and the `:thinking` suffix.
 //!
-//! feat-005 targets a single `anthropic` provider (the only ported api adapter); the
-//! remaining ~10 apis and ~35 providers land in feat-008.
+//! feat-005 targeted a single `anthropic` provider (the only ported api adapter). feat-008
+//! ships the full 40-provider / 1306-model generated catalog (`catalog.rs`); the remaining
+//! ~10 api adapters (streaming wire protocols) land in later feat-008 waves.
 //!
 //! Gated by `tests/fixtures/pi/cli/models.cases.jsonl` — 158 records captured from real Pi
-//! 0.80.10, 18 of which ran a real `ModelRuntime` against the real builtin catalog. Every
+//! 0.80.10 (upgraded to 0.84.2), 18 of which ran a real `ModelRuntime` against the real
+//! builtin catalog. Every
 //! literal string, tie-break and quirk below is that fixture's, not a self-authored
 //! expectation.
 //!
@@ -44,7 +46,7 @@
 //!
 //! # Composition — what this module does *not* re-implement
 //!
-//! - **[`pirust_ai::types::Model`]** is *the* model type. It was byte-verified against 1062
+//! - **[`pirust_ai::types::Model`]** is *the* model type. It was byte-verified against 1306
 //!   real Pi models; nothing here declares a second one. `ThinkingLevelMap`, `ModelCost`,
 //!   `ModelCostTier` and `Modality` likewise come from `pirust-ai`, which is why
 //!   `models.json`'s `cost` block deserializes straight into the struct the composed model
@@ -64,17 +66,15 @@
 //!
 //! # The catalog is an input, never a global
 //!
-//! Pi imports `@earendil-works/pi-ai/providers/all` — a *generated* 36-provider /
-//! 1062-model table — straight into `ModelRuntime.create` (`model-runtime.ts:32,141-145`).
-//! Here it is a parameter: [`ModelCatalog`], built by the caller. feat-008 owns the
-//! generator; until it lands, `main.rs` decides what to pass. Consequences worth knowing:
-//!
-//! - the golden suite feeds it the fixture's own `builtinCatalogFingerprint` record, so the
-//!   18 `ModelRuntime.create` rows are replayed against *Pi's real anthropic provider*
-//!   rather than a hand-written stand-in;
-//! - the 35 other providers are modelled as [`ProviderDescriptor`]s with an empty model list,
-//!   so `totals.providers` is exact while `totals.models` can only be checked as a *delta*
-//!   from the fingerprint baseline (see `tests/models_golden.rs`);
+//! Pi imports `@earendil-works/pi-ai/providers/all` — a *generated* 40-provider /
+//! 1306-model table — straight into `ModelRuntime.create` (`model-runtime.ts:32,141-145`).
+//! Here it is a parameter: [`ModelCatalog`], built by the caller. feat-008's generator emits
+//! it from real Pi's checked-in catalog data (`crates/pirust-coding-agent/src/catalog.rs`,
+//! `cargo xtask gen-catalog`); `main.rs` passes it to `ModelRuntime::create`. The golden
+//! suite feeds the fixture's own `builtinCatalogFingerprint` record, so the 18
+//! `ModelRuntime.create` rows are replayed against *Pi's real providers* rather than a
+//! hand-written stand-in; the test-side shell fixture predates the generator and is now
+//! superseded by `catalog.rs` for production use.
 //! - nothing in this module reads `std::env` except through [`ProcessEnv`], which the caller
 //!   snapshots.
 //!
@@ -291,7 +291,7 @@ pub fn thinking_level_as_str(level: ThinkingLevel) -> &'static str {
 /// 3. **Tiebreak**: codepoint order.
 ///
 /// So it is faithful for strings of printable ASCII in either case — which is every model id,
-/// model name and provider id in the captured 1062-model catalog, and every value in all 158
+/// model name and provider id in the captured 1306-model catalog, and every value in all 158
 /// fixture records.
 ///
 /// # What it does not reproduce
@@ -2346,7 +2346,7 @@ impl ModelConfig {
     /// 6. Success → the providers map, in file order.
     ///
     /// Every failure path yields an **empty** config, so no provider is overlaid and every
-    /// builtin is used untouched — which is why a malformed `models.json` still leaves all 14
+    /// builtin is used untouched — which is why a malformed `models.json` still leaves all 13
     /// anthropic models listed, just unconfigured.
     pub fn load(
         env: &crate::config::ConfigEnv,
@@ -2792,8 +2792,8 @@ pub fn apply_models_json(
 /// One entry of the builtin catalog — Pi's `Provider` (`packages/ai`), narrowed to what
 /// composition and auth-probing read.
 ///
-/// **This is an input.** See the module docs on why the 36-provider / 1062-model table is not
-/// embedded here.
+/// **This is an input.** The full table is generated into `catalog.rs` by `cargo xtask
+/// gen-catalog`; see the module docs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderDescriptor {
     /// `provider.id`.
@@ -2955,7 +2955,7 @@ fn raw_model_headers(
 /// This is why `model.headers` stays `null` through composition even for the Meridian shape
 /// (`{"anthropic":{"baseUrl":…,"apiKey":"x","headers":{"x-meridian-agent":"pi"}}}`): the
 /// provider-level `headers` never touch a model object, they are resolved per request. The
-/// fixture asserts `headers: null` on all 14 composed anthropic models for exactly that shape,
+/// fixture asserts `headers: null` on all 13 composed anthropic models for exactly that shape,
 /// so copying them onto the models would diverge.
 ///
 /// Values go through `crate::auth::resolve_config_value`, so `$VAR` and `${VAR}` templates
@@ -3253,7 +3253,7 @@ impl ModelRuntime {
     /// after which the provider **falls back to the untouched builtin** — or is deleted when
     /// there is no builtin to fall back to (`:211-215`).
     ///
-    /// That fallback is what makes `{"anthropic": {}}` a *reported error with all 14 builtin
+    /// That fallback is what makes `{"anthropic": {}}` a *reported error with all 13 builtin
     /// models still listed*, while `{"oracle-noapi": {...}}` is a reported error with the
     /// provider gone.
     fn rebuild_providers(&mut self) {

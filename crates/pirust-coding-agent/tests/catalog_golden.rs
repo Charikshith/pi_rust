@@ -1,25 +1,27 @@
-//! Oracle for the generated builtin catalog — `src/catalog.rs` vs the fixture it was
+//! Oracle for the generated builtin catalog — `src/catalog.rs` vs the oracle data it was
 //! generated from.
 //!
 //! [`pirust_coding_agent::catalog::builtin_catalog`] is emitted by `cargo xtask gen-catalog`
-//! out of the `builtinCatalogFingerprint` record of `tests/fixtures/pi/cli/models.cases.jsonl`
-//! (captured from real Pi 0.80.10). Nothing keeps a generated file honest on its own, so this
-//! suite re-derives the same expectation from the fixture and compares:
+//! from real Pi 0.84.2's generated catalog data (`providers/data/*.json`, sha256-pinned by
+//! `.manifest.json`) plus the `builtinCatalogFingerprint` record of
+//! `tests/fixtures/pi/cli/models.cases.jsonl` (captured from real Pi). Nothing keeps a
+//! generated file honest on its own, so this suite re-derives the same expectation from the
+//! oracle and compares:
 //!
 //! - a **stale checked-in file** (someone edited `catalog.rs`, or forgot to rerun the
-//!   generator after the fixture changed) fails here;
-//! - a **drifting fixture** (a recapture that renamed a model or moved the `baseUrl`) fails
+//!   generator after the oracle data changed) fails here;
+//! - a **drifting oracle** (a recapture that renamed a model or moved the `baseUrl`) fails
 //!   here too, which is the point — the two must be regenerated together;
-//! - a **shrunken fixture** cannot silently weaken the suite: the model count and the 14 ids
-//!   are asserted against literals as well as against the fixture, so deleting fixture rows
+//! - a **shrunken oracle** cannot silently weaken the suite: the provider count and the
+//!   model counts are asserted against the fixture as well as the data, so deleting rows
 //!   fails instead of testing less.
 //!
-//! Every `want` is either read out of the fixture or, where a literal appears below, pinned
-//! *and* cross-checked against the fixture in the same assertion.
+//! Every `want` is either read out of the oracle or, where a literal appears below, pinned
+//! *and* cross-checked against the oracle in the same assertion.
 
 use std::path::PathBuf;
 
-use pirust_ai::types::{Api, Model, ProviderId};
+use pirust_ai::types::{Model, ProviderId};
 use pirust_coding_agent::catalog::builtin_catalog;
 use serde_json::Value;
 
@@ -171,46 +173,92 @@ fn model_ids_and_provider_identity_are_the_fixtures() {
     );
 }
 
-/// The slice is anthropic-only, and only carries models the ported adapter can stream.
+/// The catalog carries every builtin provider of the fingerprint, in fingerprint order.
 ///
-/// The 35 other providers of the fingerprint are **not** descriptors here — see the module
-/// docs on `src/catalog.rs`. `tests/models_golden.rs` builds them as empty shells for its own
-/// `totalProviders` check; that construction is test-side and this asserts the catalog does
-/// not repeat it.
+/// Each provider's `name`/`baseUrl`/auth flags come from the fingerprint's `providers`
+/// array (captured from real Pi's `ModelRuntime.getProviders()`); every provider whose
+/// models are in the generated data contributes them. Radius is the dynamic provider with
+/// no static catalog — it is present as a provider (id/name/auth) with zero models, exactly
+/// matching real Pi (`MODELS["radius"]` is undefined → `getModels("radius")` is `[]`).
 #[test]
-fn slice_is_anthropic_only_and_every_model_can_stream() {
+fn catalog_carries_every_builtin_provider_in_fingerprint_order() {
     let record = fingerprint();
     let catalog = builtin_catalog();
 
-    let ids: Vec<&str> = catalog.providers().iter().map(|p| p.id.as_str()).collect();
+    let want: Vec<&str> = record["providers"]
+        .as_array()
+        .expect("fingerprint.providers array")
+        .iter()
+        .map(|p| p["id"].as_str().expect("provider id"))
+        .collect();
     assert_eq!(
-        ids,
-        ["anthropic"],
-        "the slice ships exactly one provider; the fingerprint's other {} ids are deliberately \
-         absent because their api adapters are not ported",
-        record["providerIds"].as_array().map_or(0, Vec::len) - 1
+        want.len(),
+        40,
+        "the fingerprint must still enumerate all builtin providers"
     );
 
-    let anthropic = catalog.get("anthropic").expect("anthropic provider");
-    for model in &anthropic.models {
+    let got: Vec<&str> = catalog.providers().iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(
+        got, want,
+        "the catalog must carry every builtin provider in fingerprint order — run `cargo xtask gen-catalog`"
+    );
+
+    for provider in catalog.providers() {
+        let meta = record["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|p| p["id"] == provider.id)
+            .unwrap_or_else(|| panic!("{}: no fingerprint metadata", provider.id));
         assert_eq!(
-            model.provider,
-            ProviderId::from("anthropic"),
-            "{}: every model in the slice belongs to anthropic",
-            model.id
+            provider.name,
+            meta["name"].as_str().expect("name"),
+            "{}: provider name must be the fingerprint's",
+            provider.id
         );
         assert_eq!(
-            model.api,
-            Api::from("anthropic-messages"),
-            "{}: the slice may only advertise models the ported adapter can stream",
-            model.id
+            provider.base_url.as_deref(),
+            meta["baseUrl"].as_str(),
+            "{}: baseUrl must be the fingerprint's (None for per-request providers)",
+            provider.id
         );
-        assert!(
-            model.api.is_known(),
-            "{}: `anthropic-messages` must stay a KnownApi",
-            model.id
+        assert_eq!(
+            provider.has_api_key_auth,
+            meta["hasApiKeyAuth"].as_bool().expect("hasApiKeyAuth"),
+            "{}: api-key auth flag",
+            provider.id
         );
+        assert_eq!(
+            provider.has_oauth_auth,
+            meta["hasOauthAuth"].as_bool().expect("hasOauthAuth"),
+            "{}: oauth auth flag",
+            provider.id
+        );
+
+        // Every model belongs to its provider; radius has none (dynamic catalog).
+        for model in &provider.models {
+            assert_eq!(
+                model.provider,
+                ProviderId::from(provider.id.as_str()),
+                "{}: every model belongs to its provider",
+                model.id
+            );
+            assert!(
+                model.api.is_known(),
+                "{}: model.api {:?} must be a known adapter",
+                model.id,
+                model.api
+            );
+        }
     }
+}
+
+/// The anthropic provider's `api_key_env` is the real env precedence; the oauth flag now
+/// matches real Pi (anthropic has both api-key and oauth auth in 0.84.2).
+#[test]
+fn anthropic_auth_shape_matches_real_pi() {
+    let catalog = builtin_catalog();
+    let anthropic = catalog.get("anthropic").expect("anthropic provider");
 
     assert_eq!(
         anthropic.api_key_env,
@@ -225,17 +273,17 @@ fn slice_is_anthropic_only_and_every_model_can_stream() {
         "anthropic inherits api-key auth"
     );
     assert!(
-        !anthropic.has_oauth_auth,
-        "feat-005 models no oauth method (matching tests/models_golden.rs)"
+        anthropic.has_oauth_auth,
+        "anthropic has oauth auth in the 0.84.2 oracle (oauth flows themselves are a later wave)"
     );
 }
 
 /// `models.rs` flags that TypeBox accepts any `number` for `contextWindow`/`maxTokens` while
 /// [`Model`] stores `u64`, so a fractional value would truncate. This confirms it is a
-/// non-issue for all 14 real models: every captured value is a non-negative integer, and the
+/// non-issue for all 13 real models: every captured value is a non-negative integer, and the
 /// generator refuses to emit anything else.
 #[test]
-fn context_window_and_max_tokens_are_integers_in_all_14_models() {
+fn context_window_and_max_tokens_are_integers_in_all_13_models() {
     let record = fingerprint();
     let models = record["anthropic"]["models"].as_array().expect("models");
     assert_eq!(models.len(), ANTHROPIC_MODEL_IDS.len());

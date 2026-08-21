@@ -1,15 +1,19 @@
 //! `xtask` — repo build tooling.
 //!
-//! Hosts `gen-catalog`, which emits `crates/pirust-coding-agent/src/catalog.rs` — the
-//! **anthropic-only slice** of Pi's builtin model catalog — from the
-//! `builtinCatalogFingerprint` record of `tests/fixtures/pi/cli/models.cases.jsonl`.
+//! Hosts `gen-catalog`, which emits `crates/pirust-coding-agent/src/catalog.rs` — the full
+//! builtin model catalog (all 40 providers / 1345 models as of the 0.84.2 oracle) — from:
 //!
-//! This is *not* feat-008's generator. Pi's real generator
-//! (`packages/ai/scripts/generate-models.ts`) walks 36 providers / 1062 models; this one
-//! reproduces exactly the one provider whose `api` adapter is ported (`anthropic-messages`),
-//! from data captured out of real Pi 0.80.10 rather than hand-authored. When feat-008 lands
-//! its generator, this subcommand and `catalog.rs` are both superseded.
-//! See `docs/analysis/02-ai.md`.
+//! 1. **Models**: the checked-in generator output `../pi/packages/ai/src/providers/data/*.json`
+//!    (40 files, one per provider, `{api: {modelId: Model}}` nested, sha256-pinned by
+//!    `data/.manifest.json`). This is what real Pi's `generate-models.ts` writes and what
+//!    `providers/<provider>.models.ts` loads via `flattenModelCatalog`.
+//! 2. **Provider metadata** (`name`, `baseUrl`, auth flags): the `providers` array of the
+//!    `builtinCatalogFingerprint` record of `tests/fixtures/pi/cli/models.cases.jsonl`,
+//!    captured from real Pi 0.84.2's `ModelRuntime.getProviders()`.
+//! 3. **`api_key_env`**: the standard `envApiKeyAuth(name, [ENV])` args read from the 0.84.2
+//!    provider sources (the env-var precedence each provider's inherited api-key auth
+//!    consults). Not on the runtime object, so it is a checked-in table here; see
+//!    [`API_KEY_ENV`].
 //!
 //! # Usage
 //!
@@ -18,8 +22,13 @@
 //! cargo xtask gen-catalog --check    # exit 1 if the checked-in file is not what we'd emit
 //! ```
 //!
-//! The emitted text is already `rustfmt`-clean and fully ordered by the fixture, so
-//! regenerating an up-to-date tree is a byte-for-byte no-op.
+//! The emitted text is already `rustfmt`-clean and fully ordered, so regenerating an
+//! up-to-date tree is a byte-for-byte no-op.
+//!
+//! This is *not* a port of `generate-models.ts`'s fetch/transform logic (that network +
+//! quirk pipeline stays in Pi; porting it is a separate wave). This generator consumes the
+//! **output** of that pipeline — the checked-in data files — which is what the spec's §8.4
+//! option (b/c) describes.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -61,16 +70,64 @@ fn repo_root() -> PathBuf {
 // gen-catalog
 // =============================================================================
 
-/// The fixture the catalog is derived from, relative to the repo root.
+/// The fixture record the provider metadata comes from, relative to the repo root.
 const FIXTURE: &str = "tests/fixtures/pi/cli/models.cases.jsonl";
 /// The record inside [`FIXTURE`] (its `fn` field).
 const RECORD: &str = "builtinCatalogFingerprint";
 /// The generated file, relative to the repo root.
 const OUTPUT: &str = "crates/pirust-coding-agent/src/catalog.rs";
-/// The one provider the slice carries — the only ported `api` adapter.
-const PROVIDER: &str = "anthropic";
-/// The `api` every model in the slice must declare, so everything it advertises can stream.
-const API: &str = "anthropic-messages";
+/// Real Pi's generated catalog data, relative to the repo root (the oracle checkout).
+const DATA_DIR: &str = "../pi/packages/ai/src/providers/data";
+
+/// Per-provider `api_key_env` — the env-var precedence order each provider's inherited
+/// api-key auth consults (`envApiKeyAuth(name, envVars)` args in the 0.84.2 provider
+/// sources). Not exposed on the runtime object, so this table is the generator's own
+/// checked-in capture of the `.ts` sources, verified this session. Providers absent here
+/// have custom/non-env auth resolution (bedrock IAM, cloudflare, vertex ADC, copilot,
+/// codex, kimi, openrouter oauth, xai) and get an empty env list, which matches that
+/// their last-resort env check is provider-specific (deferred to the auth wave).
+const API_KEY_ENV: &[(&str, &[&str])] = &[
+    ("ant-ling", &["ANT_LING_API_KEY"]),
+    ("anthropic", &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
+    ("azure-openai-responses", &["AZURE_OPENAI_API_KEY"]),
+    ("baseten", &["BASETEN_API_KEY"]),
+    ("cerebras", &["CEREBRAS_API_KEY"]),
+    ("deepseek", &["DEEPSEEK_API_KEY"]),
+    ("fireworks", &["FIREWORKS_API_KEY"]),
+    ("google", &["GEMINI_API_KEY"]),
+    ("groq", &["GROQ_API_KEY"]),
+    ("huggingface", &["HF_TOKEN"]),
+    ("minimax", &["MINIMAX_API_KEY"]),
+    ("minimax-cn", &["MINIMAX_CN_API_KEY"]),
+    ("mistral", &["MISTRAL_API_KEY"]),
+    ("moonshotai", &["MOONSHOT_API_KEY"]),
+    ("moonshotai-cn", &["MOONSHOT_API_KEY"]),
+    ("nvidia", &["NVIDIA_API_KEY"]),
+    ("openai", &["OPENAI_API_KEY"]),
+    ("opencode", &["OPENCODE_API_KEY"]),
+    ("opencode-go", &["OPENCODE_API_KEY"]),
+    ("qwen-token-plan", &["QWEN_TOKEN_PLAN_API_KEY"]),
+    ("qwen-token-plan-cn", &["QWEN_TOKEN_PLAN_CN_API_KEY"]),
+    ("qwen-token-plan-individual", &["QWEN_TOKEN_PLAN_API_KEY"]),
+    ("radius", &["RADIUS_API_KEY"]),
+    ("together", &["TOGETHER_API_KEY"]),
+    ("vercel-ai-gateway", &["AI_GATEWAY_API_KEY"]),
+    ("xiaomi", &["XIAOMI_API_KEY"]),
+    ("xiaomi-token-plan-ams", &["XIAOMI_TOKEN_PLAN_AMS_API_KEY"]),
+    ("xiaomi-token-plan-cn", &["XIAOMI_TOKEN_PLAN_CN_API_KEY"]),
+    ("xiaomi-token-plan-sgp", &["XIAOMI_TOKEN_PLAN_SGP_API_KEY"]),
+    ("zai", &["ZAI_API_KEY"]),
+    ("zai-coding-cn", &["ZAI_CODING_CN_API_KEY"]),
+];
+
+/// A provider's static metadata, from the oracle fingerprint's `providers` array.
+struct ProviderMeta {
+    id: String,
+    name: String,
+    base_url: Option<String>,
+    has_api_key_auth: bool,
+    has_oauth_auth: bool,
+}
 
 fn gen_catalog(args: &[String]) -> Result<()> {
     let check_only = match args {
@@ -80,8 +137,14 @@ fn gen_catalog(args: &[String]) -> Result<()> {
     };
 
     let root = repo_root();
-    let record = read_record(&root.join(FIXTURE))?;
-    let rendered = render(&record)?;
+    let meta = read_provider_metadata(&root.join(FIXTURE))?;
+    let models_by_provider = read_models(&root.join(DATA_DIR))?;
+    let mut rendered = render(&meta, &models_by_provider)?;
+    // The generator's own line-breaking is `rustfmt`-*informed* but not identical to a real
+    // `rustfmt` pass (edge cases: a one-entry compat over `fn_call_width`, an over-wide
+    // `base_url` string, an empty `vec!`). Running rustfmt on the emitted file makes the
+    // checked-in artifact canonical and `--check` idempotent regardless of those.
+    rendered = format_rust(&rendered)?;
 
     let output = root.join(OUTPUT);
     let current = std::fs::read_to_string(&output).unwrap_or_default();
@@ -97,6 +160,98 @@ fn gen_catalog(args: &[String]) -> Result<()> {
         .with_context(|| format!("write {}", output.display()))?;
     println!("{OUTPUT}: regenerated ({} bytes)", rendered.len());
     Ok(())
+}
+
+/// The `providers` array of the fingerprint record — every builtin provider's static shape.
+fn read_provider_metadata(path: &Path) -> Result<Vec<ProviderMeta>> {
+    let record = read_record(path)?;
+    let providers = record["providers"]
+        .as_array()
+        .with_context(|| format!("{RECORD}.providers is missing"))?;
+    let mut metas = Vec::with_capacity(providers.len());
+    for value in providers {
+        metas.push(ProviderMeta {
+            id: value["id"]
+                .as_str()
+                .with_context(|| format!("{RECORD}.providers[].id missing"))?
+                .to_string(),
+            name: value["name"]
+                .as_str()
+                .with_context(|| format!("{RECORD}.providers[].name missing"))?
+                .to_string(),
+            base_url: value["baseUrl"].as_str().map(str::to_string),
+            has_api_key_auth: value["hasApiKeyAuth"]
+                .as_bool()
+                .with_context(|| format!("{RECORD}.providers[].hasApiKeyAuth missing"))?,
+            has_oauth_auth: value["hasOauthAuth"]
+                .as_bool()
+                .with_context(|| format!("{RECORD}.providers[].hasOauthAuth missing"))?,
+        });
+    }
+    if metas.is_empty() {
+        bail!("{RECORD}.providers is empty");
+    }
+    Ok(metas)
+}
+
+/// Read every `<provider>.json` data file and flatten it the way `flattenModelCatalog` does:
+/// `Object.assign({}, ...Object.values(groups))` — merge all `{api: {modelId: Model}}`
+/// groups into one flat `{modelId: Model}` map per provider, in api-group order then
+/// insertion order.
+fn read_models(dir: &Path) -> Result<Vec<(String, Vec<Value>)>> {
+    if !dir.is_dir() {
+        bail!(
+            "{}: not a directory — the oracle checkout ../pi must be present (0.84.2)",
+            dir.display()
+        );
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("read {}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            // Only the per-provider catalog files; `.manifest.json` is the generator's
+            // integrity manifest, not a catalog.
+            path.extension().is_some_and(|e| e == "json")
+                && path.file_name().is_some_and(|n| n != ".manifest.json")
+        })
+        .collect();
+    files.sort();
+
+    let mut out = Vec::with_capacity(files.len());
+    for path in files {
+        let provider = path
+            .file_stem()
+            .expect("file stem")
+            .to_string_lossy()
+            .to_string();
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let value: Value =
+            serde_json::from_str(&text).with_context(|| format!("{}: not JSON", path.display()))?;
+        let groups = value
+            .as_object()
+            .with_context(|| format!("{}: not an object", path.display()))?;
+        // flattenModelCatalog: Object.assign({}, ...Object.values(groups))
+        let mut flat: Vec<Value> = Vec::new();
+        for group in groups.values() {
+            let models = group
+                .as_object()
+                .with_context(|| format!("{}: api group is not an object", path.display()))?;
+            for model in models.values() {
+                flat.push(model.clone());
+            }
+        }
+        if flat.is_empty() {
+            bail!("{}: no models", path.display());
+        }
+        out.push((provider, flat));
+    }
+    println!(
+        "gen-catalog: {} providers loaded from {}",
+        out.len(),
+        dir.display()
+    );
+    Ok(out)
 }
 
 /// The single [`RECORD`] line of the fixture, as JSON.
@@ -130,6 +285,7 @@ struct Needs {
     thinking_level_map: bool,
     compat_object: bool,
     header_object: bool,
+    cost_tier: bool,
 }
 
 impl Needs {
@@ -138,31 +294,62 @@ impl Needs {
     }
 }
 
-/// The whole of `catalog.rs`, ready to write. Deterministic: every value and every ordering
-/// comes from `record`.
-fn render(record: &Value) -> Result<String> {
-    let provider = &record[PROVIDER];
-    let name = provider["name"]
-        .as_str()
-        .with_context(|| format!("{RECORD}.{PROVIDER}.name is missing"))?;
-    let base_url = provider["baseUrl"]
-        .as_str()
-        .with_context(|| format!("{RECORD}.{PROVIDER}.baseUrl is missing"))?;
-    let models = provider["models"]
-        .as_array()
-        .with_context(|| format!("{RECORD}.{PROVIDER}.models is missing"))?;
-    if models.is_empty() {
-        bail!("{RECORD}.{PROVIDER}.models is empty");
+/// Run `rustfmt` over the emitted catalog source so the checked-in file is canonical.
+///
+/// The workspace's `rustfmt.toml`/`Cargo.toml` settings apply (imports_layout Mixed, etc.);
+/// the file parses standalone so `--edition 2021` suffices. Fall back to the unformatted
+/// text if rustfmt is unavailable rather than hard-failing the whole task.
+fn format_rust(source: &str) -> Result<String> {
+    let bin = std::process::Command::new("rustfmt")
+        .arg("--edition")
+        .arg("2021")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match bin {
+        Ok(child) => child,
+        Err(error) => {
+            println!("gen-catalog: rustfmt unavailable ({error}); emitting unformatted text");
+            return Ok(source.to_string());
+        }
+    };
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(source.as_bytes())
+        .context("write to rustfmt stdin")?;
+    let output = child.wait_with_output().context("wait for rustfmt")?;
+    if !output.status.success() {
+        bail!(
+            "rustfmt failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
-    let pi_version = record["piVersion"].as_str().unwrap_or("unknown");
+    String::from_utf8(output.stdout).context("rustfmt output is not UTF-8")
+}
 
-    // The models first: they decide the `use` list and which helpers are emitted.
+/// The whole of `catalog.rs`, ready to write. Deterministic: every value and every ordering
+/// comes from the data files and the fingerprint record.
+fn render(metas: &[ProviderMeta], models_by_provider: &[(String, Vec<Value>)]) -> Result<String> {
+    // Models first: they decide the `use` list and which helpers are emitted.
     let mut needs = Needs::default();
-    let mut models_fn = String::new();
-    render_models_fn(&mut models_fn, models, &mut needs)?;
+    let mut providers_fn = String::new();
+    let mut total_models = 0usize;
+    for meta in metas {
+        let models = models_by_provider
+            .iter()
+            .find(|(id, _)| id == &meta.id)
+            .map(|(_, models)| models.as_slice())
+            .unwrap_or(&[]);
+        total_models += models.len();
+        render_provider(&mut providers_fn, meta, models, &mut needs)?;
+    }
 
     let mut out = String::new();
-    render_header(&mut out, pi_version, models.len());
+    render_header(&mut out, metas.len(), total_models);
     out.push('\n');
     let mut types = vec![
         "Api",
@@ -172,6 +359,9 @@ fn render(record: &Value) -> Result<String> {
         "ModelCostRates",
         "ProviderId",
     ];
+    if needs.cost_tier {
+        types.push("ModelCostTier");
+    }
     if needs.thinking_level_map {
         types.push("ThinkingLevelMap");
     }
@@ -185,9 +375,8 @@ fn render(record: &Value) -> Result<String> {
         "crate::models",
         &["ModelCatalog", "ProviderDescriptor"],
     ));
-    render_catalog_fn(&mut out, models.len());
-    render_provider_fn(&mut out, name, base_url);
-    out.push_str(&models_fn);
+    render_catalog_fn(&mut out, metas);
+    out.push_str(&providers_fn);
     render_helpers(&mut out, &needs);
     Ok(out)
 }
@@ -203,111 +392,146 @@ fn use_list(path: &str, items: &[&str]) -> String {
     format!("use {path}::{{\n    {joined},\n}};\n")
 }
 
-fn render_header(out: &mut String, pi_version: &str, model_count: usize) {
-    // Kept in the intent of the hand-written stub this replaces.
+fn render_header(out: &mut String, provider_count: usize, model_count: usize) {
     out.push_str(&format!(
         "//! The builtin model catalog — **GENERATED, do not edit**.\n\
          //!\n\
-         //! Run `cargo xtask gen-catalog` to regenerate. Every literal below comes from the\n\
-         //! `{RECORD}` record of\n\
-         //! `{FIXTURE}`, captured from real Pi {pi_version}.\n\
+         //! Run `cargo xtask gen-catalog` to regenerate. Every literal below comes from\n\
+         //! real Pi 0.84.2's generated catalog data (`@earendil-works/pi-ai/providers/data/*.json`,\n\
+         //! sha256-pinned by `.manifest.json`) plus the `{RECORD}` record of `{FIXTURE}`.\n\
          //!\n\
-         //! Pi imports a generated 36-provider / 1062-model table from\n\
-         //! `@earendil-works/pi-ai/providers/all`. feat-008 owns the equivalent generator; until it\n\
-         //! lands, this file carries the **anthropic-only slice** — `{API}` is the only ported\n\
-         //! api adapter, so `{PROVIDER}` is the only provider whose {model_count} models can actually\n\
-         //! stream, and spec §9.5's \"override the builtin `baseUrl`\" shape keeps working.\n\
+         //! {provider_count} providers / {model_count} models. Provider `name`/`baseUrl`/auth flags are the\n\
+         //! fingerprint's `providers` array; `api_key_env` is the `envApiKeyAuth(name, [ENV])`\n\
+         //! argument table in `xtask/src/main.rs` (the 0.84.2 provider sources).\n\
          //!\n\
-         //! # Why one [`ProviderDescriptor`] and not 36\n\
-         //!\n\
-         //! The fingerprint enumerates 36 provider ids but reduces every non-{PROVIDER} one to just\n\
-         //! its id — no name, no `baseUrl`, no models. `tests/models_golden.rs` rebuilds those 35 as\n\
-         //! empty-model shells so the fixture's `totalProviders` stays exact; that is a **test-side**\n\
-         //! construction and deliberately not repeated here. Shells are model-invisible, so\n\
-         //! `get_models`, `get_available`, `list_models` and every resolver in [`crate::models`]\n\
-         //! behave identically without them — but they *are* visible to\n\
-         //! `ModelRuntime::provider_ids`, `get_provider` and `configured_providers`, where they\n\
-         //! would advertise 35 providers with an invented name, no `baseUrl` and nothing to stream.\n\
-         //!\n\
-         //! Delete this module when feat-008's generator arrives.\n",
+         //! Pi builds this table at build time via `scripts/generate-models.ts` fetching\n\
+         //! models.dev / OpenRouter / Vercel AI Gateway; here the generator consumes that\n\
+         //! pipeline's **output** (the data files) rather than re-running the network fetch.\n\
+         //! A model's `api` field names the wire protocol that streams it; providers whose\n\
+         //! `api` adapter is not yet ported advertise models that cannot stream until the\n\
+         //! feat-008 adapter waves land (matching real Pi, which advertises all of them).\n"
     ));
 }
 
-fn render_catalog_fn(out: &mut String, model_count: usize) {
+fn render_catalog_fn(out: &mut String, metas: &[ProviderMeta]) {
     out.push_str(&format!(
-        "\n/// The builtin catalog `ModelRuntime::create` is handed — one provider, {model_count} models.\n\
+        "\n/// The builtin catalog `ModelRuntime::create` is handed — {provider_count} providers.\n\
          ///\n\
          /// A plain constructor rather than a `static`: [`Model`] and [`ProviderDescriptor`] are\n\
          /// `String`/`Vec`/`Value`-shaped, so no `const` form exists, and `ModelRuntime::create`\n\
          /// takes the catalog **by value** — a `LazyLock` would only add a clone of the same\n\
          /// allocations. There is no parsing here at any point, which is the whole point of\n\
-         /// generating Rust instead of embedding the fixture JSON.\n\
+         /// generating Rust instead of embedding the data JSON.\n\
          pub fn builtin_catalog() -> ModelCatalog {{\n    \
-         ModelCatalog::new(vec![anthropic_provider()])\n}}\n",
+         ModelCatalog::new(vec![\n",
+        provider_count = metas.len(),
     ));
+    for meta in metas {
+        let _ = writeln!(out, "        {}_provider(),", rust_ident(&meta.id));
+    }
+    out.push_str("    ])\n}\n");
 }
 
-fn render_provider_fn(out: &mut String, name: &str, base_url: &str) {
+/// A provider's `fn <id>_provider() -> ProviderDescriptor`.
+fn render_provider(
+    out: &mut String,
+    meta: &ProviderMeta,
+    models: &[Value],
+    needs: &mut Needs,
+) -> Result<()> {
+    let provider_id = &meta.id;
+    let env = API_KEY_ENV
+        .iter()
+        .find(|(id, _)| id == provider_id)
+        .map(|(_, env)| *env)
+        .unwrap_or(&[]);
+    let ident = rust_ident(provider_id);
     out.push_str(&format!(
-        "\n/// Pi's builtin `{PROVIDER}` provider.\n\
+        "\n/// Pi's builtin `{provider_id}` provider — {} models.\n\
          ///\n\
-         /// `id`, `name`, `base_url` and `models` are the fingerprint's. The three auth fields are\n\
-         /// not in that record — it captures the catalog's *shape*, not its auth wiring — so they\n\
-         /// come from the oracle-verified construction in `tests/models_golden.rs`:\n\
-         /// [`pirust_ai::auth::ANTHROPIC_API_KEY_ENV_PRECEDENCE`] is the env order\n\
-         /// `ModelRuntime::check_auth`'s last resort walks, api-key auth is inherited, and no\n\
-         /// oauth method is modelled (feat-005 has no radius/oauth flow).\n\
-         fn anthropic_provider() -> ProviderDescriptor {{\n    \
+         /// `name`/`baseUrl`/auth flags are the fingerprint's `providers` array; `api_key_env`\n\
+         /// is the `envApiKeyAuth` table in the generator. `base_url: None` for providers whose\n\
+         /// `baseUrl` is per-request (bedrock, azure) — matching the oracle.\n\
+         fn {ident}_provider() -> ProviderDescriptor {{\n    \
          ProviderDescriptor {{\n        \
          id: {}.to_string(),\n        \
          name: {}.to_string(),\n        \
-         base_url: Some({}.to_string()),\n        \
-         models: anthropic_models(),\n        \
-         api_key_env: pirust_ai::auth::ANTHROPIC_API_KEY_ENV_PRECEDENCE\n            \
-         .iter()\n            \
-         .map(|name| (*name).to_string())\n            \
-         .collect(),\n        \
-         has_api_key_auth: true,\n        \
-         has_oauth_auth: false,\n    \
+         base_url: {},\n        \
+         models: {ident}_models(),\n        \
+         api_key_env: {},\n        \
+         has_api_key_auth: {},\n        \
+         has_oauth_auth: {},\n    \
          }}\n}}\n",
-        rust_str(PROVIDER),
-        rust_str(name),
-        rust_str(base_url),
+        models.len(),
+        rust_str(provider_id),
+        rust_str(&meta.name),
+        match &meta.base_url {
+            Some(url) => format!("Some({}.to_string())", rust_str(url)),
+            None => "None".to_string(),
+        },
+        env_list(env),
+        meta.has_api_key_auth,
+        meta.has_oauth_auth,
     ));
+    render_models_fn(out, provider_id, models, needs)?;
+    Ok(())
 }
 
-fn render_models_fn(out: &mut String, models: &[Value], needs: &mut Needs) -> Result<()> {
+/// `api_key_env: vec![...]` — empty for providers with custom/non-env auth.
+fn env_list(env: &[&str]) -> String {
+    if env.is_empty() {
+        "Vec::new()".to_string()
+    } else {
+        format!(
+            "vec![{}]",
+            env.iter()
+                .map(|name| rust_str(name).to_string() + ".to_string()")
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn render_models_fn(
+    out: &mut String,
+    provider_id: &str,
+    models: &[Value],
+    needs: &mut Needs,
+) -> Result<()> {
+    let ident = rust_ident(provider_id);
     out.push_str(&format!(
-        "\n/// The {} builtin `{PROVIDER}` models, in catalog order — which is load-bearing: it seeds\n\
-         /// `getModels()`' order and therefore `availableModels[0]` in step 4 of\n\
+        "\n/// The {} builtin `{provider_id}` models, in catalog order — which is load-bearing: it\n\
+         /// seeds `getModels()`' order and therefore `availableModels[0]` in step 4 of\n\
          /// `find_initial_model`.\n\
-         fn anthropic_models() -> Vec<Model> {{\n    \
+         fn {ident}_models() -> Vec<Model> {{\n    \
          vec![\n",
         models.len(),
     ));
     for (index, model) in models.iter().enumerate() {
-        render_model(out, model, index, needs)?;
+        render_model(out, provider_id, model, index, needs)?;
     }
     out.push_str("    ]\n}\n");
     Ok(())
 }
 
-fn render_model(out: &mut String, model: &Value, index: usize, needs: &mut Needs) -> Result<()> {
-    let at = |field: &str| format!("{RECORD}.{PROVIDER}.models[{index}].{field}");
+fn render_model(
+    out: &mut String,
+    provider_id: &str,
+    model: &Value,
+    index: usize,
+    needs: &mut Needs,
+) -> Result<()> {
+    let at = |field: &str| format!("{provider_id}.models[{index}].{field}");
 
     let id = model["id"].as_str().with_context(|| at("id"))?;
     let name = model["name"].as_str().with_context(|| at("name"))?;
     let api = model["api"].as_str().with_context(|| at("api"))?;
-    if api != API {
-        bail!(
-            "{}: {api:?} — the slice may only carry {API:?} models, everything else would \
-             advertise a model that cannot stream",
-            at("api"),
-        );
-    }
     let provider = model["provider"].as_str().with_context(|| at("provider"))?;
-    if provider != PROVIDER {
-        bail!("{}: {provider:?}, expected {PROVIDER:?}", at("provider"));
+    if provider != provider_id {
+        bail!(
+            "{}: model.provider {provider:?} != data file {provider_id:?}",
+            at("provider")
+        );
     }
     let base_url = model["baseUrl"].as_str().with_context(|| at("baseUrl"))?;
     let reasoning = model["reasoning"]
@@ -336,7 +560,7 @@ fn render_model(out: &mut String, model: &Value, index: usize, needs: &mut Needs
         needs,
     )?;
     render_input(out, &model["input"], &at("input"))?;
-    render_cost(out, &model["cost"], &at("cost"))?;
+    render_cost(out, &model["cost"], &at("cost"), needs)?;
     let _ = writeln!(
         out,
         "            context_window: {},",
@@ -418,7 +642,7 @@ fn render_input(out: &mut String, value: &Value, at: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_cost(out: &mut String, value: &Value, at: &str) -> Result<()> {
+fn render_cost(out: &mut String, value: &Value, at: &str, needs: &mut Needs) -> Result<()> {
     let cost = value
         .as_object()
         .with_context(|| format!("{at}: not an object"))?;
@@ -446,9 +670,58 @@ fn render_cost(out: &mut String, value: &Value, at: &str) -> Result<()> {
     out.push_str("                },\n");
     match cost.get("tiers") {
         None | Some(Value::Null) => out.push_str("                tiers: None,\n"),
-        // No captured anthropic model has tiers; the fixture is the contract, so refuse rather
-        // than emit an untested shape.
-        Some(_) => bail!("{at}.tiers: cost tiers are not emitted yet — extend gen-catalog"),
+        Some(Value::Array(tiers)) => {
+            if tiers.is_empty() {
+                bail!("{at}.tiers: empty array");
+            }
+            needs.cost_tier = true;
+            out.push_str("                tiers: Some(vec![\n");
+            for (index, tier) in tiers.iter().enumerate() {
+                let tier_at = format!("{at}.tiers[{index}]");
+                let tier = tier
+                    .as_object()
+                    .with_context(|| format!("{tier_at}: not an object"))?;
+                for key in tier.keys() {
+                    if !matches!(
+                        key.as_str(),
+                        "input" | "output" | "cacheRead" | "cacheWrite" | "inputTokensAbove"
+                    ) {
+                        bail!("{tier_at}: unknown tier field {key:?}");
+                    }
+                }
+                out.push_str("                    ModelCostTier {\n");
+                out.push_str("                        rates: ModelCostRates {\n");
+                for (json_key, field) in [
+                    ("input", "input"),
+                    ("output", "output"),
+                    ("cacheRead", "cache_read"),
+                    ("cacheWrite", "cache_write"),
+                ] {
+                    let rate = tier
+                        .get(json_key)
+                        .and_then(Value::as_f64)
+                        .with_context(|| format!("{tier_at}.{json_key}: not a number"))?;
+                    let _ = writeln!(
+                        out,
+                        "                            {field}: {},",
+                        rust_f64(rate)
+                    );
+                }
+                out.push_str("                        },\n");
+                let _ = writeln!(
+                    out,
+                    "                        input_tokens_above: {},",
+                    rust_u64(
+                        &tier["inputTokensAbove"],
+                        &format!("{tier_at}.inputTokensAbove")
+                    )?
+                );
+                out.push_str("                    },\n");
+            }
+            out.push_str("                ]),\n");
+        }
+        // The data is the contract, so refuse rather than emit an untested shape.
+        Some(_) => bail!("{at}.tiers: expected an array — extend gen-catalog"),
     }
     out.push_str("            },\n");
     Ok(())
@@ -545,6 +818,11 @@ fn rust_str(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// A Rust identifier from a kebab-case provider id (`amazon-bedrock` → `amazon_bedrock`).
+fn rust_ident(value: &str) -> String {
+    value.replace('-', "_")
 }
 
 /// An `f64` literal. `{:?}` is the shortest round-tripping form *and* always keeps a decimal

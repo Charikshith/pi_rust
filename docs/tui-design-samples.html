@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Rust TUI — Customer Design Samples</title>
+<style>
+:root{color-scheme:dark;--bg:#111318;--panel:#191c23;--panel2:#20242d;--line:#343a46;--text:#e8ebf0;--muted:#9ca5b3;--blue:#7db7ff;--green:#8bd5a5;--yellow:#f2ca79;--red:#ff8d8d;--purple:#c6a7ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:32px 20px 80px}h1,h2,h3{line-height:1.2}h1{font-size:32px}h2{margin-top:42px;border-bottom:1px solid var(--line);padding-bottom:10px}p,li{color:#c8ced8}.notice{border:1px solid var(--red);background:#321f25;padding:16px;border-radius:8px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px}.sample{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}.sample h3{margin:0;padding:12px 16px;background:var(--panel2);font-size:15px}.screen{min-height:245px;padding:16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;white-space:pre-wrap}.dim{color:var(--muted)}.user{color:var(--blue)}.assistant{color:var(--text)}.tool{color:var(--yellow)}.ok{color:var(--green)}.error{color:var(--red)}.status{border-top:1px solid var(--line);padding:10px 16px;color:var(--muted);font:12px ui-monospace,monospace}.check{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}.item{padding:12px 14px;background:var(--panel);border-left:3px solid var(--blue);border-radius:5px}.item strong{display:block;color:var(--text)}code{color:var(--purple)}table{border-collapse:collapse;width:100%;background:var(--panel)}td,th{border:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{color:var(--blue)}@media(max-width:600px){main{padding:20px 12px}h1{font-size:25px}}
+</style>
+</head>
+<body><main>
+<h1>Pi Rust TUI — Customer Design Samples</h1>
+<p>This is a behavior and information-design reference, not a final visual theme. A production TUI must remain useful during normal work, slow model responses, tool execution, errors, cancellation, and small terminal sizes.</p>
+<div class="notice"><strong>Observed blocker:</strong> submitting <code>hi</code> panics with “Cannot start a runtime from within a runtime.” The first customer requirement is zero panic on the primary interaction path.</div>
+
+<h2>1. First-run / ready state</h2>
+<div class="grid">
+<section class="sample"><h3>Empty workspace</h3><div class="screen"><span class="dim">Pi Rust · ~/project</span>
+
+<span class="assistant">Ready to help with this project.</span>
+<span class="dim">Model: Qwen3.5-0.8B-Q8_0.gguf · Provider: local</span>
+<span class="dim">Tools: read, write, edit, bash, grep, find, ls</span>
+
+<span class="user">› </span><span class="dim">Ask a question or describe a change…</span></div><div class="status">Enter submit · Ctrl+C cancel · /help commands · 0 tokens</div></section>
+<section class="sample"><h3>Missing configuration</h3><div class="screen"><span class="error">Could not start a model</span>
+
+No usable model is configured.
+
+<span class="dim">Add a provider in:</span>
+  ~/.pirust/agent/models.json
+
+<span class="tool">[Open setup help]  [Quit]</span></div><div class="status">Actionable error · no stack trace · exit remains available</div></section>
+</div>
+
+<h2>2. Normal conversation</h2>
+<div class="grid">
+<section class="sample"><h3>Streaming response</h3><div class="screen"><span class="user">› Explain this repository</span>
+
+<span class="assistant">This repository is a Rust port of Pi. It contains:</span>
+<span class="assistant">• pirust-ai for models and provider streams</span>
+<span class="assistant">• pirust-agent-core for the agent loop</span>
+<span class="assistant">• pirust-tools for file and shell tools</span>
+
+<span class="dim">▌</span></div><div class="status">assistant · streaming · Esc cancel · 312 tokens</div></section>
+<section class="sample"><h3>Thinking enabled</h3><div class="screen"><span class="dim">Thinking</span>
+<span class="dim">I need to inspect the project structure before proposing changes…</span>
+
+<span class="assistant">I found three relevant modules. The smallest safe change is…</span></div><div class="status">thinking collapsed by default · press Ctrl+O to expand</div></section>
+</div>
+
+<h2>3. Tool execution and safety</h2>
+<div class="grid">
+<section class="sample"><h3>Read-only tool</h3><div class="screen"><span class="user">› Find where the TUI starts</span>
+
+<span class="tool">◇ grep</span> <span class="dim">interactive_mode.rs</span>
+<span class="dim">  472: run_interactive_mode</span>
+<span class="dim">  500: InteractiveMode::new</span>
+
+<span class="assistant">The TUI starts from main.rs when stdin and stdout are terminals.</span></div><div class="status">tool completed · 2 matches · 0.4s</div></section>
+<section class="sample"><h3>Destructive tool approval</h3><div class="screen"><span class="tool">◇ bash wants to run</span>
+
+<span class="dim">rm -rf target/cache</span>
+
+<span class="error">This command can delete files.</span>
+
+<span class="tool">[Run once]  [Always allow]  [Deny]</span></div><div class="status">focus: Run once · Tab changes action · Enter confirms · Esc denies</div></section>
+<section class="sample"><h3>Tool failure</h3><div class="screen"><span class="tool">◇ bash · failed</span>
+<span class="error">command exited with code 1</span>
+
+<span class="dim">error: permission denied</span>
+
+<span class="assistant">The command failed without changing the file. I can try a safer alternative.</span></div><div class="status">failure is visible · agent can continue · raw trace hidden behind details</div></section>
+</div>
+
+<h2>4. Session, context, and recovery</h2>
+<div class="grid">
+<section class="sample"><h3>Long context / compaction</h3><div class="screen"><span class="yellow">Context nearly full</span>
+
+Used: 91% · 182K / 200K tokens
+
+<span class="tool">[Compact now]  [Continue anyway]  [Cancel]</span>
+
+<span class="dim">Compaction preserves the latest tool results and user intent.</span></div><div class="status">progress shown · no silent data loss · cancellation safe</div></section>
+<section class="sample"><h3>Interrupted request</h3><div class="screen"><span class="user">› Refactor the parser</span>
+
+<span class="assistant">I started inspecting the parser…</span>
+
+<span class="yellow">Request cancelled</span>
+<span class="dim">No files were changed.</span>
+
+<span class="user">› </span></div><div class="status">cancelled · session saved · prompt remains usable</div></section>
+<section class="sample"><h3>Session picker</h3><div class="screen"><span class="assistant">Resume a session</span>
+
+<span class="user">› 1  Today  Fix TUI runtime panic</span>
+<span class="dim">  2  Yesterday  Add catalog generator</span>
+<span class="dim">  3  Aug 21    Explore agent harness</span>
+
+<span class="dim">↑↓ select · Enter open · Esc new session</span></div><div class="status">title · cwd · modified time · model · searchable</div></section>
+</div>
+
+<h2>5. Current implementation reference</h2>
+<section class="sample" style="max-width:760px"><h3>Observed slash-command palette</h3><div style="padding:16px;background:#111318"><img src="tui-current-command-palette.png" alt="Current Pi Rust TUI slash-command autocomplete showing restart, resume, resumeall, refresh-model-list, and remote-release commands" style="display:block;max-width:100%;height:auto;border:1px solid var(--line)"></div><div class="status">Observed issue: the palette is visually cramped near the top edge; command descriptions need a stable column, scrolling, and a clear selected-row highlight.</div></section>
+
+<h2>6. Slash commands and selected model</h2>
+<div class="grid">
+<section class="sample"><h3>Persistent status corner</h3><div class="screen"><span class="dim">cwd: ~/project · session: abc123</span>
+
+<span class="assistant">Conversation content appears here…</span>
+
+<span class="dim">────────────────────────────────────────</span>
+<span class="blue">Model</span>  anthropic / claude-sonnet-4-6
+<span class="dim">Mode</span>   reasoning: high · context: 42K / 200K · $0.18
+<span class="dim">Tools</span>  7 enabled · local session · connected
+<span class="user">› </span></div><div class="status">The selected model is always visible without opening a menu.</div></section>
+<section class="sample"><h3>Slash-command autocomplete</h3><div class="screen"><span class="user">› /mo</span>
+
+<span class="tool">/model</span>       Select provider and model
+<span class="dim">/models</span>      List available models
+<span class="dim">/mode</span>        Change interaction mode
+<span class="dim">/compact</span>    Compact conversation context
+<span class="dim">/resume</span>     Open session picker
+<span class="dim">/help</span>       Show all commands
+
+<span class="dim">↑↓ select · Tab complete · Enter run · Esc close</span></div><div class="status">Palette filters as the user types; selected row is clearly highlighted.</div></section>
+<section class="sample"><h3>Model picker</h3><div class="screen"><span class="assistant">Select model</span>
+
+<span class="user">› anthropic / claude-sonnet-4-6</span>
+<span class="dim">  anthropic / claude-opus-4-6       1M  reasoning</span>
+<span class="dim">  openai / gpt-5                  400K  reasoning</span>
+<span class="dim">  local / Qwen3.5-0.8B             32K  local</span>
+
+<span class="dim">Search: claude · ↑↓ move · Enter select · Esc cancel</span></div><div class="status">Show provider, model id, context window, reasoning support, and local/remote status.</div></section>
+</div>
+
+<h2>7. Required product details</h2>
+<div class="check">
+<div class="item"><strong>Runtime stability</strong> No panic paths; async work must not call <code>block_on</code> inside an existing Tokio runtime.</div>
+<div class="item"><strong>Input model</strong> Clear focus, editable prompt, multiline input, paste handling, history, cursor movement, Ctrl+C, Ctrl+D, Esc.</div>
+<div class="item"><strong>Response state</strong> Distinguish thinking, streaming, tool call, waiting, completed, failed, cancelled, and queued.</div>
+<div class="item"><strong>Tool safety</strong> Show exact command, working directory, risk, approval choice, timeout, exit code, and output truncation.</div>
+<div class="item"><strong>File safety</strong> Preview diffs before writes, identify changed paths, allow reject/accept, and never hide partial failure.</div>
+<div class="item"><strong>Runtime identity</strong> Always show the working directory (cwd), session id, selected provider/model, reasoning level, context usage, token/cost estimate, and connection state.</div>
+<div class="item"><strong>Recovery</strong> Retry, cancel, resume, compact, continue after tool failure, and preserve session state.</div>
+<div class="item"><strong>Responsive layout</strong> Work at 80×24, 120×40, and wide terminals; no clipped prompts or unreadable status bars.</div>
+<div class="item"><strong>Accessibility</strong> Keyboard-only operation, visible focus, no color-only meaning, readable contrast, reduced animation option.</div>
+<div class="item"><strong>Observability</strong> Optional debug panel/log file, request id, elapsed time, and copyable error details—never a raw panic by default.</div>
+<div class="item"><strong>Configuration UX</strong> Explain missing credentials, invalid model, unavailable provider, and local-server setup with concrete paths.</div>
+<div class="item"><strong>Test coverage</strong> Golden event rendering plus interactive tests for submit, cancel, tool approval, resize, error, and runtime shutdown.</div>
+</div>
+
+<h2>8. Acceptance bar before calling it customer-ready</h2>
+<table><tr><th>Area</th><th>Minimum acceptance</th></tr>
+<tr><td>First prompt</td><td>Typing and submitting a prompt never panics and produces visible progress within one second.</td></tr>
+<tr><td>Async architecture</td><td>The UI event loop stays responsive while the model runs; no nested runtime or blocking executor call on the UI thread.</td></tr>
+<tr><td>Errors</td><td>Every expected failure is an inline, actionable message with retry/cancel guidance.</td></tr>
+<tr><td>Tools</td><td>Destructive operations require a clear approval; edits show a diff; output cannot permanently destroy the layout.</td></tr>
+<tr><td>Sessions</td><td>Restarting the process preserves the conversation and makes recovery discoverable.</td></tr>
+<tr><td>Small terminals</td><td>80×24 remains usable, with scrolling and no essential information hidden.</td></tr>
+<tr><td>Verification</td><td>Automated tests cover the state transitions, not only individual widgets.</td></tr></table>
+</main></body></html>
