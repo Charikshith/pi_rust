@@ -32,14 +32,16 @@ porting feat-008. This is a distinct prerequisite wave:
 1. `gen-printmode-oracle`: NODE_NO_WARNINGS in its child harvests + regenerate
    printmode fixtures (large drift).
 2. **v4 session port (BIG)** — 0.84.2 replaced the v3 tree JSONL with a
-   mutation-log format (`harness/session/{state,jsonl/{codec,storage,repo}}.ts`):
-   header `{kind:"header",version:4,id,createdAt,cwd,parentSessionId?,metadata?}`,
-   then `seq`-numbered mutations of kinds `entry`/`record`/`lane`/`fact`, lanes,
-   open-operation records, atomic torn-tail repair, `JsonlSessionRepo`
-   (create/open/list/fork) + `SessionState` (was deferred in feat-003). The Rust
-   `SessionStorage` trait (tree) must become the v4 storage trait; `Session`,
-   `AgentHarness`, `memory_storage`, `jsonl_storage`, coding-agent `session.rs`
-   all follow. ~1.4K LOC of new Pi source + the whole Rust replacement.
+   mutation-log format. DONE so far (commit a352516): `harness/session/v4/`
+   types.rs (Entry/LaneRecord/SessionMutation/records/queries) + state.rs
+   (SessionState replay) + codec.rs (header/mutation byte format), oracle-
+   verified byte-identical against Pi's real codec.ts (25-record fixture,
+   `v4_codec_golden.rs`). STILL TO GO: JsonlSessionStorage (storage.ts incl.
+   torn-tail repair + atomic publish), JsonlSessionRepo (repo.ts:
+   create/open/list/fork, session-id validation, dir naming), v4 `Session`/
+   `memory.ts`/`context.ts`, then the v3→v4 replacement of the SessionStorage
+   trait + harness + coding-agent session.rs wiring, then rework
+   `gen-agent-oracle` against the v4 APIs.
 3. `gen-agent-oracle` rework against the v4 session APIs once the port lands.
 
 ## feat-008 waves (on the 0.84.2 baseline)
