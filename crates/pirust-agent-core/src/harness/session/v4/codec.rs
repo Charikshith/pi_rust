@@ -560,6 +560,7 @@ pub struct DirEntry {
     pub kind: String, // "file" | "directory" | "symlink"
     pub name: String,
     pub path: String,
+    pub mtime_ms: i64,
 }
 
 // ===========================================================================

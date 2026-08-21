@@ -1190,3 +1190,47 @@ session-id validation `SESSION_ID_PATTERN`, cwd dir naming `--...--`,
 `sessionFileName` timestamp_ id.jsonl), then v4 `Session`/`memory.ts`/`context.ts`,
 then the v3→v4 trait swap in harness + coding-agent session.rs, then
 `gen-agent-oracle` rework, then `gen-printmode-oracle` + printmode regen.
+
+## 2026-08-21 — v4 session port step 3: JsonlSessionRepo + Session DONE (oracle-verified)
+
+**`JsonlSessionRepo` (repo.ts) ported to `crates/pirust-agent-core/src/harness/session/v4/repo.rs`:**
+- `create`/`open`/`list`/`fork`/`delete` matching repo.ts line-for-line; `Session`
+  facade in `v4/session.rs` (view/append/query helpers over `Arc<JsonlSessionStorage>`,
+  `IdGenerator` trait defaulting to uuidv7, `assert_valid_limit`/`assert_valid_cursor`
+  validation no-ops, `assert_json_serializable`).
+- Session-id validation = Pi's `SESSION_ID_PATTERN`:
+  `^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$` → `invalid_payload` with Pi's exact
+  message (alphanumeric, '-', '_', '.', start/end alphanumeric).
+- cwd-encoded directory naming `--<cwd stripped of leading separator, / : → ->--`,
+  file naming `<ISO-timestamp with : . → ->>_<id>.jsonl` (custom civil-from-days
+  implementation, no chrono dep — matches JS Date toISOString).
+- `list` reads 1 header line (`readTextLines maxLines:1`), **skips unparseable
+  files** (mirrors Pi: malformed header → skip, no throw), sorts by modifiedAt desc.
+- `open` re-checks `exists` → `not_found` "Session not found: {id}", then header id
+  match → `invalid_entry` "Session id does not match header: {id}".
+- Same-process create/fork race guard: `activeCreateDestinations` Set keyed by
+  `cwd\0id` → `already_exists`.
+- `file_result` helper mirrors errors.ts: not_found vs storage codes.
+- `codec.rs`: `DirEntry` gained `mtime_ms` (needed for list sort parity — Pi's
+  `listDir` returns FileInfo with mtimeMs).
+
+**Oracle:** `scripts/gen-v4-repo-oracle.mjs` drives Pi's REAL `JsonlSessionRepo` +
+`Session` against a byte-recording mock FS → 10 scenarios (create-metadata,
+invalid-id, duplicate-id, shared-id-different-cwd, create-append-reopen,
+list-skips-malformed, fork-tree, open-not-found, open-id-mismatch, delete).
+Fixture `tests/fixtures/pi/agent/v4/repo.cases.jsonl`; timestamps → 0,
+ISO filename prefixes → `<TS>`, uuidv7 → `<UUID>` (deterministic across runs).
+`--check` wired into init.sh, gated by `v4_repo_golden.rs` (10 tests).
+**The oracle caught 2 mock-FS bugs in the capture script itself** (missing
+dir-name registration on write + non-recursive createDir) — after fixing the
+mock, the fixture reflects real Pi behavior (list all → both shared ids,
+list-skips-malformed → only valid).
+
+**Gate:** fmt clean, clippy -D warnings clean, `cargo test --workspace` green
+except the same 3 pre-existing env-polluted pirust-tools find tests.
+`gen-v4-session-oracle --check` (25), `gen-v4-storage-oracle --check` (8),
+`gen-v4-repo-oracle --check` (10) all green + deterministic.
+
+**Next (unchanged):** v4 `memory.ts`/`context.ts`, then the v3→v4 trait swap in
+harness + coding-agent session.rs, then `gen-agent-oracle` rework, then
+`gen-printmode-oracle` + printmode regen.

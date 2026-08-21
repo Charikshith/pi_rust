@@ -1126,6 +1126,29 @@ pub struct JsonlSessionMetadata {
     pub metadata: Option<serde_json::Map<String, Value>>,
 }
 
+/// `JsonlSessionRepoOptions` (jsonl/types.ts:26-31).
+#[derive(Debug, Clone)]
+pub struct JsonlSessionRepoOptions {
+    /// Root containing coding-agent-compatible cwd-encoded session directories.
+    pub sessions_root: String,
+}
+
+/// `JsonlSessionCreateOptions` (jsonl/types.ts:33-36) — `SessionCreateOptions` +
+/// `cwd` + opaque `metadata`.
+#[derive(Debug, Clone, Default)]
+pub struct JsonlSessionCreateOptions {
+    pub id: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub cwd: String,
+    pub metadata: Option<serde_json::Map<String, Value>>,
+}
+
+/// `JsonlSessionListOptions` (jsonl/types.ts:38-40).
+#[derive(Debug, Clone, Default)]
+pub struct JsonlSessionListOptions {
+    pub cwd: Option<String>,
+}
+
 /// Error helper for the v4 session layer (types.ts:360-371).
 pub fn v4_error(code: SessionErrorCode, message: impl Into<String>) -> SessionError {
     SessionError::new(code, message)

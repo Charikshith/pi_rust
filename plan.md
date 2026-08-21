@@ -50,10 +50,23 @@ porting feat-008. This is a distinct prerequisite wave:
    storage.ts against a byte-recording mock FS → 8-record fixture
    `storage.cases.jsonl` (timestamps normalized — Date.now() non-deterministic),
    --check wired into init.sh, gated by `v4_storage_golden.rs` (9 tests).
-   STILL TO GO: JsonlSessionRepo (repo.ts:
-   create/open/list/fork, session-id validation, dir naming), v4 `Session`/
-   `memory.ts`/`context.ts`, then the v3→v4 replacement of the SessionStorage
-   trait + harness + coding-agent session.rs wiring, then rework
+   DONE (commit 80aa391): **JsonlSessionRepo** (repo.ts) ported to `v4/repo.rs` —
+   create/open/list/fork/delete, `SESSION_ID_PATTERN` validation (invalid_payload
+   with Pi's exact message), `--cwd--` dir naming, `<ISO>_<id>.jsonl` file naming,
+   list reads 1 header line & skips unparseable files & sorts by modifiedAt desc,
+   open re-checks exists (not_found) + header id match (invalid_entry), same-process
+   create/fork race guard (already_exists). Also: v4 `Session` wrapper ported to
+   `v4/session.rs` (view/append/query helpers over Arc<JsonlSessionStorage>,
+   `IdGenerator` trait with uuidv7 default) + `DirEntry.mtime_ms` field added to
+   codec.rs. Oracle: `scripts/gen-v4-repo-oracle.mjs` drives Pi's real repo.ts +
+   session.ts against a byte-recording mock FS → 10-record fixture
+   `repo.cases.jsonl` (timestamps/ISO-filenames/uuidv7 normalized), --check wired
+   into init.sh, gated by `v4_repo_golden.rs` (10 tests). Oracle caught 2 mock-FS
+   bugs (missing dir-name registration + recursive createDir) before the fixture
+   reflected real Pi behavior. Full workspace gate green (3 pre-existing
+   env-polluted pirust-tools find tests only).
+   STILL TO GO: v4 `memory.ts`/`context.ts`, then the v3→v4 replacement of the
+   SessionStorage trait + harness + coding-agent session.rs wiring, then rework
    `gen-agent-oracle` against the v4 APIs.
 3. `gen-agent-oracle` rework against the v4 session APIs once the port lands.
 
