@@ -38,8 +38,19 @@ porting feat-008. This is a distinct prerequisite wave:
    verified byte-identical against Pi's real codec.ts
    (25-record fixture, `v4_codec_golden.rs`, commit a352516). The oracle caught
    and fixed a real serde-untagged bug (AbortRequested swallowing tool_started's
-   fields → serde(tag="type")). STILL TO GO: JsonlSessionStorage (storage.ts incl.
-   torn-tail repair + atomic publish), JsonlSessionRepo (repo.ts:
+   fields → serde(tag="type")). DONE (this commit): **JsonlSessionStorage**
+   (storage.ts) ported to `v4/storage.rs` — create/load/fork + append/replay +
+   lane ops + name/label + stats, torn-tail + unterminated-final-line +
+   malformed-interior repair/rejection (atomic tmp+rename publish), a
+   `SessionState::new()` seeding the `main` lane (state.ts:57 — oracle caught),
+   and `ProvisionedEntry::promote`/`NewRecord::promote` in types.rs. Oracle also
+   caught+fixed `invalid_file`'s code (InvalidSession→InvalidEntry) + message
+   (`Invalid JSONL session file`→`Invalid JSONL v4 session ...`, dropped ` (invalid
+   JSON)` suffix). Oracle: `scripts/gen-v4-storage-oracle.mjs` drives Pi's real
+   storage.ts against a byte-recording mock FS → 8-record fixture
+   `storage.cases.jsonl` (timestamps normalized — Date.now() non-deterministic),
+   --check wired into init.sh, gated by `v4_storage_golden.rs` (9 tests).
+   STILL TO GO: JsonlSessionRepo (repo.ts:
    create/open/list/fork, session-id validation, dir naming), v4 `Session`/
    `memory.ts`/`context.ts`, then the v3→v4 replacement of the SessionStorage
    trait + harness + coding-agent session.rs wiring, then rework

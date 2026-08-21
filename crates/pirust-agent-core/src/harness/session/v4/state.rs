@@ -69,6 +69,25 @@ pub struct SessionState {
 }
 
 impl SessionState {
+    /// Fresh state (an empty session before any mutation is applied). The
+    /// `main` lane exists from birth with a `null` leaf — state.ts:57 seeds
+    /// `new Map([["main", null]])`.
+    pub fn new() -> Self {
+        Self {
+            sequence: 0,
+            used_ids: HashSet::new(),
+            entries: Vec::new(),
+            entries_by_id: HashMap::new(),
+            records: Vec::new(),
+            open_operations_by_lane: HashMap::new(),
+            lanes: HashMap::from([("main".to_string(), None)]),
+            log: Vec::new(),
+            stats: SessionStats::default(),
+            name: None,
+            labels: HashMap::new(),
+        }
+    }
+
     /// `get nextSequence()` (state.ts:53-55).
     pub fn next_sequence(&self) -> i64 {
         self.sequence + 1

@@ -514,18 +514,15 @@ pub fn encode_mutation(mutation: &SessionMutation) -> String {
 // ===========================================================================
 
 /// `invalidFile` (jsonl/errors.ts:25-29) — a decode failure inside a session
-/// file becomes an `invalid_session`/`invalid_entry` `SessionError` naming the
-/// file and line.
+/// file becomes an `invalid_entry` `SessionError` naming the file and line.
+/// Pi's exact string: `Invalid JSONL v4 session {path}: line {line} {message}`
+/// (the cause.message — no extra suffix for syntax errors).
 pub fn invalid_file(path: &str, line_number: usize, error: &JsonlDecodeError) -> SessionError {
     v4_error(
-        SessionErrorCode::InvalidSession,
+        SessionErrorCode::InvalidEntry,
         format!(
-            "Invalid JSONL session file {path}: line {line_number} {}{}",
-            error.message,
-            match error.kind.as_str() {
-                "syntax" => " (invalid JSON)",
-                _ => "",
-            }
+            "Invalid JSONL v4 session {path}: line {line_number} {}",
+            error.message
         ),
     )
 }

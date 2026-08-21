@@ -1140,3 +1140,53 @@ Local-commits state: `master` is 3 commits ahead of `origin/master` (`5989c81`);
 nothing pushed. Independent git-audit reminder from prior incidents: verify
 `git log`/`git rev-parse HEAD origin/master` after any fork-using step in the
 next session.
+
+## 2026-08-21 — v4 session port step 2: JsonlSessionStorage DONE (oracle-verified)
+
+**Feature:** oracle-upgrade prerequisite (v4 session port) — `storage.ts` ported.
+
+**What landed (all Rust written directly, oracle-captured):**
+- `crates/pirust-agent-core/src/harness/session/v4/storage.rs` (NEW, ~450 lines):
+  `JsonlSessionStorage` — create/load/fork + appendEntry/appendRecord/createLane/
+  moveLane/setName/setLabel/getStats/find*/getLog/getLanes + torn-tail repair
+  (syntax error on final line → atomic tmp+rename publish of valid prefix) +
+  unterminated-final-line repair (append "\n") + malformed-interior rejection
+  (invalid_entry, file untouched). Writes serialized via internal Mutex (TS
+  `tail`-enqueue analogue).
+- `types.rs`: `ProvisionedEntry::promote` (→Entry with parentId/seq/timestamp),
+  `NewRecord::promote` (→LaneRecord with seq/timestamp), `id()`/`lane()`/
+  `record_type()` accessors.
+- `state.rs`: `SessionState::new()` — **seeds `main` lane with null leaf**
+  (state.ts:57 `new Map([["main", null]])` — the oracle caught this; without it
+  every append to "main" fails with InvalidLane).
+- `codec.rs`: **`invalid_file` fixed to Pi's exact contract** — code
+  InvalidSession→InvalidEntry, message `Invalid JSONL session file {path}` →
+  `Invalid JSONL v4 session {path}: line {n} {msg}` (dropped the wrong
+  ` (invalid JSON)` suffix). Not exercised before because the codec golden only
+  checks parseMutation messages; the storage golden now pins it.
+
+**Oracle:**
+- `scripts/gen-v4-storage-oracle.mjs` (NEW): drives Pi's REAL `JsonlSessionStorage`
+  against a byte-recording mock FS → 8 scenarios (create-append, torn-tail-repair,
+  fork-tree, reopen, stats, malformed-interior, unterminated-final-line,
+  invalid-payload). Fixture `tests/fixtures/pi/agent/v4/storage.cases.jsonl`.
+  Timestamps normalized to 0 (Date.now() at capture — non-deterministic; the
+  fixture encodes shapes + deterministic repair/fork bytes, never wall-clock).
+  `--check` wired into init.sh.
+- `v4_storage_golden.rs` (NEW, 9 tests): mutation-shape parity (entry/lane/entry/
+  record/fact/fact/lane seqs 1-7 for create-append), repair byte contracts,
+  fork bytes (entries keep original timestamps → deterministic), malformed-interior
+  exact message `Invalid JSONL v4 session /sessions/session.jsonl: line 2 is not
+  valid JSON`, stats numbers (cached 30/uncached 50/total 100/cost 10), reopen
+  round-trip, in-memory MockFs double.
+
+**Gate:** fmt clean, clippy -D warnings clean, `cargo test --workspace` green
+except the 3 pre-existing env-polluted pirust-tools find tests (real `~/.git`
+ancestor above temp dirs — re-verified same 3, unrelated). `gen-v4-session-oracle
+--check` + `gen-v4-storage-oracle --check` both green (deterministic).
+
+**Next (unchanged):** `JsonlSessionRepo` (repo.ts: create/open/list/fork,
+session-id validation `SESSION_ID_PATTERN`, cwd dir naming `--...--`,
+`sessionFileName` timestamp_ id.jsonl), then v4 `Session`/`memory.ts`/`context.ts`,
+then the v3→v4 trait swap in harness + coding-agent session.rs, then
+`gen-agent-oracle` rework, then `gen-printmode-oracle` + printmode regen.

@@ -674,6 +674,230 @@ impl SessionMutation {
     }
 }
 
+impl ProvisionedEntry {
+    /// The provisioned entry's `id`.
+    pub fn id(&self) -> &str {
+        match self {
+            ProvisionedEntry::Message(e) => &e.id,
+            ProvisionedEntry::ModelChange(e) => &e.id,
+            ProvisionedEntry::ThinkingLevel(e) => &e.id,
+            ProvisionedEntry::ActiveTools(e) => &e.id,
+            ProvisionedEntry::Compaction(e) => &e.id,
+            ProvisionedEntry::BranchSummary(e) => &e.id,
+            ProvisionedEntry::Custom(e) => &e.id,
+        }
+    }
+
+    /// Promote a provisioned entry into a full [`Entry`] by assigning the
+    /// storage-owned fields (parentId/seq/timestamp) — storage.ts
+    /// `appendEntry`'s `{ ...structuredClone(newEntry), parentId, seq,
+    /// timestamp }`.
+    pub fn promote(self, parent_id: Option<String>, seq: i64, timestamp: i64) -> Entry {
+        match self {
+            ProvisionedEntry::Message(e) => Entry::Message(MessageEntry {
+                id: e.id,
+                message: e.message,
+                terminate: e.terminate,
+                seq,
+                parent_id,
+                timestamp,
+            }),
+            ProvisionedEntry::ModelChange(e) => Entry::ModelChange(ModelChangeEntry {
+                id: e.id,
+                provider: e.provider,
+                model_id: e.model_id,
+                seq,
+                parent_id,
+                timestamp,
+            }),
+            ProvisionedEntry::ThinkingLevel(e) => Entry::ThinkingLevel(ThinkingLevelEntry {
+                id: e.id,
+                thinking_level: e.thinking_level,
+                seq,
+                parent_id,
+                timestamp,
+            }),
+            ProvisionedEntry::ActiveTools(e) => Entry::ActiveTools(ActiveToolsEntry {
+                id: e.id,
+                active_tool_names: e.active_tool_names,
+                seq,
+                parent_id,
+                timestamp,
+            }),
+            ProvisionedEntry::Compaction(e) => Entry::Compaction(CompactionEntry {
+                id: e.id,
+                summary: e.summary,
+                retained_tail: e.retained_tail,
+                tokens_before: e.tokens_before,
+                details: e.details,
+                usage: e.usage,
+                seq,
+                parent_id,
+                timestamp,
+            }),
+            ProvisionedEntry::BranchSummary(e) => Entry::BranchSummary(BranchSummaryEntry {
+                id: e.id,
+                from_id: e.from_id,
+                summary: e.summary,
+                details: e.details,
+                usage: e.usage,
+                seq,
+                parent_id,
+                timestamp,
+            }),
+            ProvisionedEntry::Custom(e) => Entry::Custom(CustomEntry {
+                id: e.id,
+                custom_type: e.custom_type,
+                data: e.data,
+                seq,
+                parent_id,
+                timestamp,
+            }),
+        }
+    }
+}
+
+impl NewRecord {
+    /// The record's `id`.
+    pub fn id(&self) -> &str {
+        match self {
+            NewRecord::OperationStarted(r) => &r.id,
+            NewRecord::AbortRequested(r) => &r.id,
+            NewRecord::OperationFinished(r) => &r.id,
+            NewRecord::StepAttempt(r) => &r.id,
+            NewRecord::ToolStarted(r) => &r.id,
+            NewRecord::QueueEnqueued(r) => &r.id,
+            NewRecord::QueueCancelled(r) => &r.id,
+            NewRecord::WriteDeferred(r) => &r.id,
+            NewRecord::Usage(r) => &r.id,
+        }
+    }
+
+    /// The record's `lane`.
+    pub fn lane(&self) -> &str {
+        match self {
+            NewRecord::OperationStarted(r) => &r.lane,
+            NewRecord::AbortRequested(r) => &r.lane,
+            NewRecord::OperationFinished(r) => &r.lane,
+            NewRecord::StepAttempt(r) => &r.lane,
+            NewRecord::ToolStarted(r) => &r.lane,
+            NewRecord::QueueEnqueued(r) => &r.lane,
+            NewRecord::QueueCancelled(r) => &r.lane,
+            NewRecord::WriteDeferred(r) => &r.lane,
+            NewRecord::Usage(r) => &r.lane,
+        }
+    }
+
+    /// The record's `type` discriminant.
+    pub fn record_type(&self) -> &str {
+        match self {
+            NewRecord::OperationStarted(_) => "operation_started",
+            NewRecord::AbortRequested(_) => "abort_requested",
+            NewRecord::OperationFinished(_) => "operation_finished",
+            NewRecord::StepAttempt(_) => "step_attempt",
+            NewRecord::ToolStarted(_) => "tool_started",
+            NewRecord::QueueEnqueued(_) => "queue_enqueued",
+            NewRecord::QueueCancelled(_) => "queue_cancelled",
+            NewRecord::WriteDeferred(_) => "write_deferred",
+            NewRecord::Usage(_) => "usage",
+        }
+    }
+
+    /// Promote a new record into a full [`LaneRecord`] by assigning the
+    /// storage-owned fields (seq/timestamp) — storage.ts `appendRecord`'s
+    /// `{ ...structuredClone(newRecord), seq, timestamp }`.
+    pub fn promote(self, seq: i64, timestamp: i64) -> LaneRecord {
+        match self {
+            NewRecord::OperationStarted(r) => {
+                LaneRecord::OperationStarted(OperationStartedRecord {
+                    id: r.id,
+                    lane: r.lane,
+                    source_leaf_id: r.source_leaf_id,
+                    intent: r.intent,
+                    seq,
+                    timestamp,
+                })
+            }
+            NewRecord::AbortRequested(r) => LaneRecord::AbortRequested(AbortRequestedRecord {
+                id: r.id,
+                lane: r.lane,
+                run_id: r.run_id,
+                seq,
+                timestamp,
+            }),
+            NewRecord::OperationFinished(r) => {
+                LaneRecord::OperationFinished(OperationFinishedRecord {
+                    id: r.id,
+                    lane: r.lane,
+                    run_id: r.run_id,
+                    outcome: r.outcome,
+                    error: r.error,
+                    seq,
+                    timestamp,
+                })
+            }
+            NewRecord::StepAttempt(r) => LaneRecord::StepAttempt(StepAttemptRecord {
+                id: r.id,
+                lane: r.lane,
+                run_id: r.run_id,
+                step: r.step,
+                attempt: r.attempt,
+                result_entry_id: r.result_entry_id,
+                compaction_reason: r.compaction_reason,
+                seq,
+                timestamp,
+            }),
+            NewRecord::ToolStarted(r) => LaneRecord::ToolStarted(ToolStartedRecord {
+                id: r.id,
+                lane: r.lane,
+                run_id: r.run_id,
+                assistant_entry_id: r.assistant_entry_id,
+                tool_index: r.tool_index,
+                tool_call_id: r.tool_call_id,
+                tool_name: r.tool_name,
+                effective_args: r.effective_args,
+                result_entry_id: r.result_entry_id,
+                replay: r.replay,
+                seq,
+                timestamp,
+            }),
+            NewRecord::QueueEnqueued(r) => LaneRecord::QueueEnqueued(QueueEnqueuedRecord {
+                id: r.id,
+                lane: r.lane,
+                queue: r.queue,
+                run_id: r.run_id,
+                target: r.target,
+                seq,
+                timestamp,
+            }),
+            NewRecord::QueueCancelled(r) => LaneRecord::QueueCancelled(QueueCancelledRecord {
+                id: r.id,
+                lane: r.lane,
+                run_id: r.run_id,
+                entry_id: r.entry_id,
+                seq,
+                timestamp,
+            }),
+            NewRecord::WriteDeferred(r) => LaneRecord::WriteDeferred(WriteDeferredRecord {
+                id: r.id,
+                lane: r.lane,
+                run_id: r.run_id,
+                target: r.target,
+                seq,
+                timestamp,
+            }),
+            NewRecord::Usage(r) => LaneRecord::Usage(UsageRecord {
+                id: r.id,
+                lane: r.lane,
+                usage: r.usage,
+                cause: r.cause,
+                seq,
+                timestamp,
+            }),
+        }
+    }
+}
+
 /// `NewRecord` — a record minus storage-assigned `seq`/`timestamp`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NewRecord {
