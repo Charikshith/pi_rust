@@ -249,6 +249,11 @@ pub enum SessionErrorCode {
     InvalidForkTarget,
     Storage,
     Unknown,
+    /// 0.84.2 v4 session codes (session/types.ts `SessionErrorCode`).
+    AlreadyExists,
+    InvalidPayload,
+    InvalidLane,
+    InvalidQuery,
 }
 
 impl SessionErrorCode {
@@ -261,6 +266,10 @@ impl SessionErrorCode {
             Self::InvalidForkTarget => "invalid_fork_target",
             Self::Storage => "storage",
             Self::Unknown => "unknown",
+            Self::AlreadyExists => "already_exists",
+            Self::InvalidPayload => "invalid_payload",
+            Self::InvalidLane => "invalid_lane",
+            Self::InvalidQuery => "invalid_query",
         }
     }
 }

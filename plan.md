@@ -19,11 +19,32 @@ porting feat-008. This is a distinct prerequisite wave:
 - **Oracle-upgrade Wave C — close out**: update `feature_list.json` evidence notes
   (piVersion 0.80.10 → 0.84.2) and any version-stamped docs.
 
-Then feat-008 proceeds on the 0.84.2 baseline. `models.corpus.jsonl` must be
-regenerated with a FIXED script (grouped-data-aware) — the committed 1062-model
-corpus is 0.80.10; 0.84.2 counts differ (anthropic 13, openrouter 351, etc.).
+**DONE (commit da63f5c, 2026-08-21):**
+- pirust-ai: AssistantMessage + anthropic adapter → 0.84.2 (rawStopReason/endTurn,
+  model-from-wire optional); model corpus 1306; catalog.rs 13 models;
+  DEFAULT_MODEL_PER_PROVIDER 40; resolve_cli_model ambiguity error;
+  deepMergeSettings recursive; help template (auth/--use-theme/--tui-mode/new env);
+  pi-telemetry alias + NODE_NO_WARNINGS + C:\oracle cwd in oracle scripts;
+  clippy large_enum_variant allows. Full workspace green except 3 pre-existing
+  env-polluted pirust-tools find tests (C:\Users\Chakri\.git above temp).
 
-## Success criterion
+**REMAINING (0.84.2):**
+1. `gen-printmode-oracle`: NODE_NO_WARNINGS in its child harvests + regenerate
+   printmode fixtures (large drift).
+2. **v4 session port (BIG)** — 0.84.2 replaced the v3 tree JSONL with a
+   mutation-log format (`harness/session/{state,jsonl/{codec,storage,repo}}.ts`):
+   header `{kind:"header",version:4,id,createdAt,cwd,parentSessionId?,metadata?}`,
+   then `seq`-numbered mutations of kinds `entry`/`record`/`lane`/`fact`, lanes,
+   open-operation records, atomic torn-tail repair, `JsonlSessionRepo`
+   (create/open/list/fork) + `SessionState` (was deferred in feat-003). The Rust
+   `SessionStorage` trait (tree) must become the v4 storage trait; `Session`,
+   `AgentHarness`, `memory_storage`, `jsonl_storage`, coding-agent `session.rs`
+   all follow. ~1.4K LOC of new Pi source + the whole Rust replacement.
+3. `gen-agent-oracle` rework against the v4 session APIs once the port lands.
+
+## feat-008 waves (on the 0.84.2 baseline)
+
+### Wave 0 — Oracle + catalog data (foundation)
 Real `pirust` resolves and streams through at least the key remaining adapters
 (openai-completions, openai-responses, google, mistral-conversations) into a
 correct `AssistantMessage`, **byte-verified against real Pi as oracle**; the

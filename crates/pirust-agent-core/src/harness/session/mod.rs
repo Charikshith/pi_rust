@@ -24,6 +24,7 @@
 pub mod jsonl_storage;
 pub mod memory_storage;
 pub mod uuid;
+pub mod v4;
 
 use serde_json::Value;
 
