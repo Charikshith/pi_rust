@@ -14,23 +14,24 @@ The TUI consumes UI-neutral harness/session events. `AgentHarness` owns agent ex
 
 ## Steps
 
-1. **Reproduce and fix the nested-runtime panic** — PARTIAL: `block_in_place` prevents the immediate nested-runtime panic, but the final non-blocking async turn state machine is still required.
-   - Add a regression test for submitting a prompt from the interactive runtime.
-   - Replace `runtime.block_on(session.prompt(...))` with an async-safe turn task/await boundary.
-   - Keep the event loop responsive while a turn runs; preserve cancellation and shutdown behavior.
-   - Verify: the existing `hi` interaction completes without panic; no nested-runtime error; canned-turn tests pass.
+1. **Reproduce and fix the nested-runtime panic** — PARTIAL: production now uses `run_async` and spawns prompt tasks; the synchronous `run` wrapper remains only for legacy tests.
+   - [x] Replace production `runtime.block_on(session.prompt(...))` with an async-safe turn task boundary.
+   - [x] Keep input/event draining active while a turn runs and retain deterministic subscription cleanup.
+   - [x] Add async cancellation wiring: Ctrl+C/Esc aborts the active turn task and renders a cancellation notice.
+   - [x] Add a dedicated delayed-provider regression test for the async path and end-to-end cancellation.
+   - Verify: focused interactive smoke tests pass; full delayed-provider proof remains open.
 
 2. **Define the harness-to-TUI state/event contract**
    - Confirm events for session start, user/assistant streaming, thinking, tool start/update/end, approval, turn end, agent settled, error, cancellation, compaction, and persistence.
    - Add only missing UI-neutral fields/seams to the harness; keep terminal rendering out of `AgentHarness`.
    - Verify: transitions are testable without a terminal and session JSONL remains unchanged.
 
-3. **Add persistent runtime identity/status**
+3. **Add persistent runtime identity/status** — PARTIAL: cwd, session id, and connection/turn state now render in a persistent status line; provider/model/reasoning/context/cost still need runtime metadata seams.
    - Display cwd, session id, provider, selected model, reasoning level, context usage, token/cost estimate, tool availability, connection state, and active-turn state.
    - Keep it visible in a compact footer/header and degrade at small widths.
    - Verify: local, remote, missing-model, disconnected, streaming, cancelled, and completed states render correctly.
 
-4. **Implement slash-command discovery and execution**
+4. **Implement slash-command discovery and execution** — PARTIAL: submitted slash commands now stay out of the provider path and report help/unknown/unavailable states; full handler registry wiring remains.
    - Build the palette from the existing command registry, not a second hardcoded list.
    - Support `/` open, filtering, arrow navigation, Tab completion, Enter execution, Esc dismissal, help text, and scrolling.
    - Include `/help`, `/model`, `/models`, `/resume`, `/compact`, `/restart`, `/refresh-model-list`, and existing project commands.
@@ -48,11 +49,12 @@ The TUI consumes UI-neutral harness/session events. `AgentHarness` owns agent ex
    - Expected failures become actionable inline messages, not raw panics; preserve prompt/session where safe.
    - Verify: each state has an event-driven rendering test and local-model smoke test.
 
-7. **Harden terminal behavior**
+7. **Harden terminal behavior** — PARTIAL: the loop now detects a terminal resize
+   and re-renders; the added delayed-provider black-box tests cover submit,
+   streaming, cancellation, and errors through rendered output.
    - Test 80x24, 120x40, wide terminals, resize during streaming, long tool output, multiline paste, Ctrl+C, Esc, Ctrl+D, and terminal restoration.
    - Ensure input and palette focus is always visible.
    - Verify: terminal restoration after normal exit, cancellation, model failure, and panic-safe shutdown.
-
 8. **Verification gate and artifacts**
    - Run `cargo fmt --check`.
    - Run `cargo clippy --all-targets -- -D warnings`.

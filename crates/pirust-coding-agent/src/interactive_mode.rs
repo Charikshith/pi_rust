@@ -2,15 +2,15 @@
 //!
 //! Port of `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
 //! (6,008 lines) — this wave adds the **streaming turn display**: on submit,
-//! `session.prompt` runs (blocking the loop, exactly like Pi's
-//! `await this.session.prompt`); the session's event subscription forwards
+//! `session.prompt` runs as a background Tokio task while the loop continues
+//! draining input and session events; the session's event subscription forwards
 //! `message_start`/`message_update`/`message_end`/`agent_end` to the TUI's
 //! chat container. Assistant text streams into a live `Text` component;
 //! user messages and the final assistant message are committed as lines.
 //! Full Markdown/thinking/tool rendering, slash commands, model switcher
 //! are later waves.
 //!
-//! ## Design: synchronous TUI + async turns
+//! ## Design: async TUI loop + async turns
 //!
 //! `pirust-tui` is `!Send` (`Rc`-based, mirroring JS object identity) and its
 //! `ProcessTerminal` reader thread calls `on_input` from a background thread.
@@ -30,7 +30,7 @@
 //! ```text
 //! terminal reader thread ──input──▶ main loop ──▶ tui.handle_input ──▶ editor
 //! agent loop thread ──events──▶ main loop ──▶ chat container render
-//!                                        └──▶ submit ──▶ block_on(prompt)
+//!                                        └──▶ submit ──▶ spawn(prompt)
 //! ```
 
 use std::cell::RefCell;
@@ -40,6 +40,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::task::JoinHandle;
 
 use pirust_tui::components::text::Text;
 use pirust_tui::editor::Editor;
@@ -65,13 +67,19 @@ pub struct InteractiveMode {
     _event_tx: Sender<AgentSessionEvent>,
     /// Set when the user quits (Ctrl+D on an empty editor).
     quit: Arc<AtomicBool>,
-    /// The async session (driven via `block_on` on the runtime handle).
+    /// Set by Ctrl+C/Esc and consumed by the async turn loop.
+    cancel_requested: Arc<AtomicBool>,
+    /// The async session used by background turn tasks.
     session: Arc<dyn PrintModeSession>,
     runtime: tokio::runtime::Handle,
+    active_turn: Option<JoinHandle<Result<(), crate::print_mode::ThrownValue>>>,
+    subscription: Option<crate::print_mode::Subscription>,
     /// Chat container children: user messages, the streaming assistant
     /// message, and separators. The streaming message is always the last
     /// child while a turn is in flight.
     chat: Rc<RefCell<pirust_tui::tui::Container>>,
+    status: Rc<RefCell<Text>>,
+    last_size: Option<u16>,
     streaming_text: Option<Rc<RefCell<Text>>>,
     /// Tool executions in flight, keyed by tool call id
     /// (`pendingTools` map, interactive-mode.ts:468).
@@ -214,6 +222,14 @@ impl InteractiveMode {
         let tui = Rc::new(RefCell::new(TUI::new(terminal, Some(false))));
         tui.borrow_mut().start();
 
+        let status = Rc::new(RefCell::new(Text::new(
+            session_status(session.header().as_ref(), "ready"),
+            0,
+            0,
+        )));
+        tui.borrow_mut()
+            .add_child(Rc::clone(&status) as SharedComponent);
+
         // Chat container + editor, mounted in the document root.
         let chat = Rc::new(RefCell::new(pirust_tui::tui::Container::new()));
         let chat_shared: SharedComponent = Rc::clone(&chat) as SharedComponent;
@@ -266,12 +282,13 @@ impl InteractiveMode {
         }
 
         // Ctrl+D quits when the editor is empty (Pi's `handleCtrlD`, enforced
-        // by the editor being empty). The input listener runs before the
-        // focused component; it consumes only when empty, so a non-empty
-        // editor still gets delete-forward.
+        // by the editor being empty). Ctrl+C/Esc request cancellation while
+        // a turn is active; the async loop owns the task transition.
         let quit = Arc::new(AtomicBool::new(false));
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         {
             let quit = Arc::clone(&quit);
+            let cancel_requested = Arc::clone(&cancel_requested);
             let editor = Rc::clone(&editor);
             tui.borrow_mut()
                 .add_input_listener(Box::new(move |data: &str| {
@@ -284,23 +301,30 @@ impl InteractiveMode {
                             data: None,
                         });
                     }
+                    if pirust_tui::keys::matches_key(data, "ctrl+c")
+                        || pirust_tui::keys::matches_key(data, "escape")
+                    {
+                        cancel_requested.store(true, Ordering::Relaxed);
+                        return Some(pirust_tui::tui::InputListenerResult {
+                            consume: true,
+                            data: None,
+                        });
+                    }
                     None
                 }));
         }
 
         // Subscribe to session events, bridging the agent thread → channel.
         let (event_tx, event_rx) = channel::<AgentSessionEvent>();
-        {
+        let subscription = {
             let tx = event_tx.clone();
             let subscription = session.subscribe(Arc::new(move |event: &AgentSessionEvent| {
                 let _ = tx.send(event.clone());
             }));
-            // Keep the subscription alive for the mode's lifetime: the
-            // session's `subscribe` returns an unsubscribe thunk we must hold.
-            // (`SingleTurnSession::subscribe`'s thunk is a documented no-op,
-            // but the API requires it be kept.)
-            std::mem::forget(subscription);
-        }
+            // Keep the subscription alive for the mode's lifetime and
+            // unsubscribe it deterministically when the mode is dropped.
+            subscription
+        };
 
         Self {
             tui,
@@ -310,51 +334,137 @@ impl InteractiveMode {
             event_rx,
             _event_tx: event_tx,
             quit,
+            cancel_requested,
             session,
             runtime,
+            active_turn: None,
+            subscription: Some(subscription),
             chat,
+            status,
+            last_size: None,
             streaming_text: None,
             pending_tools: HashMap::new(),
         }
     }
 
-    /// Drive the loop until quit. `prompt` runs one turn for the user's
-    /// text (blocking on the async session via the runtime handle), while
-    /// session events stream into the chat container.
+    /// Drive the TUI without blocking while a model turn runs.
+    pub async fn run_async(&mut self) {
+        loop {
+            if self.quit.load(Ordering::Relaxed) {
+                break;
+            }
+            while let Ok(data) = self.input_rx.try_recv() {
+                self.tui.borrow_mut().handle_input(&data);
+            }
+            while let Ok(event) = self.event_rx.try_recv() {
+                self.render_event(&event);
+            }
+            if self.cancel_requested.swap(false, Ordering::Relaxed) {
+                if let Some(turn) = self.active_turn.take() {
+                    turn.abort();
+                    self.show_error("Request cancelled");
+                }
+            }
+            if self
+                .active_turn
+                .as_ref()
+                .is_some_and(JoinHandle::is_finished)
+            {
+                match self.active_turn.take().unwrap().await {
+                    Ok(Ok(())) => self.set_status("ready"),
+                    Ok(Err(error)) => self.show_error(error.console_message()),
+                    Err(error) => self.show_error(format!("turn task failed: {error}")),
+                }
+            }
+            while let Ok(text) = self.submit_rx.try_recv() {
+                if !text.is_empty() && self.active_turn.is_none() {
+                    if text.starts_with('/') {
+                        self.dispatch_command(&text);
+                    } else {
+                        self.start_turn(text);
+                    }
+                }
+            }
+            // Detect a terminal resize (the TUI's own resize callback is not
+            // wired this wave; the loop polls size directly and re-renders).
+            let size = self.tui.borrow().terminal_rows();
+            if Some(size) != self.last_size {
+                self.last_size = Some(size);
+                self.tui.borrow_mut().request_render(true);
+            }
+            self.tui.borrow_mut().poll();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Compatibility wrapper for callers outside an async runtime. Production
+    /// enters through `run_async`; this preserves the synchronous test seam.
     pub fn run(&mut self) {
         loop {
             if self.quit.load(Ordering::Relaxed) {
                 break;
             }
-            // Drain raw input from the terminal reader thread.
             while let Ok(data) = self.input_rx.try_recv() {
                 self.tui.borrow_mut().handle_input(&data);
             }
-            // Drain session events, rendering into the chat container.
-            let mut pending_turns = Vec::new();
             while let Ok(event) = self.event_rx.try_recv() {
                 self.render_event(&event);
             }
-            // Drain submitted prompts — collect first, then run OUTSIDE the
-            // TUI borrow (a turn renders into the TUI, which borrows it
-            // again; re-entrant borrow panics).
+            let mut prompts = Vec::new();
             while let Ok(text) = self.submit_rx.try_recv() {
                 if !text.is_empty() {
-                    pending_turns.push(text);
+                    prompts.push(text);
                 }
             }
-            // Render any pending frame before the turn (editor already
-            // cleared itself on submit).
             self.tui.borrow_mut().poll();
-            for text in pending_turns {
-                self.run_turn(&text);
+            for text in prompts {
+                self.run_turn_sync(&text);
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 
-    /// Start one turn by running the async session prompt.
-    fn run_turn(&mut self, text: &str) {
+    /// Synchronous compatibility path; production uses `run_async`.
+    fn run_turn_sync(&mut self, text: &str) {
+        let user_text = Rc::new(RefCell::new(Text::new(format!("▶ {text}"), 0, 0)));
+        self.chat
+            .borrow_mut()
+            .add_child(user_text as SharedComponent);
+        self.tui.borrow_mut().request_render(true);
+        self.tui.borrow_mut().poll();
+        let session = Arc::clone(&self.session);
+        let text = text.to_string();
+        let runtime = self.runtime.clone();
+        let _ = runtime.block_on(async move { session.prompt(&text, None).await });
+    }
+
+    fn dispatch_command(&mut self, text: &str) {
+        let command = text
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('/')
+            .to_ascii_lowercase();
+        if command == "help" {
+            let help = BUILTIN_SLASH_COMMANDS
+                .iter()
+                .map(|(name, description, _)| format!("/{name} — {description}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.show_error(help);
+        } else if BUILTIN_SLASH_COMMANDS
+            .iter()
+            .any(|(name, _, _)| *name == command)
+        {
+            self.show_error(format!("/{command} is not available in this session"));
+        } else {
+            self.show_error(format!("Unknown command: /{command}"));
+        }
+    }
+
+    /// Start one turn as a task so input and streamed events remain responsive.
+    fn start_turn(&mut self, text: String) {
+        self.set_status("turn: running");
         // User message line (Pi adds the user message on `message_start`
         // with role user; we mirror that by appending it before the turn).
         let user_line = format!("▶ {text}");
@@ -365,16 +475,30 @@ impl InteractiveMode {
         self.tui.borrow_mut().request_render(true);
         self.tui.borrow_mut().poll();
 
-        // The production TUI is entered from Tokio. `block_in_place` lets the
-        // multithreaded runtime continue driving the prompt without nesting a runtime.
         let session = Arc::clone(&self.session);
-        let text = text.to_string();
-        let prompt = async move { session.prompt(&text, None).await };
-        let _ = if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| self.runtime.block_on(prompt))
-        } else {
-            self.runtime.block_on(prompt)
-        };
+        self.active_turn = Some(
+            self.runtime
+                .spawn(async move { session.prompt(&text, None).await }),
+        );
+    }
+
+    fn set_status(&mut self, state: &str) {
+        let header = self.session.header();
+        self.status
+            .borrow_mut()
+            .set_text(session_status(header.as_ref(), state));
+        self.tui.borrow_mut().request_render(true);
+    }
+
+    fn show_error(&mut self, message: impl Into<String>) {
+        self.set_status("error");
+        let error = Rc::new(RefCell::new(Text::new(
+            format!("✗ {}", message.into()),
+            0,
+            0,
+        )));
+        self.chat.borrow_mut().add_child(error as SharedComponent);
+        self.tui.borrow_mut().request_render(true);
     }
 
     /// Render one session event into the chat container.
@@ -455,7 +579,7 @@ impl InteractiveMode {
                 is_error,
                 ..
             } => {
-                if let Some(tool) = self.pending_tools.get(tool_call_id) {
+                if let Some(tool) = self.pending_tools.remove(tool_call_id) {
                     let content = result_content(result);
                     tool.borrow_mut().update_result(content, *is_error, false);
                     self.tui.borrow_mut().request_render(true);
@@ -479,7 +603,23 @@ impl InteractiveMode {
 
 impl Drop for InteractiveMode {
     fn drop(&mut self) {
+        if let Some(subscription) = self.subscription.take() {
+            subscription.unsubscribe();
+        }
         self.tui.borrow_mut().stop();
+    }
+}
+
+fn session_status(
+    header: Option<&pirust_agent_core::harness::types::SessionHeader>,
+    state: &str,
+) -> String {
+    match header {
+        Some(header) => format!(
+            "cwd: {} · session: {} · connection: {}",
+            header.cwd, header.id, state
+        ),
+        None => format!("session: unavailable · connection: {state}"),
     }
 }
 

@@ -471,8 +471,8 @@ async fn run(parsed: args::Args) -> i32 {
 
 /// `runInteractiveMode` (`main.ts:811-858`) — launch the TUI and loop.
 ///
-/// Wave 2: on submit, `session.prompt` runs (blocking the loop via the
-/// runtime handle); session events stream into the TUI's chat container
+/// The TUI loop runs asynchronously; model turns are spawned so input and
+/// session events remain live while the provider responds.
 /// (user line, streaming assistant text, separator). Quit on Ctrl+D.
 ///
 /// `bindCurrentSessionExtensions` (interactive-mode.ts:1858-1860) — the
@@ -498,7 +498,7 @@ async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
     let runtime = tokio::runtime::Handle::current();
     let terminal = Box::new(pirust_tui::terminal::ProcessTerminal::new());
     let mut mode = InteractiveMode::new(terminal, session, runtime);
-    mode.run();
+    mode.run_async().await;
     0
 }
 

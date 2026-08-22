@@ -8,7 +8,7 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
-## 2026-08-22 � TUI ARCHITECTURE AUDIT SAVED
+## 2026-08-22 � TUI ARCHITECTURE AUDIT SAVED
 
 - User-facing TUI review completed. The existing code should continue; a fresh rewrite is not recommended.
 - Confirmed root issue: `InteractiveMode` calls a blocking runtime bridge during an already-running Tokio runtime. The `block_in_place` workaround prevents the nested-runtime panic, but the TUI still freezes during a model turn. The correct next implementation is a non-blocking async turn state machine.
@@ -1335,7 +1335,7 @@ green except the same 3 pre-existing env-polluted pirust-tools find tests; all
 4 v4 oracle `--check`s green (codec 25 / storage 8 / repo 10 / memory 5).
 Tree clean at `ca340bf`; nothing pushed.
 
-## 2026-08-22 � feat-008 CATALOG WAVE 1 DONE
+## 2026-08-22 � feat-008 CATALOG WAVE 1 DONE
 
 - Ported the full Pi 0.84.2 builtin catalog: 40 providers / 1306 models from the real `../pi/packages/ai/src/providers/data/*.json` output.
 - `xtask gen-catalog` now emits provider metadata from the oracle fingerprint, model data from the Pi files, and is rustfmt-canonical/idempotent under `gen-catalog --check`.
@@ -1387,4 +1387,60 @@ consumed it (AgentHarness had no consumers besides harness_golden.rs).
 **Residuals (named):** SessionManager (v3-tree coding-agent layer) still NOT
 ported — out of scope; LLM summary placeholder unchanged; `fileOps`
 (`compaction/utils.ts`) deferred; v1→v3 migration deferred.
+
+## 2026-08-22 — feat-013 async TUI first step
+
+Implemented the first TUI readiness slice in `crates/pirust-coding-agent/src/interactive_mode.rs`:
+- Production `run_interactive_mode` now awaits `InteractiveMode::run_async`.
+- Submitted prompts run in Tokio tasks, so input and session-event draining continues
+  while the provider turn is active; prompt task errors render inline.
+- Session subscriptions are retained and explicitly unsubscribed on drop instead of
+  leaked with `mem::forget`.
+- Existing synchronous `run` remains as a compatibility path for current smoke tests.
+
+Verification: `cargo fmt --check`, package clippy with `-D warnings`, and all 5
+`interactive_mode_smoke` tests pass. Full `./init.sh` baseline remains blocked by
+three pre-existing `pirust-tools` find tests caused by the repository ancestor
+`.git` environment. Dedicated delayed-provider async/cancellation coverage remains
+pending.
+
+## 2026-08-22 — feat-013 cancellation and slash-command guard
+
+Added Ctrl+C/Esc cancellation handling to the async loop: the active Tokio turn
+is aborted and an inline `Request cancelled` notice is rendered. Submitted slash
+commands no longer fall through to the model; `/help` renders the registered
+built-in command list, known-but-unavailable commands report that state, and
+unknown commands report an actionable error. This is intentionally a guard until
+the full command-handler registry/model/session seams are ported.
+
+Verification: package clippy (`-D warnings`) and all 5 interactive smoke tests
+pass after the change.
+
+## 2026-08-22 — feat-013 runtime status and tool cleanup
+
+Added a persistent TUI status line showing the session cwd, session id, and
+connection/turn state, with ready/running/error transitions. Completed tool
+executions are removed from `pending_tools` after their final render, preventing
+unbounded stale active-tool state.
+
+Verification: fmt check and all 5 interactive smoke tests pass.
+
+## 2026-08-22 — feat-013 delayed-provider black-box + resize detection
+
+Added `crates/pirust-coding-agent/tests/tui_delayed_provider.rs` — the audit's
+required black-box coverage, driving the public interaction contract (terminal
+input through `InteractiveMode::run_async`) with a provider that delays its
+response:
+- submit → prompt runs, canned stream renders to the terminal (asserted on the
+  captured terminal writes, not just internal state);
+- cancel (Ctrl+C while the turn is pending) → aborts the turn task, the
+  provider's stream is NOT rendered, and a cancellation notice IS rendered;
+- error → the provider's error message renders inline;
+- idle resize → the loop tolerates an idle run + quit without panic.
+
+The async loop now also detects terminal size changes each iteration and
+re-requests a render so the frame recomputes on resize.
+
+Verification: fmt clean, package clippy `-D warnings` clean, all 4 new
+black-box tests + 5 smoke tests + 88 unit tests pass.
 
