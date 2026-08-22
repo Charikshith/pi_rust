@@ -49,13 +49,22 @@ The TUI consumes UI-neutral harness/session events. `AgentHarness` owns agent ex
    - Expected failures become actionable inline messages, not raw panics; preserve prompt/session where safe.
    - Verify: each state has an event-driven rendering test and local-model smoke test.
 
-7. **Harden terminal behavior** — PARTIAL: the loop now detects a terminal resize
+7. **Tool approval flow** — PARTIAL: a `before_tool_call` approval handshake is
+   wired through `SingleTurnSession` to the interactive loop; the tool prompt
+   renders and `r`/`a`/`d` resolve it (run-once / always-allow / deny). Default
+   policy is run-once (pi's default allow), so no approval is asked unless the
+   TUI installs its decider.
+   - Wire the interactive approval decider on the session's `before_tool_call` hook.
+   - Render the tool call + args as a prompt; resolve on `r`/`a`/`d`.
+   - Deny blocks the tool with a user-visible reason.
+   - Verify: black-box test drives submit → prompt → deny → decision recorded and rendered.
+8. **Harden terminal behavior** — PARTIAL: the loop now detects a terminal resize
    and re-renders; the added delayed-provider black-box tests cover submit,
    streaming, cancellation, and errors through rendered output.
    - Test 80x24, 120x40, wide terminals, resize during streaming, long tool output, multiline paste, Ctrl+C, Esc, Ctrl+D, and terminal restoration.
    - Ensure input and palette focus is always visible.
    - Verify: terminal restoration after normal exit, cancellation, model failure, and panic-safe shutdown.
-8. **Verification gate and artifacts**
+9. **Verification gate and artifacts**
    - Run `cargo fmt --check`.
    - Run `cargo clippy --all-targets -- -D warnings`.
    - Run focused TUI/harness tests, then `cargo test --workspace`.

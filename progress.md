@@ -1444,3 +1444,22 @@ re-requests a render so the frame recomputes on resize.
 Verification: fmt clean, package clippy `-D warnings` clean, all 4 new
 black-box tests + 5 smoke tests + 88 unit tests pass.
 
+## 2026-08-22 — feat-013 tool approval handshake
+
+Added a tool-approval flow through the real harness `before_tool_call` seam:
+- `PrintModeSession` gained `set_tool_approval_decider` (constraint: async
+decider returning `BoxFuture`); the default keeps pi's default allow
+behaviour so no session changes unless the interactive layer opts in.
+- `SingleTurnSession` installs a `before_tool_call` hook that consults the
+decider; a deny decision blocks the tool with a user-visible reason.
+- The decider runs on the agent-loop thread and bridges to the UI loop via a
+channel + tokio oneshot; the pending approval renders as a prompt and the
+decision keys `r`/`a`/`d` resolve it (run-once / always-allow / deny). No
+`block_on` from the async loop — the decider awaits the oneshot, which is
+cancelled if the turn task is aborted (Ctrl+C), unblocking the loop.
+- Black-box test: submit → approval prompt renders → `d` denies → the decision
+is recorded as Deny and the prompt + denial notice render in the terminal.
+
+Verification: fmt clean, clippy `-D warnings` clean, all 5 black-box tests
+(pending approval) + 88 unit + smoke tests pass.
+

@@ -53,6 +53,7 @@ use serde_json::Value;
 use crate::print_mode::{
     AgentSessionRuntimeHost, Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession,
     RebindSessionFn, SessionEventListener, SessionStateView, Subscription, ThrownValue,
+    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalRequest,
 };
 use crate::session::SessionManager;
 
@@ -79,6 +80,10 @@ pub struct SingleTurnSession {
     /// Whether the extension event listener is already registered on the agent
     /// (bind may be called once; a second bind re-binds the runtime only).
     extension_listener_registered: AtomicBool,
+    /// The interactive layer's tool-approval decider (`set_tool_approval_decider`).
+    /// None = always allow. `before_tool_call` consults it; a non-allow decision
+    /// blocks the tool with a user-visible reason.
+    tool_approval_decider: Arc<Mutex<Option<ToolApprovalDecider>>>,
 }
 
 impl SingleTurnSession {
@@ -91,7 +96,7 @@ impl SingleTurnSession {
             .into_iter()
             .map(|(name, tool)| (name.as_str().to_string(), tool))
             .collect::<HashMap<_, _>>();
-        Arc::new(Self {
+        let this = Arc::new(Self {
             agent,
             session_manager: Arc::new(Mutex::new(session_manager)),
             persisted: AtomicUsize::new(0),
@@ -99,7 +104,10 @@ impl SingleTurnSession {
             tool_registry,
             extension_runner: Mutex::new(None),
             extension_listener_registered: AtomicBool::new(false),
-        })
+            tool_approval_decider: Arc::new(Mutex::new(None)),
+        });
+        this.install_tool_approval_hook();
+        this
     }
 
     /// Append every message the last `prompt()`/`wait_for_idle()` produced that has not
@@ -123,6 +131,40 @@ impl SingleTurnSession {
             }
         }
         self.persisted.store(messages.len(), Ordering::SeqCst);
+    }
+
+    /// Install the agent-loop `before_tool_call` hook that consults the
+    /// interactive layer's approval decider (`tool_approval_decider`). When no
+    /// decider is registered the hook passes every tool through, preserving
+    /// the default allow behaviour.
+    fn install_tool_approval_hook(&self) {
+        let decider = Arc::clone(&self.tool_approval_decider);
+        self.agent
+            .set_before_tool_call(Some(Arc::new(move |ctx, _token| {
+                let decider = Arc::clone(&decider);
+                Box::pin(async move {
+                    let request = ToolApprovalRequest {
+                        tool_name: ctx.tool_call.name.clone(),
+                        args: ctx.args.clone(),
+                    };
+                    // Clone the decider out of the lock so the guard is dropped
+                    // before the await (the future must stay Send).
+                    let decider = decider.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let decision = match decider {
+                        Some(d) => d(request).await,
+                        None => ToolApprovalDecision::RunOnce,
+                    };
+                    match decision {
+                        ToolApprovalDecision::RunOnce | ToolApprovalDecision::AlwaysAllow => None,
+                        ToolApprovalDecision::Deny => {
+                            Some(pirust_agent_core::types::BeforeToolCallResult {
+                                block: Some(true),
+                                reason: Some("Tool execution was denied by the user".to_string()),
+                            })
+                        }
+                    }
+                })
+            })));
     }
 
     /// `session.bindExtensions(bindings)` (agent-session.ts:2330-2354) — build
@@ -457,6 +499,13 @@ impl PrintModeSession for SingleTurnSession {
 
     async fn reload(&self) {
         // Unreachable this wave — see module docs.
+    }
+
+    fn set_tool_approval_decider(&self, decider: ToolApprovalDecider) {
+        *self
+            .tool_approval_decider
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(decider);
     }
 }
 

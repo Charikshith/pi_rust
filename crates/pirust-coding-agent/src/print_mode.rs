@@ -638,6 +638,33 @@ pub struct SessionStateView {
     pub messages: Vec<AgentMessage>,
 }
 
+/// A tool-call awaiting the user's approval, surfaced to the interactive
+/// layer as a prompt (tool-approval.ts `pendingApproval`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolApprovalRequest {
+    /// The tool name, e.g. `"bash"`.
+    pub tool_name: String,
+    /// The tool's arguments JSON.
+    pub args: serde_json::Value,
+}
+
+/// The user's decision on a [`ToolApprovalRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolApprovalDecision {
+    /// Run this call once only.
+    RunOnce,
+    /// Allow this tool without asking again.
+    AlwaysAllow,
+    /// Block this call.
+    Deny,
+}
+
+/// The interactive layer's tool-approval decider: given a tool call about to
+/// execute, returns the user's decision. Runs on the agent loop thread, so it
+/// returns a future the hook awaits.
+pub type ToolApprovalDecider =
+    Arc<dyn Fn(ToolApprovalRequest) -> BoxFuture<'static, ToolApprovalDecision> + Send + Sync>;
+
 /// `session.subscribe`'s return value: the unsubscribe thunk.
 pub struct Subscription {
     unsubscribe: Box<dyn FnOnce() + Send>,
@@ -769,6 +796,13 @@ pub trait PrintModeSession: Send + Sync {
 
     /// `session.reload()` (`print-mode.ts:95`).
     async fn reload(&self);
+
+    /// Register the interactive layer's tool-approval decider. The session
+    /// consults it (awaiting its returned future) from its `before_tool_call`
+    /// hook and blocks a tool when it returns a non-allow decision. The
+    /// default lets every tool run, matching Pi's default allow behaviour for
+    /// the headless/trusted path; the TUI supplies the real decider.
+    fn set_tool_approval_decider(&self, _decider: ToolApprovalDecider) {}
 }
 
 /// `session.prompt`'s options (`print-mode.ts:122`). The initial prompt passes

@@ -21,6 +21,7 @@ use pirust_agent_core::harness::types::SessionHeader;
 use pirust_coding_agent::print_mode::{
     AgentSessionEvent, Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession,
     PromptOptions, SessionEventListener, SessionStateView, Subscription, ThrownValue,
+    ToolApprovalDecider, ToolApprovalDecision,
 };
 use pirust_tui::terminal::Terminal;
 
@@ -93,6 +94,13 @@ struct DelayedSession {
     prompt_seen: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
     fail_prompt: Arc<AtomicBool>,
+    /// When set, `prompt` requests a tool approval before proceeding.
+    ask_approval: Arc<AtomicBool>,
+    /// The decider `InteractiveMode` installs (`set_tool_approval_decider`),
+    /// invoked mid-prompt to mirror the agent's `before_tool_call` hook.
+    decider: Arc<Mutex<Option<ToolApprovalDecider>>>,
+    /// The decision the decider returned for the last request.
+    last_decision: Arc<Mutex<Option<ToolApprovalDecision>>>,
 }
 
 impl DelayedSession {
@@ -102,6 +110,9 @@ impl DelayedSession {
             prompt_seen: Arc::new(AtomicBool::new(false)),
             release: Arc::new(AtomicBool::new(false)),
             fail_prompt: Arc::new(AtomicBool::new(false)),
+            ask_approval: Arc::new(AtomicBool::new(false)),
+            decider: Arc::new(Mutex::new(None)),
+            last_decision: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -147,6 +158,23 @@ impl PrintModeSession for DelayedSession {
     }
     async fn prompt(&self, text: &str, _options: Option<PromptOptions>) -> Result<(), ThrownValue> {
         self.prompt_seen.store(true, Ordering::SeqCst);
+        // Optionally request a tool approval (mirrors the agent's
+        // `before_tool_call` hook flow, which blocks the loop awaiting the
+        // user's decision).
+        if self.ask_approval.load(Ordering::SeqCst) {
+            let decision = {
+                let request = pirust_coding_agent::print_mode::ToolApprovalRequest {
+                    tool_name: "bash".to_string(),
+                    args: serde_json::json!({ "command": "rm -rf /" }),
+                };
+                let decider = self.decider.lock().unwrap().clone();
+                match decider.as_ref() {
+                    Some(d) => d(request).await,
+                    None => ToolApprovalDecision::RunOnce,
+                }
+            };
+            *self.last_decision.lock().unwrap() = Some(decision);
+        }
         // Wait until released (or aborted via drop).
         while !self.release.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -172,6 +200,10 @@ impl PrintModeSession for DelayedSession {
         Cancelled { cancelled: false }
     }
     async fn reload(&self) {}
+
+    fn set_tool_approval_decider(&self, decider: ToolApprovalDecider) {
+        *self.decider.lock().unwrap() = Some(decider);
+    }
 }
 
 fn make_runtime() -> tokio::runtime::Runtime {
@@ -336,6 +368,66 @@ fn delayed_submit_error_renders_notice() {
     assert!(
         writes.contains("provider exploded"),
         "provider error should render inline, got: {writes:?}"
+    );
+}
+
+#[test]
+fn tool_approval_prompt_renders_and_deny_blocks() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    session.ask_approval.store(true, Ordering::SeqCst);
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        runtime.handle().clone(),
+    );
+
+    let prompt_seen = Arc::clone(&session.prompt_seen);
+    let release = Arc::clone(&session.release);
+    let writes = handles.writes.clone();
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        type_and_submit(&mut on_input);
+        // Wait until the approval prompt has rendered, then deny.
+        for _ in 0..500 {
+            if writes.lock().unwrap().contains("requires approval") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        on_input("d"); // deny
+                       // Let the turn finish, then quit.
+        for _ in 0..200 {
+            if prompt_seen.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        release.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(100));
+        on_input("\u{4}"); // quit
+    });
+
+    runtime.block_on(mode.run_async());
+    // The denial must be the decision the prompt's request got.
+    let decision = *session.last_decision.lock().unwrap();
+    assert_eq!(
+        decision,
+        Some(ToolApprovalDecision::Deny),
+        "deny key must resolve the approval to Deny"
+    );
+    // The approval prompt + denial notice must have rendered.
+    let writes = handles.writes.lock().unwrap().clone();
+    assert!(
+        writes.contains("requires approval"),
+        "approval prompt should render, got: {writes:?}"
+    );
+    assert!(
+        writes.contains("denied"),
+        "denial notice should render, got: {writes:?}"
     );
 }
 

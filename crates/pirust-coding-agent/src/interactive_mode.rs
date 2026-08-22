@@ -48,7 +48,16 @@ use pirust_tui::editor::Editor;
 use pirust_tui::tui::{SharedComponent, TUI};
 
 use crate::interactive_theme::{self, dark};
-use crate::print_mode::{AgentSessionEvent, PrintModeSession};
+use crate::print_mode::{
+    AgentSessionEvent, PrintModeSession, ToolApprovalDecision, ToolApprovalRequest,
+};
+
+/// A tool-approval request bridged from the agent thread to the UI loop,
+/// carrying a oneshot to deliver the user's decision back.
+struct ApprovalMessage {
+    request: ToolApprovalRequest,
+    respond: tokio::sync::oneshot::Sender<ToolApprovalDecision>,
+}
 
 /// How many lines of a tool result to preview before truncating with
 /// `... (N more lines)` — `FALLBACK_PREVIEW_LINES` (tool-execution.ts:15).
@@ -84,6 +93,16 @@ pub struct InteractiveMode {
     /// Tool executions in flight, keyed by tool call id
     /// (`pendingTools` map, interactive-mode.ts:468).
     pending_tools: HashMap<String, Rc<RefCell<ToolExecutionComponent>>>,
+    /// Tool-approval bridge: the session's `before_tool_call` hook sends a
+    /// request here and awaits the user's decision on a oneshot channel. The
+    /// loop drains `approval_rx`, renders the prompt, and the decision keys
+    /// resolve the pending oneshot.
+    _approval_tx: Sender<ApprovalMessage>,
+    approval_rx: Receiver<ApprovalMessage>,
+    /// The tool call currently awaiting user approval, or `None`. While set,
+    /// the next decision key (`r`/`a`/`d`) resolves `pending_approval.respond`
+    /// and the agent loop unblocks.
+    pending_approval: Option<ApprovalMessage>,
 }
 
 /// `ToolExecutionComponent` (tool-execution.ts) — a simplified but faithful
@@ -326,6 +345,25 @@ impl InteractiveMode {
             subscription
         };
 
+        // Tool-approval bridge: the session's `before_tool_call` hook sends a
+        // request and awaits the user's decision. The loop drains the receiver
+        // and resolves the pending oneshot from the decision keys.
+        let (approval_tx, approval_rx) = channel::<ApprovalMessage>();
+        {
+            let tx = approval_tx.clone();
+            session.set_tool_approval_decider(Arc::new(move |request: ToolApprovalRequest| {
+                let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(ApprovalMessage {
+                    request,
+                    respond: respond_tx,
+                });
+                // Await the user's decision from the UI loop. The oneshot is
+                // cancelled if the turn task is aborted (Ctrl+C), unblocking
+                // the agent loop.
+                Box::pin(async move { respond_rx.await.unwrap_or(ToolApprovalDecision::Deny) })
+            }));
+        }
+
         Self {
             tui,
             input_rx,
@@ -344,6 +382,9 @@ impl InteractiveMode {
             last_size: None,
             streaming_text: None,
             pending_tools: HashMap::new(),
+            _approval_tx: approval_tx,
+            approval_rx,
+            pending_approval: None,
         }
     }
 
@@ -354,10 +395,19 @@ impl InteractiveMode {
                 break;
             }
             while let Ok(data) = self.input_rx.try_recv() {
-                self.tui.borrow_mut().handle_input(&data);
+                // While a tool awaits approval, a single decision key routes to
+                // the approval instead of the editor/loop.
+                if self.pending_approval.is_some() {
+                    self.handle_approval_key(&data);
+                } else {
+                    self.tui.borrow_mut().handle_input(&data);
+                }
             }
             while let Ok(event) = self.event_rx.try_recv() {
                 self.render_event(&event);
+            }
+            while let Ok(approval) = self.approval_rx.try_recv() {
+                self.show_approval(approval);
             }
             if self.cancel_requested.swap(false, Ordering::Relaxed) {
                 if let Some(turn) = self.active_turn.take() {
@@ -499,6 +549,52 @@ impl InteractiveMode {
         )));
         self.chat.borrow_mut().add_child(error as SharedComponent);
         self.tui.borrow_mut().request_render(true);
+    }
+
+    /// Render a pending tool-approval prompt and wait for a decision key.
+    fn show_approval(&mut self, approval: ApprovalMessage) {
+        let request = &approval.request;
+        let args = serde_json::to_string(&request.args).unwrap_or_default();
+        let prompt = format!(
+            "⚠ Tool execution requires approval: {} {args}\n[r]un once · [a]lways allow · [d]eny",
+            request.tool_name
+        );
+        self.set_status("approval required");
+        let notice = Rc::new(RefCell::new(Text::new(prompt, 0, 0)));
+        self.chat.borrow_mut().add_child(notice as SharedComponent);
+        self.tui.borrow_mut().request_render(true);
+        self.pending_approval = Some(approval);
+    }
+
+    /// Resolve a pending approval from a decision key (`r`/`a`/`d`).
+    fn handle_approval_key(&mut self, data: &str) {
+        if data.is_empty() || data.chars().count() > 1 {
+            return;
+        }
+        let decision = match data {
+            "r" => Some(ToolApprovalDecision::RunOnce),
+            "a" => Some(ToolApprovalDecision::AlwaysAllow),
+            "d" => Some(ToolApprovalDecision::Deny),
+            _ => None,
+        };
+        if let Some(decision) = decision {
+            if let Some(approval) = self.pending_approval.take() {
+                let _ = approval.respond.send(decision);
+                let verb = match decision {
+                    ToolApprovalDecision::RunOnce => "allowed (once)",
+                    ToolApprovalDecision::AlwaysAllow => "allowed (always)",
+                    ToolApprovalDecision::Deny => "denied",
+                };
+                let notice = Rc::new(RefCell::new(Text::new(
+                    format!("✓ {} {verb}", approval.request.tool_name),
+                    0,
+                    0,
+                )));
+                self.chat.borrow_mut().add_child(notice as SharedComponent);
+                self.set_status("turn: running");
+                self.tui.borrow_mut().request_render(true);
+            }
+        }
     }
 
     /// Render one session event into the chat container.
