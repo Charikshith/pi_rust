@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
+
 use crate::http::{AnthropicTransport, DynTransport};
 use crate::stream::AssistantMessageEventStream;
 use crate::types::ids::{CacheRetention, ThinkingBudgets, ThinkingLevel};
@@ -33,14 +35,32 @@ pub struct Metadata {
     pub user_id: Option<String>,
 }
 
+/// A successful provider HTTP response (TS `StreamOptions.onResponse`'s first arg).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderResponse {
+    pub status: u16,
+    /// Response headers (keys lower-cased).
+    pub headers: HashMap<String, String>,
+}
+
+/// `onPayload(params, model)` callback (TS `StreamOptions.onPayload`). Returned value
+/// replaces the request params; `None` means "keep them".
+pub type ProviderPayloadCallback = Arc<
+    dyn Fn(serde_json::Value, Model) -> BoxFuture<'static, Option<serde_json::Value>> + Send + Sync,
+>;
+
+/// `onResponse(response, model)` callback (TS `StreamOptions.onResponse`).
+pub type ProviderResponseCallback =
+    Arc<dyn Fn(ProviderResponse, Model) -> BoxFuture<'static, ()> + Send + Sync>;
+
 /// Common per-request options (TS `StreamOptions`, `types.ts:113-189`).
 ///
 /// Data fields are populated here; the behavioral fields — `signal` (cancellation),
-/// `transport` (injected [`crate::http::AnthropicTransport`]), and the `onPayload`/`onResponse`
-/// callbacks — are trait objects/closures added by the adapter subagent (kept out of the
-/// skeleton so it derives `Debug`/`Clone`/`Default`).
-// TODO(feat-002 api): add `signal`, `transport`, `on_payload`, `on_response`.
-#[derive(Debug, Clone, Default)]
+/// `transport` (injected [`crate::http::AnthropicTransport`]), and the `onPayload`/
+/// `onResponse` callbacks — are trait objects/closures added by the adapter subagent.
+/// `Debug` is deliberately absent: the closure slots cannot be derived and the existing
+/// `Default`/`Clone` derivations are all callers need.
+#[derive(Clone, Default)]
 pub struct StreamOptions {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
@@ -62,11 +82,17 @@ pub struct StreamOptions {
     /// adapter skips client construction and streams through it (test double =
     /// [`crate::http::CannedTransport`]).
     pub transport: Option<Arc<dyn DynTransport>>,
+    /// Cancellation token (TS `StreamOptions.signal`).
+    pub signal: Option<tokio_util::sync::CancellationToken>,
+    /// `onPayload` hook (TS `StreamOptions.onPayload`).
+    pub on_payload: Option<ProviderPayloadCallback>,
+    /// `onResponse` hook (TS `StreamOptions.onResponse`).
+    pub on_response: Option<ProviderResponseCallback>,
 }
 
 /// The higher-level "simple" options (TS `SimpleStreamOptions extends StreamOptions`,
 /// `types.ts:295-299`): adds a coarse `reasoning` level and per-level thinking budgets.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SimpleStreamOptions {
     /// Shared base options.
     pub base: StreamOptions,
@@ -79,7 +105,7 @@ pub struct SimpleStreamOptions {
 /// `AnthropicOptions.client` (`:258`): when set, internal client/auth construction is skipped
 /// entirely and the request is sent through the injected transport (the oracle seam, spec
 /// §Oracle).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AnthropicOptions {
     /// Shared base options.
     pub base: StreamOptions,
@@ -113,7 +139,7 @@ impl AnthropicOptions {
 /// OpenAI-completions-specific options (TS `OpenAICompletionsOptions extends
 /// StreamOptions`, `openai-completions.ts:145-153`): the shared base plus
 /// `toolChoice`, `reasoningEffort`, and `thinkingBudgets`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct OpenAICompletionsOptions {
     /// Shared base options.
     pub base: StreamOptions,

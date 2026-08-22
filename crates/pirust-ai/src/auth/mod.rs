@@ -44,7 +44,6 @@ pub const ANTHROPIC_API_KEY_ENV_PRECEDENCE: [&str; 2] =
 ///
 /// An explicit `options.apiKey` wins; otherwise fall back to the Anthropic env precedence
 /// `ANTHROPIC_OAUTH_TOKEN` then `ANTHROPIC_API_KEY` (spec §5).
-///
 /// `provider_env` is the caller-scoped override map (`options.env`); for each var name in
 /// precedence order the lookup is `provider_env.get(name)` then `std::env::var(name)` — a
 /// direct port of `getProviderEnvValue` minus the Bun sandbox fallback (see module docs).
@@ -69,6 +68,69 @@ pub fn resolve_api_key(
 /// `X-Api-Key` (TS `isOAuthToken`, `anthropic-messages.ts:828-830`).
 pub fn is_oauth_token(key: &str) -> bool {
     key.contains(OAUTH_TOKEN_MARKER)
+}
+
+/// The provider → env-var map (TS `getApiKeyEnvVars`'s `envMap`,
+/// `env-api-keys.ts:79-110`), minus the OAuth-only and ambient-credential providers.
+/// `None` means the provider has no simple env-var key (OAuth / ADC / AWS only).
+pub fn api_key_env_var(provider: &str) -> Option<&'static str> {
+    Some(match provider {
+        "github-copilot" => "COPILOT_GITHUB_TOKEN",
+        "ant-ling" => "ANT_LING_API_KEY",
+        "qwen-token-plan" | "qwen-token-plan-individual" => "QWEN_TOKEN_PLAN_API_KEY",
+        "qwen-token-plan-cn" => "QWEN_TOKEN_PLAN_CN_API_KEY",
+        "openai" => "OPENAI_API_KEY",
+        "azure-openai-responses" => "AZURE_OPENAI_API_KEY",
+        "nvidia" => "NVIDIA_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "google" => "GEMINI_API_KEY",
+        "google-vertex" => "GOOGLE_CLOUD_API_KEY",
+        "groq" => "GROQ_API_KEY",
+        "cerebras" => "CEREBRAS_API_KEY",
+        "xai" => "XAI_API_KEY",
+        "radius" => "RADIUS_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        "vercel-ai-gateway" => "AI_GATEWAY_API_KEY",
+        "zai" => "ZAI_API_KEY",
+        "zai-coding-cn" => "ZAI_CODING_CN_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        "minimax" => "MINIMAX_API_KEY",
+        "minimax-cn" => "MINIMAX_CN_API_KEY",
+        "moonshotai" | "moonshotai-cn" => "MOONSHOT_API_KEY",
+        "huggingface" => "HF_TOKEN",
+        "fireworks" => "FIREWORKS_API_KEY",
+        "together" => "TOGETHER_API_KEY",
+        "baseten" => "BASETEN_API_KEY",
+        "opencode" | "opencode-go" => "OPENCODE_API_KEY",
+        "kimi-coding" => "KIMI_API_KEY",
+        "cloudflare-workers-ai" | "cloudflare-ai-gateway" => "CLOUDFLARE_API_KEY",
+        "xiaomi" => "XIAOMI_API_KEY",
+        "xiaomi-token-plan-cn" => "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+        "xiaomi-token-plan-ams" => "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+        "xiaomi-token-plan-sgp" => "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+        _ => return None,
+    })
+}
+
+/// `getEnvApiKey(provider, env)` (`env-api-keys.ts:146-149`): the provider's env-var key
+/// from `env` then the process env. Skips the anthropic auth-token and the vertex/bedrock
+/// ambient-credential branches (OAuth-only / not ported).
+pub fn resolve_env_api_key(provider: &str, env: &BTreeMap<String, String>) -> Option<String> {
+    if provider == "anthropic" {
+        return ANTHROPIC_API_KEY_ENV_PRECEDENCE
+            .iter()
+            .find(|name| env.contains_key(**name))
+            .and_then(|name| env.get(*name))
+            .cloned()
+            .or_else(|| {
+                ANTHROPIC_API_KEY_ENV_PRECEDENCE
+                    .iter()
+                    .find(|name| std::env::var(name).ok().is_some_and(|v| !v.is_empty()))
+                    .and_then(|name| std::env::var(name).ok())
+            });
+    }
+    let name = api_key_env_var(provider)?;
+    env.get(name).cloned().or_else(|| std::env::var(name).ok())
 }
 
 #[cfg(test)]

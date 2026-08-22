@@ -1688,3 +1688,27 @@ Verification: fmt clean, clippy `-D warnings` clean, all 5 black-box tests
   pi-messages), OAuth flows.
 - NEXT: commit this wave; then feat-008 transport layer + sdk.rs routing so a
   non-Anthropic model can actually stream.
+
+## feat-008 Wave 7 — transport layer + sdk.rs routing (DONE, uncommitted)
+- `http/mod.rs`: `HttpResponse { status, headers }`; `TransportError::Status` now carries
+  headers; `HttpRequest.authorization` + `with_bearer_auth`; `ReqwestTransport` fills
+  status/headers and sends `Authorization: Bearer`; `SendFuture` type alias (clippy).
+- NEW `utils/error_body.rs` (`normalize_provider_error`/`format_provider_error`/
+  `truncate_error_text`/`safe_json_stringify`, 1:1 error-body.ts) — 4 unit tests.
+- NEW `utils/provider_retry.rs` (`retry_provider_request`/`ProviderError`/
+  `is_retryable_provider_error`/`get_retry_delay_ms` + abortable backoff via CancellationToken,
+  1:1 provider-retry.ts) — 4 unit tests.
+- `api/mod.rs`: `ProviderResponse`, `ProviderPayloadCallback`/`ProviderResponseCallback`,
+  `signal` on `StreamOptions`; `Debug` dropped from the option structs (closure slots).
+- `openai_completions.rs`: `build_client_headers` (model.headers + copilot dynamic +
+  session-affinity + options.headers + xai user-agent), `resolve_openai_api_key`,
+  onPayload/onResponse wiring, retryProviderRequest around the POST, error normalization in
+  the catch path; `stream` now requires an api key (openai auth semantics).
+- `auth/mod.rs`: `api_key_env_var` (env-api-keys.ts envMap) + `resolve_env_api_key`.
+- `sdk.rs`: `build_stream_fn` dispatches on `model.api` (anthropic-messages |
+  openai-completions | error stream), credential lookup per-provider + env fallback.
+- Gates: pirust-ai 94 lib + all goldens green; workspace builds; clippy --all-targets
+  -D warnings clean; fmt clean; openai-completions oracle --check green (22 records).
+  Only the 3 pre-existing pirust-tools find.rs env failures remain (unchanged).
+- DEFERRED (named, not silent): other adapters (codex-responses, google, vertex, bedrock,
+  mistral, pi-messages), OAuth flows, retry.ts assistant-call classifier, transformHeaders.

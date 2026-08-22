@@ -36,6 +36,11 @@ use pirust_agent_core::agent::{Agent, AgentOptions};
 use pirust_agent_core::harness::messages::convert_to_llm;
 use pirust_agent_core::types::{AgentTool, ThinkingLevel};
 use pirust_ai::api::{anthropic_messages, SimpleStreamOptions, StreamOptions};
+use pirust_ai::stream::{assistant_message_stream, AssistantMessageEventStream};
+use pirust_ai::types::event::AssistantMessageEvent;
+use pirust_ai::types::ids::StopReason;
+use pirust_ai::types::message::AssistantMessage;
+use pirust_ai::types::usage::{Cost, Usage};
 use pirust_ai::types::Model;
 use pirust_tools::{create_all_tool_definitions, create_all_tools, ToolName, ToolRecord};
 use tokio_util::sync::CancellationToken;
@@ -233,10 +238,11 @@ fn clamp_thinking_level(model: &Model, level: ThinkingLevel) -> ThinkingLevel {
     available.first().copied().unwrap_or(ThinkingLevel::Off)
 }
 
-/// The `streamFn` closure sdk.ts builds inline (`:296-325`), narrowed to the Anthropic
-/// adapter. Resolves the credential fresh on every call ("important for expiring
-/// tokens", `agent-loop.ts:445`'s comment on `get_api_key` — done here instead of via
-/// that hook because header/timeout resolution needs the same settings read anyway).
+/// The `streamFn` closure sdk.ts builds inline (`:296-325`), dispatched by `model.api`
+/// (the feat-008 routing seam). Resolves the credential fresh on every call
+/// ("important for expiring tokens", `agent-loop.ts:445`'s comment on `get_api_key` —
+/// done here instead of via that hook because header/timeout resolution needs the same
+/// settings read anyway).
 fn build_stream_fn(
     auth_path: PathBuf,
     settings: Arc<SettingsManager>,
@@ -246,12 +252,14 @@ fn build_stream_fn(
     Arc::new(move |model, context, options, _token: CancellationToken| {
         // `--api-key` wins outright (hazard §16.30) — no stored-credential lookup, no
         // ambient-env fallback, matching `ModelRuntime.check_auth`'s ranking.
+        let provider = model.provider.0.as_str();
+        let env: BTreeMap<String, String> = std::env::vars().collect();
         let api_key = match &runtime_api_key {
             Some(key) => Some(key.clone()),
             None => {
-                let credential = read_stored_credential("anthropic", &auth_path);
-                let env: BTreeMap<String, String> = std::env::vars().collect();
+                let credential = read_stored_credential(provider, &auth_path);
                 credential_api_key(credential.as_ref(), &env)
+                    .or_else(|| pirust_ai::auth::resolve_env_api_key(provider, &env))
             }
         };
         let headers =
@@ -284,8 +292,69 @@ fn build_stream_fn(
             },
             ..options
         };
-        anthropic_messages::stream_simple(&model, &context, Some(opts))
+        match model.api.0.as_str() {
+            pirust_ai::types::ids::known_api::ANTHROPIC_MESSAGES => {
+                anthropic_messages::stream_simple(&model, &context, Some(opts))
+            }
+            pirust_ai::types::ids::known_api::OPENAI_COMPLETIONS => {
+                pirust_ai::api::openai_completions::stream_simple(&model, &context, Some(opts))
+            }
+            other => provider_error_stream(
+                &model,
+                &format!("No API provider registered for api: {other}"),
+            ),
+        }
     })
+}
+
+/// A single-event error stream for an unknown `model.api` (mirrors agent-core's private
+/// `error_stream`, which is not exported).
+fn provider_error_stream(model: &Model, message: &str) -> AssistantMessageEventStream {
+    let (mut sink, stream) = assistant_message_stream();
+    let error = AssistantMessage {
+        role: pirust_ai::types::message::AssistantRole::Assistant,
+        content: Vec::new(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: Some(model.id.clone()),
+        response_model: None,
+        diagnostics: None,
+        usage: Usage {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: Some(0),
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+                total: 0.0,
+            },
+            cache_write1h: None,
+            reasoning: None,
+        },
+        stop_reason: StopReason::Error,
+        timestamp: now_millis(),
+        response_id: None,
+        raw_stop_reason: None,
+        error_message: Some(message.to_string()),
+        end_turn: None,
+    };
+    sink.push(AssistantMessageEvent::Error {
+        reason: StopReason::Error,
+        error,
+    });
+    sink.end(None);
+    stream
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// `createAgentSession(options)` (`sdk.ts:164-393`), narrowed per the module docs.

@@ -264,7 +264,7 @@ async fn run_machine(
     };
 
     let request = build_request(model, ctx, opts, is_oauth);
-    let byte_stream = transport
+    let (byte_stream, _response) = transport
         .send_dyn(request)
         .await
         .map_err(|error| failure(transport_message(&error)))?;
@@ -901,7 +901,12 @@ fn build_request(
         headers.extend(extra.iter().cloned());
     }
 
-    HttpRequest { url, headers, body }
+    HttpRequest {
+        url,
+        headers,
+        body,
+        authorization: None,
+    }
 }
 
 fn json_text_block(text: &str) -> Value {

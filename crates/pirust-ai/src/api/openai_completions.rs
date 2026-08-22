@@ -27,7 +27,8 @@ use crate::api::constrained_sampling::{
     resolve_json_schema_strict_sampling, GrammarConstrainedSampling, GrammarToolInputJsonBuffer,
 };
 use crate::api::transform_messages::{transform_messages_with_normalizer, NormalizeCtx};
-use crate::api::OpenAICompletionsOptions;
+use crate::api::{OpenAICompletionsOptions, ProviderResponse};
+use crate::http::DynTransport;
 use crate::json_repair::parse_streaming_json;
 use crate::stream::{assistant_message_stream, AssistantMessageEventStream, AssistantMessageSink};
 use crate::types::content::{
@@ -41,6 +42,8 @@ use crate::types::message::{
 };
 use crate::types::model::{Modality, Model};
 use crate::types::usage::{Cost, Usage};
+use crate::utils::error_body::{format_provider_error, normalize_provider_error};
+use crate::utils::provider_retry::{retry_provider_request, ProviderError};
 
 /// `sanitizeSurrogates` — remove unpaired UTF-16 surrogate code units (TS
 /// `utils/sanitize-unicode.ts`). JS strings index by UTF-16 code units; a lone
@@ -1946,25 +1949,92 @@ pub fn stream(
     stream
 }
 
-/// Build the outbound OpenAI request (TS `createClient` + `buildParams`; the
-/// URL is `{baseUrl}/chat/completions`, headers assembled from `model.headers`
-/// + options.headers, body = `buildParams` output).
-fn build_request(
+/// Assemble the request headers (TS `createClient` `:641-689`): `model.headers`,
+/// then copilot dynamic headers, session-affinity headers, `options.headers`,
+/// and the xai user-agent override. `apiKey` → `Authorization: Bearer` is applied
+/// by the transport via `HttpRequest::authorization`.
+fn build_client_headers(
     model: &Model,
     context: &Context,
     opts: &OpenAICompletionsOptions,
-) -> Result<crate::http::HttpRequest, String> {
-    let params = build_params(model, context, Some(opts), None)?;
-    let mut headers: Vec<(String, String)> = Vec::new();
+    compat: &ResolvedOpenAICompletionsCompat,
+) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = model
+        .headers
+        .as_ref()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if model.provider.0 == "github-copilot" {
+        let has_images = has_copilot_vision_input(&context.messages);
+        headers.push((
+            "X-Initiator".into(),
+            infer_copilot_initiator(&context.messages).into(),
+        ));
+        headers.push(("Openai-Intent".into(), "conversation-edits".into()));
+        if has_images {
+            headers.push(("Copilot-Vision-Request".into(), "true".into()));
+        }
+    }
+
+    if let Some(session_id) = &opts.base.session_id {
+        if compat.send_session_affinity_headers {
+            match compat.session_affinity_format {
+                SessionAffinityFormat::Openrouter => {
+                    headers.push(("x-session-id".into(), session_id.clone()));
+                }
+                SessionAffinityFormat::Openai => {
+                    headers.push(("session_id".into(), session_id.clone()));
+                    headers.push(("x-client-request-id".into(), session_id.clone()));
+                    headers.push(("x-session-affinity".into(), session_id.clone()));
+                }
+                // TS: neither openrouter nor openai → only the two x-* headers.
+                SessionAffinityFormat::OpenaiNosession => {
+                    headers.push(("x-client-request-id".into(), session_id.clone()));
+                    headers.push(("x-session-affinity".into(), session_id.clone()));
+                }
+            }
+        }
+    }
+
+    // Merge options headers last so they can override defaults (TS `:674-676`).
     if let Some(extra) = &opts.base.headers {
         headers.extend(extra.iter().cloned());
     }
-    let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
-    Ok(crate::http::HttpRequest {
-        url,
-        headers,
-        body: params.to_string(),
+
+    if model.provider.0 == "xai" {
+        headers.retain(|(k, _)| !k.eq_ignore_ascii_case("user-agent"));
+        headers.push(("User-Agent".into(), pi_user_agent()));
+    }
+
+    headers
+}
+
+/// TS `inferCopilotInitiator` (github-copilot-headers.ts).
+fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
+    match messages.last() {
+        Some(Message::User(_)) | None => "user",
+        Some(_) => "agent",
+    }
+}
+
+/// TS `hasCopilotVisionInput` (github-copilot-headers.ts).
+fn has_copilot_vision_input(messages: &[Message]) -> bool {
+    messages.iter().any(|msg| match msg {
+        Message::User(user) => matches!(&user.content, UserMessageContent::Blocks(blocks) if blocks.iter().any(|c| matches!(c, UserContent::Image(_)))),
+        Message::ToolResult(tool) => tool.content.iter().any(|c| matches!(c, UserContent::Image(_))),
+        _ => false,
     })
+}
+
+/// TS `getPiUserAgent` (pi-user-agent.ts) — the browser / non-node form, since the
+/// Rust transport has no `process.versions.node`.
+fn pi_user_agent() -> String {
+    "pi (browser)".to_string()
 }
 
 /// The producer task (TS IIFE `:206-614`): send the request, iterate SSE
@@ -2011,18 +2081,66 @@ async fn run_produce(
         context.tools.as_deref(),
         compat.supports_openai_grammar_tools,
     );
-    let request = build_request(model, context, opts)?;
+
+    // TS `:216-217`: resolve the api key, throwing `No API key for provider: X` when
+    // absent and no pre-authenticated header is present.
+    let api_key = resolve_openai_api_key(model, opts)?;
+
+    // TS `:220-227`: buildParams, then `onPayload` may replace them.
+    let mut params = build_params(model, context, Some(opts), Some(&compat))?;
+    if let Some(on_payload) = &opts.base.on_payload {
+        if let Some(next) = on_payload(params.clone(), model.clone()).await {
+            params = next;
+        }
+    }
+
+    let request = crate::http::HttpRequest {
+        url: format!("{}/chat/completions", model.base_url.trim_end_matches('/')),
+        headers: build_client_headers(model, context, opts, &compat),
+        body: params.to_string(),
+        authorization: Some(api_key),
+    };
 
     // Resolve the transport (TS `createClient` `:641-689` + `options.fetch`):
     // injected transport skips client construction entirely.
-    let transport: std::sync::Arc<dyn crate::http::DynTransport> = match &opts.base.transport {
+    let transport: std::sync::Arc<dyn DynTransport> = match &opts.base.transport {
         Some(t) => t.clone(),
         None => std::sync::Arc::new(crate::http::ReqwestTransport::new()),
     };
-    let byte_stream = transport
-        .send_dyn(request)
-        .await
-        .map_err(|e| crate::http::TransportError::to_string(&e))?;
+
+    // TS `:232-241`: retry the POST per the SDK policy, then `onResponse`.
+    let token = opts.base.signal.clone().unwrap_or_default();
+    let (byte_stream, response) = retry_provider_request(
+        || {
+            let transport = transport.clone();
+            let request = request.clone();
+            async move { transport.send_dyn(request).await }
+        },
+        opts.base.max_retries,
+        opts.base.max_retry_delay_ms,
+        &token,
+        |error: &crate::http::TransportError| match error {
+            crate::http::TransportError::Status {
+                status,
+                body,
+                headers,
+            } => ProviderError::from_status(*status, headers.clone(), body.clone()),
+            other => ProviderError::from_request(other.to_string()),
+        },
+    )
+    .await
+    .map_err(|e| format_provider_error(&normalize_transport_error(&e), None))?;
+
+    if let Some(on_response) = &opts.base.on_response {
+        on_response(
+            ProviderResponse {
+                status: response.status,
+                headers: response.headers.clone(),
+            },
+            model.clone(),
+        )
+        .await;
+    }
 
     // TS `:557`: pre-loop `start` event.
     sink.push(AssistantMessageEvent::Start {
@@ -2057,6 +2175,42 @@ async fn run_produce(
         output,
         sink,
     )
+}
+
+/// Resolve the provider api key (TS `getClientApiKey` `:60-64`): explicit
+/// `api_key` wins, else an Authorization / cf-aig header implies a
+/// pre-authenticated client ("unused"), else an error naming the provider.
+fn resolve_openai_api_key(
+    model: &Model,
+    opts: &OpenAICompletionsOptions,
+) -> Result<String, String> {
+    if let Some(key) = &opts.base.api_key {
+        return Ok(key.clone());
+    }
+    let has = |name: &str| {
+        opts.base.headers.as_ref().is_some_and(|hs| {
+            hs.iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case(name) && !v.trim().is_empty())
+        })
+    };
+    if has("authorization") || has("cf-aig-authorization") {
+        return Ok("unused".to_string());
+    }
+    Err(format!("No API key for provider: {}", model.provider.0))
+}
+
+/// Normalize a transport error into Pi's provider-error shape (TS
+/// `normalizeProviderError` on the thrown SDK error).
+fn normalize_transport_error(
+    error: &crate::http::TransportError,
+) -> crate::utils::error_body::NormalizedProviderError {
+    match error {
+        crate::http::TransportError::Status { status, body, .. } => {
+            let message = format!("HTTP {status}: {body}");
+            normalize_provider_error(Some(*status), Some(body.clone()), message)
+        }
+        other => normalize_provider_error(None, None, other.to_string()),
+    }
 }
 
 /// Unit type binding the module's free functions to the [`ProviderStreams`] trait.

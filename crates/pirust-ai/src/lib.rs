@@ -18,6 +18,7 @@ pub mod json_repair;
 pub mod providers;
 pub mod sse;
 pub mod stream;
+pub mod utils;
 
 /// Returns the crate name. Retained as a smoke symbol for dependent crates' stubs.
 pub fn name() -> &'static str {

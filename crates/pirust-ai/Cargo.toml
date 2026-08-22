@@ -27,7 +27,8 @@ futures = { workspace = true }
 bytes = { workspace = true }
 # base64: image `data` handling in message conversion (convertContentBlocks).
 base64 = { workspace = true }
-# tokio-util codec: optional line framing of the byte stream.
+# tokio-util codec: optional line framing of the byte stream. `sync::CancellationToken`
+# is always available (no feature gate) and backs the abortable retry backoff.
 tokio-util = { workspace = true, features = ["codec"] }
 
 [dev-dependencies]

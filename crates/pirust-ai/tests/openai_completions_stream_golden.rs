@@ -175,6 +175,7 @@ async fn golden_streams() {
         // feed the canned SSE body through the SAME TS path (`streamSimple`),
         // with the transport injected on the shared base options
         let mut simple = pirust_ai::api::SimpleStreamOptions::default();
+        simple.base.api_key = Some("fake-key".to_string());
         simple.base.transport = Some(
             std::sync::Arc::new(CannedTransport::new(sse_body.to_string()))
                 as std::sync::Arc<dyn pirust_ai::http::DynTransport>,
