@@ -58,6 +58,10 @@ pub struct StreamOptions {
     pub metadata: Option<Metadata>,
     /// Extra sampling params merged last over the request body (TS `samplingParams`).
     pub sampling_params: Option<serde_json::Value>,
+    /// Injected transport (TS `StreamOptions.transport`). When present the
+    /// adapter skips client construction and streams through it (test double =
+    /// [`crate::http::CannedTransport`]).
+    pub transport: Option<Arc<dyn DynTransport>>,
 }
 
 /// The higher-level "simple" options (TS `SimpleStreamOptions extends StreamOptions`,
@@ -119,6 +123,21 @@ pub struct OpenAICompletionsOptions {
     pub reasoning_effort: Option<crate::types::ids::ThinkingLevel>,
     /// Per-level thinking budgets (TS `ThinkingBudgets`).
     pub thinking_budgets: Option<crate::types::ids::ThinkingBudgets>,
+}
+
+impl OpenAICompletionsOptions {
+    /// Inject a transport for the golden oracle (feeds a
+    /// [`crate::http::CannedTransport`] carrying a canned SSE body). The
+    /// transport lives on [`StreamOptions`] (TS `StreamOptions.transport`);
+    /// this helper sets it on the shared base.
+    #[must_use]
+    pub fn with_transport(
+        mut self,
+        transport: impl AnthropicTransport + Clone + std::fmt::Debug + 'static,
+    ) -> Self {
+        self.base.transport = Some(Arc::new(transport) as Arc<dyn DynTransport>);
+        self
+    }
 }
 
 /// The provider streaming contract (TS `ProviderStreams`, `types.ts:227-230`). Every provider

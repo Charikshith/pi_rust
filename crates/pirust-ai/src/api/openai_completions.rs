@@ -16,21 +16,31 @@
 
 use std::collections::{HashMap, HashSet};
 
+use futures::StreamExt;
+
 use serde_json::{json, Map, Value};
 
 use crate::api::anthropic_messages::calculate_cost;
 use crate::api::constrained_sampling::{
-    create_grammar_tool_input_properties, get_grammar_tool_input, get_json_schema_tool_parameters,
-    resolve_grammar_constrained_sampling, resolve_json_schema_strict_sampling,
-    GrammarConstrainedSampling,
+    append_grammar_tool_input_json_delta, create_grammar_tool_input_properties,
+    get_grammar_tool_input, get_json_schema_tool_parameters, resolve_grammar_constrained_sampling,
+    resolve_json_schema_strict_sampling, GrammarConstrainedSampling, GrammarToolInputJsonBuffer,
 };
 use crate::api::transform_messages::{transform_messages_with_normalizer, NormalizeCtx};
 use crate::api::OpenAICompletionsOptions;
-use crate::types::content::{AssistantContent, ToolCall, UserContent};
+use crate::json_repair::parse_streaming_json;
+use crate::stream::{assistant_message_stream, AssistantMessageEventStream, AssistantMessageSink};
+use crate::types::content::{
+    AssistantContent, TextContent, TextTag, ThinkingContent, ThinkingTag, ToolCall, ToolCallTag,
+    UserContent,
+};
+use crate::types::event::AssistantMessageEvent;
 use crate::types::ids::{SessionAffinityFormat, StopReason};
-use crate::types::message::{Context, Message, UserMessageContent};
+use crate::types::message::{
+    AssistantMessage, AssistantRole, Context, Message, UserMessageContent,
+};
 use crate::types::model::{Modality, Model};
-use crate::types::usage::Usage;
+use crate::types::usage::{Cost, Usage};
 
 /// `sanitizeSurrogates` — remove unpaired UTF-16 surrogate code units (TS
 /// `utils/sanitize-unicode.ts`). JS strings index by UTF-16 code units; a lone
@@ -310,7 +320,7 @@ pub fn parse_chunk_usage(raw: &RawChunkUsage, model: &Model) -> Usage {
             total: 0.0,
         },
         cache_write1h: None,
-        reasoning: if reasoning > 0 { Some(reasoning) } else { None },
+        reasoning: Some(reasoning),
     };
     calculate_cost(model, &mut usage);
     usage
@@ -1776,6 +1786,1074 @@ fn level_name(level: crate::types::ids::ThinkingLevel) -> &'static str {
     }
 }
 
+/// `ThinkingLevel` → `ModelThinkingLevel` (the extended union with `off`).
+fn level_to_model(
+    level: crate::types::ids::ThinkingLevel,
+) -> crate::types::ids::ModelThinkingLevel {
+    match level {
+        crate::types::ids::ThinkingLevel::Minimal => crate::types::ids::ModelThinkingLevel::Minimal,
+        crate::types::ids::ThinkingLevel::Low => crate::types::ids::ModelThinkingLevel::Low,
+        crate::types::ids::ThinkingLevel::Medium => crate::types::ids::ModelThinkingLevel::Medium,
+        crate::types::ids::ThinkingLevel::High => crate::types::ids::ModelThinkingLevel::High,
+        crate::types::ids::ThinkingLevel::Xhigh => crate::types::ids::ModelThinkingLevel::Xhigh,
+        crate::types::ids::ThinkingLevel::Max => crate::types::ids::ModelThinkingLevel::Max,
+    }
+}
+
+/// `ModelThinkingLevel` → `ThinkingLevel` (panics on `Off` — callers must
+/// handle it first).
+fn model_to_level(
+    level: crate::types::ids::ModelThinkingLevel,
+) -> crate::types::ids::ThinkingLevel {
+    match level {
+        crate::types::ids::ModelThinkingLevel::Off => {
+            panic!("model_to_level(Off): callers map Off to None first")
+        }
+        crate::types::ids::ModelThinkingLevel::Minimal => crate::types::ids::ThinkingLevel::Minimal,
+        crate::types::ids::ModelThinkingLevel::Low => crate::types::ids::ThinkingLevel::Low,
+        crate::types::ids::ModelThinkingLevel::Medium => crate::types::ids::ThinkingLevel::Medium,
+        crate::types::ids::ModelThinkingLevel::High => crate::types::ids::ThinkingLevel::High,
+        crate::types::ids::ModelThinkingLevel::Xhigh => crate::types::ids::ThinkingLevel::Xhigh,
+        crate::types::ids::ModelThinkingLevel::Max => crate::types::ids::ThinkingLevel::Max,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `stream` / `streamSimple` (TS `stream` `:204-619`, `streamSimple` `:620-640`)
+// ---------------------------------------------------------------------------
+
+/// TS `clampThinkingLevel` (`models.ts:913-927`): clamp a requested thinking
+/// level to the model's supported set. `getSupportedThinkingLevels` (models.ts
+/// `:902-910`) filters the extended levels by `model.reasoning` and the
+/// `thinkingLevelMap` null/absent semantics.
+pub fn get_supported_thinking_levels(model: &Model) -> Vec<crate::types::ids::ModelThinkingLevel> {
+    use crate::types::ids::ModelThinkingLevel::*;
+    if !model.reasoning {
+        return vec![Off];
+    }
+    const EXTENDED: [crate::types::ids::ModelThinkingLevel; 7] =
+        [Off, Minimal, Low, Medium, High, Xhigh, Max];
+    EXTENDED
+        .iter()
+        .copied()
+        .filter(|level| {
+            let map = model.thinking_level_map.as_ref();
+            match level {
+                // `map[level] === null` → unsupported (explicit null)
+                Xhigh | Max => map.is_some_and(|m| {
+                    m.get(crate::types::ids::ThinkingLevel::Xhigh).is_some()
+                        || m.get(crate::types::ids::ThinkingLevel::Max).is_some()
+                }),
+                // absent key → supported; explicit null → unsupported
+                Off => map.is_none_or(|m| m.off_value().is_some()),
+                _ => true,
+            }
+        })
+        .collect()
+}
+
+/// TS `clampThinkingLevel` (`models.ts:913-927`).
+pub fn clamp_thinking_level(
+    model: &Model,
+    level: crate::types::ids::ModelThinkingLevel,
+) -> crate::types::ids::ModelThinkingLevel {
+    use crate::types::ids::ModelThinkingLevel::*;
+    let available = get_supported_thinking_levels(model);
+    if available.contains(&level) {
+        return level;
+    }
+    const EXTENDED: [crate::types::ids::ModelThinkingLevel; 7] =
+        [Off, Minimal, Low, Medium, High, Xhigh, Max];
+    let requested_index = EXTENDED.iter().position(|l| *l == level);
+    let Some(requested_index) = requested_index else {
+        return available.first().copied().unwrap_or(Off);
+    };
+    // search upward then downward for the nearest supported level
+    for candidate in &EXTENDED[requested_index..] {
+        if available.contains(candidate) {
+            return *candidate;
+        }
+    }
+    for candidate in EXTENDED[..requested_index].iter().rev() {
+        if available.contains(candidate) {
+            return *candidate;
+        }
+    }
+    available.first().copied().unwrap_or(Off)
+}
+
+/// `streamSimple` (TS `:620-640`): map the coarse options onto full
+/// `OpenAICompletionsOptions` and delegate to `stream`. The synchronous
+/// `getClientApiKey` auth assert (`:622`) is intentionally omitted — auth is
+/// enforced inside `produce` as an `error` event.
+pub fn stream_simple(
+    model: &Model,
+    context: &Context,
+    opts: Option<crate::api::SimpleStreamOptions>,
+) -> AssistantMessageEventStream {
+    let opts = opts.unwrap_or_default();
+    let mut base = opts.base.clone();
+    // TS `buildBaseOptions` (simple-options.ts `:28-61`): clamp max_tokens to
+    // context (already exported), keep the rest of the shared options.
+    if let Some(mt) = base.max_tokens {
+        base.max_tokens = Some(clamp_max_tokens_to_context(model, context, mt));
+    } else {
+        base.max_tokens = Some(clamp_max_tokens_to_context(
+            model,
+            context,
+            model.max_tokens,
+        ));
+    }
+    // TS `streamSimple` `:634-641`: `clampThinkingLevel(model, reasoning)` then
+    // `reasoningEffort = clamped === "off" ? undefined : clamped`. In the Rust
+    // model "off" is represented as `None` (the anthropic adapter's convention),
+    // so a reasoning-level request that clamps to Off yields `None`.
+    let clamped = opts
+        .reasoning
+        .map(|l| clamp_thinking_level(model, level_to_model(l)));
+    let reasoning_effort = match clamped {
+        None | Some(crate::types::ids::ModelThinkingLevel::Off) => None,
+        Some(l) => Some(model_to_level(l)),
+    };
+    stream(
+        model,
+        context,
+        Some(OpenAICompletionsOptions {
+            base,
+            tool_choice: None,
+            reasoning_effort,
+            thinking_budgets: opts.thinking_budgets,
+        }),
+    )
+}
+
+/// The `stream` adapter (TS `stream` `:204-619`). Spawns the producer over the
+/// transport's SSE byte stream and emits `AssistantMessageEvent`s.
+///
+/// This wave wires the deterministic state machine to a transport; the
+/// `onPayload`/`onResponse`/`retryProviderRequest`/`normalizeProviderError`
+/// pieces remain a later wave.
+pub fn stream(
+    model: &Model,
+    context: &Context,
+    opts: Option<OpenAICompletionsOptions>,
+) -> AssistantMessageEventStream {
+    let (sink, stream) = assistant_message_stream();
+    let model = model.clone();
+    let context = context.clone();
+    let opts = opts.unwrap_or_default();
+    tokio::spawn(produce(model, context, opts, sink));
+    stream
+}
+
+/// Build the outbound OpenAI request (TS `createClient` + `buildParams`; the
+/// URL is `{baseUrl}/chat/completions`, headers assembled from `model.headers`
+/// + options.headers, body = `buildParams` output).
+fn build_request(
+    model: &Model,
+    context: &Context,
+    opts: &OpenAICompletionsOptions,
+) -> Result<crate::http::HttpRequest, String> {
+    let params = build_params(model, context, Some(opts), None)?;
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(extra) = &opts.base.headers {
+        headers.extend(extra.iter().cloned());
+    }
+    let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
+    Ok(crate::http::HttpRequest {
+        url,
+        headers,
+        body: params.to_string(),
+    })
+}
+
+/// The producer task (TS IIFE `:206-614`): send the request, iterate SSE
+/// chunks, run the state machine, emit `done` or `error`.
+async fn produce(
+    model: Model,
+    context: Context,
+    opts: OpenAICompletionsOptions,
+    mut sink: AssistantMessageSink,
+) {
+    let mut output = init_output(&model);
+    let result = run_produce(&model, &context, &opts, &mut output, &mut sink).await;
+    match result {
+        Ok(()) => {
+            let reason = output.stop_reason;
+            sink.push(AssistantMessageEvent::Done {
+                reason,
+                message: output.clone(),
+            });
+            sink.end(None);
+        }
+        Err(message) => {
+            output.stop_reason = StopReason::Error;
+            output.error_message = Some(message);
+            let reason = output.stop_reason;
+            sink.push(AssistantMessageEvent::Error {
+                reason,
+                error: output.clone(),
+            });
+            sink.end(None);
+        }
+    }
+}
+
+async fn run_produce(
+    model: &Model,
+    context: &Context,
+    opts: &OpenAICompletionsOptions,
+    output: &mut AssistantMessage,
+    sink: &mut AssistantMessageSink,
+) -> Result<(), String> {
+    let compat = get_compat(model);
+    let grammar_tool_input_properties = create_grammar_tool_input_properties(
+        context.tools.as_deref(),
+        compat.supports_openai_grammar_tools,
+    );
+    let request = build_request(model, context, opts)?;
+
+    // Resolve the transport (TS `createClient` `:641-689` + `options.fetch`):
+    // injected transport skips client construction entirely.
+    let transport: std::sync::Arc<dyn crate::http::DynTransport> = match &opts.base.transport {
+        Some(t) => t.clone(),
+        None => std::sync::Arc::new(crate::http::ReqwestTransport::new()),
+    };
+    let byte_stream = transport
+        .send_dyn(request)
+        .await
+        .map_err(|e| crate::http::TransportError::to_string(&e))?;
+
+    // TS `:557`: pre-loop `start` event.
+    sink.push(AssistantMessageEvent::Start {
+        partial: output.clone(),
+    });
+
+    // Parse SSE into chunk values (OpenAI chat-completions uses plain
+    // `data: {json}` lines, no `event:` names).
+    let byte_stream = byte_stream.map(|chunk| {
+        chunk.map_err(|e| {
+            crate::sse::SseError::Transport(crate::http::TransportError::to_string(&e))
+        })
+    });
+    let mut events = crate::sse::iterate_sse_messages(byte_stream);
+    let mut chunks = Vec::new();
+    while let Some(item) = events.next().await {
+        let sse = item.map_err(|e| match e {
+            crate::sse::SseError::ServerError(data) => data,
+            crate::sse::SseError::Aborted => "Request was aborted".to_string(),
+            crate::sse::SseError::Transport(message) => message,
+        })?;
+        if let Some(chunk) = parse_chunk(&sse.data) {
+            chunks.push(chunk);
+        }
+    }
+
+    run_stream_state_machine(
+        model,
+        &compat,
+        &grammar_tool_input_properties,
+        chunks.into_iter(),
+        output,
+        sink,
+    )
+}
+
+/// Unit type binding the module's free functions to the [`ProviderStreams`] trait.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenAICompletions;
+
+impl crate::api::ProviderStreams for OpenAICompletions {
+    fn stream(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: Option<crate::api::StreamOptions>,
+    ) -> AssistantMessageEventStream {
+        let openai = opts.map(|base| OpenAICompletionsOptions {
+            base,
+            ..Default::default()
+        });
+        stream(model, ctx, openai)
+    }
+
+    fn stream_simple(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        opts: Option<crate::api::SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream {
+        stream_simple(model, ctx, opts)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming state machine (TS `stream` `:204-618`)
+// ---------------------------------------------------------------------------
+//
+// The deterministic core of Pi's `stream`: a chunk->event state machine that
+// builds the output `AssistantMessage` incrementally and emits
+// `AssistantMessageEvent`s as text/thinking/tool-call blocks open, stream
+// deltas and close. Transport (HTTP + retry + error normalization) is a later
+// wave; this state machine is fed raw parsed chunk `Value`s and is exercised
+// directly by the golden test via a canned SSE body (same pattern as
+// `anthropic_golden.rs`).
+//
+// ## Divergence from Pi (documented, same as anthropic_golden.rs)
+//
+// Pi pushes the SAME mutable `output` object by reference into every event, so
+// a captured tape's `partial` field always reflects the FINAL message state
+// (JS aliasing). A faithful Rust port emits an OWNED incremental snapshot at
+// each emission. Tests therefore assert the tape's event `type` sequence +
+// emission-stable fields, and byte-compare only the TERMINAL event's
+// message/error (which equals the final message).
+// ---------------------------------------------------------------------------
+// Streaming state machine (TS `stream` `:204-618`)
+// ---------------------------------------------------------------------------
+//
+// The deterministic core of Pi's `stream`: a chunk->event state machine that
+// builds the output `AssistantMessage` incrementally and emits
+// `AssistantMessageEvent`s as text/thinking/tool-call blocks open, stream
+// deltas and close. Transport (HTTP + retry + error normalization) is a later
+// wave; this state machine is fed raw parsed chunk `Value`s and is exercised
+// directly by the golden test via a canned SSE body (same pattern as
+// `anthropic_golden.rs`).
+//
+// ## Divergence from Pi (documented, same as anthropic_golden.rs)
+//
+// Pi pushes the SAME mutable `output` object by reference into every event, so
+// a captured tape's `partial` field always reflects the FINAL message state
+// (JS aliasing). A faithful Rust port emits an OWNED incremental snapshot at
+// each emission. Tests therefore assert the tape's event `type` sequence +
+// emission-stable fields, and byte-compare only the TERMINAL event's
+// message/error (which equals the final message).
+//
+// ## Scratch model (Rust side-channel, never serialized)
+//
+// TS hides `partialArgs`/`customInput`/`streamIndex` as transient properties
+// on the tool-call block. Rust keeps them in parallel maps keyed by the block
+// index inside `output.content` — the single source of truth, mutated in
+// place exactly like Pi's `output`. The `ToolCall.partial_json` field is NOT
+// used here; it is a separate persisted-transient for interrupted sessions.
+
+/// Date.now() (TS `:507`). Non-deterministic; golden tests zero it before compare.
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The initial `output` literal (TS `:492-508`). Key-insertion order per §4e:
+/// role, content, api, provider, model, usage, stopReason, timestamp.
+fn init_output(model: &Model) -> AssistantMessage {
+    AssistantMessage {
+        role: AssistantRole::Assistant,
+        content: Vec::new(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: Some(model.id.clone()),
+        response_model: None,
+        diagnostics: None,
+        usage: Usage {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: Some(0),
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+                total: 0.0,
+            },
+            cache_write1h: None,
+            reasoning: None,
+        },
+        stop_reason: StopReason::Stop,
+        timestamp: now_millis(),
+        response_id: None,
+        raw_stop_reason: None,
+        error_message: None,
+        end_turn: None,
+    }
+}
+
+/// A `tool_calls` entry inside a chunk's `choices[0].delta` (TS
+/// `StreamingToolCallDelta`). All fields optional; `custom` is the non-standard
+/// grammar-tool input form some providers emit.
+#[derive(Debug, Clone, Default)]
+struct StreamingToolCallDelta {
+    index: Option<u64>,
+    id: Option<String>,
+    function_name: Option<String>,
+    function_arguments: Option<String>,
+    custom_name: Option<String>,
+    custom_input: Option<String>,
+}
+
+impl StreamingToolCallDelta {
+    fn from_value(v: &Value) -> Self {
+        let mut d = StreamingToolCallDelta::default();
+        if let Some(obj) = v.as_object() {
+            d.index = obj.get("index").and_then(Value::as_u64);
+            d.id = obj.get("id").and_then(Value::as_str).map(String::from);
+            if let Some(f) = obj.get("function").and_then(Value::as_object) {
+                d.function_name = f.get("name").and_then(Value::as_str).map(String::from);
+                d.function_arguments = f.get("arguments").and_then(Value::as_str).map(String::from);
+            }
+            if let Some(c) = obj.get("custom").and_then(Value::as_object) {
+                d.custom_name = c.get("name").and_then(Value::as_str).map(String::from);
+                d.custom_input = c.get("input").and_then(Value::as_str).map(String::from);
+            }
+        }
+        d
+    }
+}
+
+/// The streaming state: block scratch maps keyed by index into
+/// `output.content` (Rust side-channel for TS's transient block properties).
+#[derive(Default)]
+struct StreamingState {
+    tool_call_blocks_by_index: HashMap<u64, usize>,
+    tool_call_blocks_by_id: HashMap<String, usize>,
+    partial_args: HashMap<usize, String>,
+    custom_inputs: HashMap<usize, (String, GrammarToolInputJsonBuffer)>,
+}
+
+/// True when the block is an OpenAI encrypted reasoning detail (`type:
+/// "reasoning.encrypted"` with non-empty string id/data) — TS
+/// `isEncryptedReasoningDetail` `:131-146`.
+fn is_encrypted_reasoning_detail(detail: &Value) -> bool {
+    let obj = match detail.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+    obj.get("type").and_then(Value::as_str) == Some("reasoning.encrypted")
+        && obj
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        && obj
+            .get("data")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+}
+
+/// Parse one SSE `data:` payload into a chunk `Value`, skipping non-objects
+/// (TS `for await` loop `:565-566`: `if (!chunk || typeof chunk !== "object")
+/// continue`) and the terminal `[DONE]` sentinel.
+fn parse_chunk(data: &str) -> Option<Value> {
+    if data == "[DONE]" {
+        return None;
+    }
+    let value: Value = serde_json::from_str(data).ok()?;
+    value.is_object().then_some(value)
+}
+
+/// Port of the TS `stream` event loop's per-chunk body + the tail block
+/// finalization + stop-reason resolution (`:565-618`). Emits events via
+/// `sink`. Returns `Err(message)` for the throw paths (→ catch → `error`
+/// event).
+///
+/// `compat` supplies `supports_finish_reason`; `grammar_tool_input_properties`
+/// maps tool names → custom-input property (TS `createGrammarToolInputProperties`
+/// result, already ported).
+#[allow(clippy::too_many_arguments)]
+pub fn run_stream_state_machine(
+    model: &Model,
+    compat: &ResolvedOpenAICompletionsCompat,
+    grammar_tool_input_properties: &HashMap<String, String>,
+    chunks: impl Iterator<Item = Value>,
+    output: &mut AssistantMessage,
+    sink: &mut AssistantMessageSink,
+) -> Result<(), String> {
+    let mut state = StreamingState::default();
+    let mut text_block: Option<usize> = None;
+    let mut thinking_block: Option<usize> = None;
+    let mut has_finish_reason = false;
+    let mut pending_reasoning_details: HashMap<String, String> = HashMap::new();
+
+    for chunk in chunks {
+        // output.responseId ||= chunk.id (TS `:568`)
+        if output.response_id.is_none() {
+            if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+                output.response_id = Some(id.to_string());
+            }
+        }
+        // output.responseModel ||= chunk.model when it differs (TS `:569-571`)
+        if output.response_model.is_none() {
+            if let Some(cm) = chunk.get("model").and_then(Value::as_str) {
+                if !cm.is_empty() && cm != model.id {
+                    output.response_model = Some(cm.to_string());
+                }
+            }
+        }
+        // output.usage = parseChunkUsage(chunk.usage, model) (TS `:572-573`)
+        if let Some(u) = chunk.get("usage") {
+            output.usage = parse_chunk_usage(&RawChunkUsage::from_value(u), model);
+        }
+
+        let choice = chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first());
+        let Some(choice) = choice else {
+            continue;
+        };
+
+        // Fallback: usage in choice.usage (Moonshot) (TS `:578-581`)
+        if chunk.get("usage").is_none() {
+            if let Some(u) = choice.get("usage") {
+                output.usage = parse_chunk_usage(&RawChunkUsage::from_value(u), model);
+            }
+        }
+
+        if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
+            output.raw_stop_reason = Some(fr.to_string());
+            let finish_reason_result = map_stop_reason(fr);
+            output.stop_reason = finish_reason_result.0;
+            if let Some(em) = finish_reason_result.1 {
+                output.error_message = Some(em);
+            }
+            has_finish_reason = true;
+        }
+
+        let Some(delta) = choice.get("delta") else {
+            continue;
+        };
+
+        // content delta (TS `:585-596`)
+        let content_delta = delta.get("content").and_then(Value::as_str);
+        if let Some(cd) = content_delta {
+            if !cd.is_empty() {
+                let block_idx = ensure_text_block(&mut state, output, &mut text_block, sink);
+                if let AssistantContent::Text(t) = &mut output.content[block_idx] {
+                    t.text.push_str(cd);
+                }
+                sink.push(AssistantMessageEvent::TextDelta {
+                    content_index: block_idx as u32,
+                    delta: cd.to_string(),
+                    partial: output.clone(),
+                });
+            }
+        }
+
+        // reasoning fields (TS `:598-621`): first non-empty of
+        // reasoning_content / reasoning / reasoning_text
+        let reasoning_fields = ["reasoning_content", "reasoning", "reasoning_text"];
+        let mut found_reasoning_field: Option<&str> = None;
+        for field in reasoning_fields {
+            if delta
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+            {
+                found_reasoning_field = Some(field);
+                break;
+            }
+        }
+        if let Some(field) = found_reasoning_field {
+            if let Some(delta_text) = delta.get(field).and_then(Value::as_str) {
+                if !delta_text.is_empty() {
+                    let thinking_signature =
+                        if model.provider.0 == "opencode-go" && field == "reasoning" {
+                            "reasoning_content"
+                        } else {
+                            field
+                        };
+                    let block_idx = ensure_thinking_block(
+                        &mut state,
+                        output,
+                        &mut thinking_block,
+                        thinking_signature,
+                        sink,
+                    );
+                    if let AssistantContent::Thinking(t) = &mut output.content[block_idx] {
+                        t.thinking.push_str(delta_text);
+                    }
+                    sink.push(AssistantMessageEvent::ThinkingDelta {
+                        content_index: block_idx as u32,
+                        delta: delta_text.to_string(),
+                        partial: output.clone(),
+                    });
+                }
+            }
+        }
+
+        // tool_calls deltas (TS `:622-657`)
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for tc in tool_calls {
+                let delta_tc = StreamingToolCallDelta::from_value(tc);
+                let block_idx = ensure_tool_call_block(
+                    &mut state,
+                    output,
+                    &delta_tc,
+                    grammar_tool_input_properties,
+                    &mut pending_reasoning_details,
+                    sink,
+                );
+                // block.id ||= toolCall.id (TS `:624-628`)
+                if let Some(id) = &delta_tc.id {
+                    let block = &mut output.content[block_idx];
+                    if let AssistantContent::ToolCall(tc) = block {
+                        if tc.id.is_empty() {
+                            tc.id = id.clone();
+                            state.tool_call_blocks_by_id.insert(id.clone(), block_idx);
+                        }
+                    }
+                }
+                // block.name ||= name (TS `:629-632`)
+                let name = delta_tc
+                    .function_name
+                    .clone()
+                    .or_else(|| delta_tc.custom_name.clone());
+                if let Some(name) = &name {
+                    let block = &mut output.content[block_idx];
+                    if let AssistantContent::ToolCall(tc) = block {
+                        if tc.name.is_empty() {
+                            tc.name = name.clone();
+                        }
+                    }
+                }
+
+                let mut delta_text = String::new();
+                if let Some(fa) = &delta_tc.function_arguments {
+                    delta_text = fa.clone();
+                    // partialArgs accumulation (TS `:636-638`)
+                    state
+                        .partial_args
+                        .entry(block_idx)
+                        .or_default()
+                        .push_str(fa);
+                    // block.arguments = parseStreamingJson(block.partialArgs)
+                    let partial = state
+                        .partial_args
+                        .get(&block_idx)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let AssistantContent::ToolCall(tc) = &mut output.content[block_idx] {
+                        tc.arguments = parse_streaming_json(&partial)
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                } else if let Some(ci) = &delta_tc.custom_input {
+                    // nextInput = getCustomToolCallInput(block) + input (TS `:640-642`)
+                    let next = get_custom_tool_call_input(&state, output, block_idx) + ci;
+                    delta_text =
+                        append_custom_tool_call_input(&mut state, output, block_idx, &next, false)
+                            .unwrap_or_default();
+                }
+                sink.push(AssistantMessageEvent::ToolcallDelta {
+                    content_index: block_idx as u32,
+                    delta: delta_text,
+                    partial: output.clone(),
+                });
+            }
+        }
+
+        // reasoning_details (TS `:659-672`)
+        if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+            for detail in details {
+                if is_encrypted_reasoning_detail(detail) {
+                    let serialized = serde_json::to_string(detail).unwrap_or_default();
+                    if let Some(id) = detail.get("id").and_then(Value::as_str) {
+                        if let Some(&block_idx) = state.tool_call_blocks_by_id.get(id) {
+                            if let AssistantContent::ToolCall(tc) = &mut output.content[block_idx] {
+                                tc.thought_signature = Some(serialized.clone());
+                            }
+                        } else {
+                            pending_reasoning_details.insert(id.to_string(), serialized);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tail: finishBlock for every block in content order (TS `:674-676`)
+    let block_count = output.content.len();
+    for block_idx in 0..block_count {
+        finish_block(&mut state, output, block_idx, sink);
+    }
+
+    // TS `:678-695`
+    if !has_finish_reason && !compat.supports_finish_reason {
+        output.stop_reason = if output
+            .content
+            .iter()
+            .any(|b| matches!(b, AssistantContent::ToolCall(_)))
+        {
+            StopReason::ToolUse
+        } else {
+            StopReason::Stop
+        };
+    }
+    if output.stop_reason == StopReason::Error {
+        return Err(output
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "Provider returned an error stop reason".to_string()));
+    }
+    // TS `:691-692`: throw when the stream ended without a finish_reason.
+    // Pi's second clause `|| output.stopReason === "pending"` is a logical
+    // subset of the first here — `stopReason` stays its initial "pending" value
+    // EXACTLY when `supportsFinishReason && !hasFinishReason` (the fallback at
+    // `:678-683` already resolved it to toolUse/stop otherwise), so the two
+    // clauses are provably equivalent. It is collapsed into one check.
+    if compat.supports_finish_reason && !has_finish_reason {
+        return Err("Stream ended without finish_reason".to_string());
+    }
+
+    Ok(())
+}
+
+// --- helpers used by the state machine --------------------------------------
+
+/// TS `ensureTextBlock` `:536-543`: create the single text block + emit
+/// `text_start` on first use. Returns the block index.
+fn ensure_text_block(
+    state: &mut StreamingState,
+    output: &mut AssistantMessage,
+    text_block: &mut Option<usize>,
+    sink: &mut AssistantMessageSink,
+) -> usize {
+    if text_block.is_none() {
+        let idx = output.content.len();
+        output.content.push(AssistantContent::Text(TextContent {
+            kind: TextTag::Text,
+            text: String::new(),
+            text_signature: None,
+        }));
+        state.tool_call_blocks_by_index.clear(); // no-op; index maps are tool-only
+        *text_block = Some(idx);
+        sink.push(AssistantMessageEvent::TextStart {
+            content_index: idx as u32,
+            partial: output.clone(),
+        });
+    }
+    text_block.unwrap()
+}
+
+/// TS `ensureThinkingBlock(thinkingSignature)` `:545-552`.
+fn ensure_thinking_block(
+    state: &mut StreamingState,
+    output: &mut AssistantMessage,
+    thinking_block: &mut Option<usize>,
+    thinking_signature: &str,
+    sink: &mut AssistantMessageSink,
+) -> usize {
+    if thinking_block.is_none() {
+        let idx = output.content.len();
+        output
+            .content
+            .push(AssistantContent::Thinking(ThinkingContent {
+                kind: ThinkingTag::Thinking,
+                thinking: String::new(),
+                thinking_signature: Some(thinking_signature.to_string()),
+                redacted: None,
+            }));
+        state.tool_call_blocks_by_index.clear(); // no-op; index maps are tool-only
+        *thinking_block = Some(idx);
+        sink.push(AssistantMessageEvent::ThinkingStart {
+            content_index: idx as u32,
+            partial: output.clone(),
+        });
+    }
+    thinking_block.unwrap()
+}
+
+/// TS `ensureToolCallBlock(toolCall)` `:556-592`.
+#[allow(clippy::too_many_arguments)]
+fn ensure_tool_call_block(
+    state: &mut StreamingState,
+    output: &mut AssistantMessage,
+    delta: &StreamingToolCallDelta,
+    grammar_tool_input_properties: &HashMap<String, String>,
+    pending_reasoning_details: &mut HashMap<String, String>,
+    sink: &mut AssistantMessageSink,
+) -> usize {
+    let stream_index = delta.index;
+    let name = delta
+        .function_name
+        .clone()
+        .or_else(|| delta.custom_name.clone())
+        .unwrap_or_default();
+
+    let mut block_idx = stream_index.and_then(|i| state.tool_call_blocks_by_index.get(&i).copied());
+    if block_idx.is_none() {
+        if let Some(id) = &delta.id {
+            block_idx = state.tool_call_blocks_by_id.get(id).copied();
+        }
+    }
+    if block_idx.is_none() {
+        // TS `:568-585`: create a new block. The "input" fallback should not be
+        // taken — but gives unknown tools a place to stash data.
+        let custom_input_property = if delta.custom_name.is_some() && delta.function_name.is_none()
+        {
+            Some(
+                grammar_tool_input_properties
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| "input".to_string()),
+            )
+        } else {
+            None
+        };
+        let id = delta.id.clone().unwrap_or_default();
+        let (arguments, custom_input) = match &custom_input_property {
+            Some(prop) => {
+                let mut m = Map::new();
+                m.insert(prop.clone(), Value::String(String::new()));
+                (
+                    m,
+                    Some((
+                        prop.clone(),
+                        GrammarToolInputJsonBuffer {
+                            input: String::new(),
+                            started: false,
+                            closed: false,
+                        },
+                    )),
+                )
+            }
+            None => (Map::new(), None),
+        };
+        let idx = output.content.len();
+        output.content.push(AssistantContent::ToolCall(ToolCall {
+            kind: ToolCallTag::ToolCall,
+            id: id.clone(),
+            name: name.clone(),
+            arguments,
+            thought_signature: None,
+            partial_json: None,
+        }));
+        if let Some(si) = stream_index {
+            state.tool_call_blocks_by_index.insert(si, idx);
+        }
+        if !id.is_empty() {
+            state.tool_call_blocks_by_id.insert(id, idx);
+        }
+        if let Some(ci) = custom_input {
+            state.custom_inputs.insert(idx, ci);
+        }
+        block_idx = Some(idx);
+        sink.push(AssistantMessageEvent::ToolcallStart {
+            content_index: idx as u32,
+            partial: output.clone(),
+        });
+    }
+    let block_idx = block_idx.unwrap();
+
+    // TS `:594-600`: backfill streamIndex on an existing block
+    if let Some(si) = stream_index {
+        state
+            .tool_call_blocks_by_index
+            .entry(si)
+            .or_insert(block_idx);
+    }
+    // TS `:601-602`: backfill id
+    if let Some(id) = &delta.id {
+        state
+            .tool_call_blocks_by_id
+            .entry(id.clone())
+            .or_insert(block_idx);
+    }
+
+    // block.name ||= name (TS `:604-606`)
+    if !name.is_empty() {
+        let block = &mut output.content[block_idx];
+        if let AssistantContent::ToolCall(tc) = block {
+            if tc.name.is_empty() {
+                tc.name = name.clone();
+            }
+        }
+    }
+    // custom input backfill (TS `:607-613`): install a customInput on an
+    // existing block that lacks one
+    if delta.custom_name.is_some()
+        && delta.function_name.is_none()
+        && !state.custom_inputs.contains_key(&block_idx)
+    {
+        let prop = {
+            let block = &output.content[block_idx];
+            match block {
+                AssistantContent::ToolCall(tc) => grammar_tool_input_properties
+                    .get(&tc.name)
+                    .cloned()
+                    .unwrap_or_else(|| "input".to_string()),
+                _ => "input".to_string(),
+            }
+        };
+        let block = &mut output.content[block_idx];
+        if let AssistantContent::ToolCall(tc) = block {
+            let mut m = Map::new();
+            m.insert(prop.clone(), Value::String(String::new()));
+            tc.arguments = m;
+        }
+        state.custom_inputs.insert(
+            block_idx,
+            (
+                prop,
+                GrammarToolInputJsonBuffer {
+                    input: String::new(),
+                    started: false,
+                    closed: false,
+                },
+            ),
+        );
+    }
+    // applyPendingReasoningDetail (TS `:614-616`)
+    if let Some(id) = &delta.id {
+        if let Some(detail) = pending_reasoning_details.remove(id) {
+            let block = &mut output.content[block_idx];
+            if let AssistantContent::ToolCall(tc) = block {
+                tc.thought_signature = Some(detail);
+            }
+        }
+    }
+    block_idx
+}
+
+/// TS `finishBlock(block)` `:517-535`: emit the `*_end` event, finalizing
+/// tool-call args (parse `partialArgs` or flush the grammar custom input).
+fn finish_block(
+    state: &mut StreamingState,
+    output: &mut AssistantMessage,
+    block_idx: usize,
+    sink: &mut AssistantMessageSink,
+) {
+    let content_index = block_idx as u32;
+    match &mut output.content[block_idx] {
+        AssistantContent::Text(t) => {
+            let content = t.text.clone();
+            sink.push(AssistantMessageEvent::TextEnd {
+                content_index,
+                content,
+                partial: output.clone(),
+            });
+        }
+        AssistantContent::Thinking(t) => {
+            let content = t.thinking.clone();
+            sink.push(AssistantMessageEvent::ThinkingEnd {
+                content_index,
+                content,
+                partial: output.clone(),
+            });
+        }
+        AssistantContent::ToolCall(tc) => {
+            // customInput flush or parseStreamingJson(partialArgs) (TS `:523-531`)
+            let mut flush_delta: Option<String> = None;
+            if state.custom_inputs.contains_key(&block_idx) {
+                let (prop, buffer) = state.custom_inputs.get_mut(&block_idx).unwrap();
+                let next = tc
+                    .arguments
+                    .get(prop)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if let Ok(Some(delta)) =
+                    append_grammar_tool_input_json_delta(buffer, prop, &next, true)
+                {
+                    flush_delta = (!delta.is_empty()).then_some(delta);
+                }
+            } else if let Some(partial) = state.partial_args.get(&block_idx).cloned() {
+                tc.arguments = parse_streaming_json(&partial)
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            // strip scratch (TS `:533-535`) before emitting, so the terminal
+            // event/snapshot carries only parsed arguments
+            state.partial_args.remove(&block_idx);
+            state.custom_inputs.remove(&block_idx);
+            let tool_call = tc.clone();
+            if let Some(delta) = flush_delta {
+                sink.push(AssistantMessageEvent::ToolcallDelta {
+                    content_index,
+                    delta,
+                    partial: output.clone(),
+                });
+            }
+            sink.push(AssistantMessageEvent::ToolcallEnd {
+                content_index,
+                tool_call,
+                partial: output.clone(),
+            });
+        }
+    }
+}
+
+/// TS `getCustomToolCallInput` `:511-515`: the current value of the
+/// custom-input property inside `block.arguments`.
+fn get_custom_tool_call_input(
+    state: &StreamingState,
+    output: &AssistantMessage,
+    block_idx: usize,
+) -> String {
+    let Some((prop, _)) = state.custom_inputs.get(&block_idx) else {
+        return String::new();
+    };
+    let block = &output.content[block_idx];
+    match block {
+        AssistantContent::ToolCall(tc) => match tc.arguments.get(prop) {
+            Some(Value::String(s)) => s.clone(),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
+}
+
+/// `appendCustomToolCallInput(block, nextInput, close)` (TS `:516-526`):
+/// monotonic append to the grammar JSON buffer, then `block.arguments =
+/// { [property]: nextInput }`. Returns the delta.
+fn append_custom_tool_call_input(
+    state: &mut StreamingState,
+    output: &mut AssistantMessage,
+    block_idx: usize,
+    next_input: &str,
+    close: bool,
+) -> Option<String> {
+    let (prop, buffer) = state.custom_inputs.get_mut(&block_idx)?;
+    let delta = append_grammar_tool_input_json_delta(buffer, prop, next_input, close).ok()?;
+    let block = &mut output.content[block_idx];
+    if let AssistantContent::ToolCall(tc) = block {
+        let mut m = Map::new();
+        m.insert(prop.clone(), Value::String(next_input.to_string()));
+        tc.arguments = m;
+    }
+    delta
+}
+
+/// Raw usage chunk → [`RawChunkUsage`] (the TS inline parse in `parseChunkUsage`).
+impl RawChunkUsage {
+    fn from_value(v: &Value) -> Self {
+        let mut r = RawChunkUsage::default();
+        let obj = match v.as_object() {
+            Some(o) => o,
+            None => return r,
+        };
+        r.prompt_tokens = obj.get("prompt_tokens").and_then(Value::as_u64);
+        r.completion_tokens = obj.get("completion_tokens").and_then(Value::as_u64);
+        r.cached_tokens = obj.get("cached_tokens").and_then(Value::as_u64);
+        r.prompt_cache_hit_tokens = obj.get("prompt_cache_hit_tokens").and_then(Value::as_u64);
+        if let Some(d) = obj.get("prompt_tokens_details").and_then(Value::as_object) {
+            r.prompt_details_cached_tokens = d.get("cached_tokens").and_then(Value::as_u64);
+            r.prompt_details_cache_write_tokens =
+                d.get("cache_write_tokens").and_then(Value::as_u64);
+        }
+        if let Some(d) = obj
+            .get("completion_tokens_details")
+            .and_then(Value::as_object)
+        {
+            r.completion_details_reasoning_tokens =
+                d.get("reasoning_tokens").and_then(Value::as_u64);
+        }
+        r
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

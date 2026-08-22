@@ -1649,3 +1649,42 @@ Verification: fmt clean, clippy `-D warnings` clean, all 5 black-box tests
 ### SESSION RESUME POINT (end of this session)
 - Working tree clean; HEAD = `9c31af5`. Next task = feat-008 wave 4 (see above).
 - Repo is restartable via `./init.sh`.
+
+### feat-008 WAVE 6 (2026-08-22): openai-completions stream event-generator core
+- Ported the deterministic core of Pi's `stream`/`streamSimple` (~415 lines TS
+  `:204-618` minus transport) into `api/openai_completions.rs`:
+  `run_stream_state_machine` (chunk→event state machine: ensure_text_block /
+  ensure_thinking_block / ensure_tool_call_block / finish_block, streaming
+  tool-arg JSON via parallel partialArgs side-map, reasoning_details →
+  thoughtSignature, chunk usage, finish_reason → stop-reason + error-message,
+  no-finish-reason fallback incl. provably-redundant pending clause collapsed),
+  `get_supported_thinking_levels`/`clamp_thinking_level`, `stream_simple`
+  (buildBaseOptions + clampThinkingLevel), `stream`/`produce`/`run_produce`
+  reusing feat-002's `iterate_sse_messages` + `assistant_message_stream`.
+- `StreamOptions` gained `transport: Option<Arc<dyn DynTransport>>` (TS
+  `StreamOptions.transport` — the injectable seam for the golden harness).
+- Oracle: `gen-openai-completions-oracle.mjs` now also drives real Pi's
+  `streamSimple` over fake-fetch canned SSE → 3 scenarios (text-stream,
+  tool-call-stream, thinking-reasoning), 22 records total in cases.jsonl.
+- NEW `tests/openai_completions_stream_golden.rs`: replays each sseBody through
+  Rust `stream_simple` with CannedTransport; asserts final message + tape
+  byte-equal vs Pi capture (timestamp zeroed both sides). 3/3 byte-verified.
+- TWO byte-compat bugs surfaced by the new fixtures and fixed:
+  1. `Usage` field order — `reasoning` moved to Pi's canonical position
+     (between `cacheWrite` and `totalTokens`), pinned by real parseChunkUsage
+     output; old order was tuned to a hypothetical anthropic message_delta
+     emission no oracle exercises. All anthropic goldens + corpus stayed green.
+  2. `parse_chunk_usage` `reasoning` → `Some(0)` when reasoning_tokens
+     absent/0 (Pi's `|| 0`), not None-omitted.
+- Gate: pirust-ai 99 tests green, workspace 527 passed (37 suites, only the 3
+  pre-existing pirust-tools find.rs env failures — re-verified failing on clean
+  stash), clippy --all-targets -D warnings clean, fmt clean, oracle --check
+  idempotent (22 records). No new deps.
+- DEFERRED (named, next waves): transport layer (createClient headers/copilot/
+  session-affinity, retryProviderRequest, onPayload/onResponse hooks,
+  normalizeProviderError/formatProviderError, response.status), sdk.rs routing
+  seam, remaining adapters (openai-codex-responses, google-generative-ai,
+  google-vertex, bedrock-converse-stream SigV4, mistral-conversations,
+  pi-messages), OAuth flows.
+- NEXT: commit this wave; then feat-008 transport layer + sdk.rs routing so a
+  non-Anthropic model can actually stream.

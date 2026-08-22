@@ -25,13 +25,14 @@ pub struct Cost {
 /// is the 1h-retention subset of `cache_write`, reported only by Anthropic. Both are
 /// left absent by providers that don't expose the breakdown.
 ///
-/// FIELD ORDER matches the Anthropic adapter's *runtime insertion order*, not the TS
-/// interface's declaration order (spec §4e, `docs/analysis/06-anthropic-runtime-spec.md`):
-/// the adapter's initial `usage` literal is `input, output, cacheRead, cacheWrite,
-/// totalTokens, cost`, then `cacheWrite1h` is inserted in `message_start` and `reasoning`
-/// in `message_delta` — both AFTER `cost`. So `cache_write1h` and `reasoning` are declared
-/// last. All current oracles leave both absent (`skip_serializing_if`), so this reorder is
-/// byte-irrelevant today; it pins the order for when feat-002 emits them.
+/// FIELD ORDER follows Pi's canonical runtime object for the token breakdown:
+/// `input, output, cacheRead, cacheWrite, reasoning, totalTokens, cost, cacheWrite1h`.
+/// This is pinned by the REAL openai-completions oracle (parseChunkUsage puts
+/// `reasoning` between `cacheWrite` and `totalTokens`; verified byte-for-byte against Pi).
+/// The anthropic adapter's `message_start`/`message_delta` case (where cacheWrite1h is
+/// inserted after `cost` and reasoning at the very end) is byte-irrelevant today because
+/// no current anthropic oracle emits either field; if that order ever matters it will be
+/// pinned by a real fixture and this comment corrected then.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -39,20 +40,20 @@ pub struct Usage {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    /// Reasoning-token subset of `output` (openai `completion_tokens_details.reasoning_tokens`).
+    /// Always present with `0` on the openai-completions path (TS `parseChunkUsage` `|| 0`);
+    /// omitted elsewhere (Anthropic never emits it in current oracles).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
     /// Runtime-optional: the abort-before-tokens path builds a `usage` without it, so
     /// it is omitted when absent (verified against real aborted-turn session fixtures)
     /// even though the TS interface declares it required.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
     pub cost: Cost,
-    /// 1h-retention subset of `cache_write` (Anthropic only). Inserted after `cost` in
-    /// `message_start` (spec §4e) — declared after `cost` to match runtime key order.
+    /// 1h-retention subset of `cache_write` (Anthropic only). Declared after `cost`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write1h: Option<u64>,
-    /// Reasoning-token subset of `output`. Inserted after `cacheWrite1h` in `message_delta`
-    /// (spec §4e) — declared last to match runtime key order.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<u64>,
 }
 
 #[cfg(test)]

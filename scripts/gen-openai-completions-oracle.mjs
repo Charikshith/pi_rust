@@ -520,6 +520,92 @@ async function captureBuildParams(model, context) {
   return JSON.parse(JSON.stringify(captured));
 }
 
+// --- Streaming scenarios (raw SSE chunks -> event tape + final message) -----
+// Canned OpenAI chat-completions SSE bodies. Each is fed through real Pi's
+// `streamSimple` via a fake `fetch`; the emitted event tape (type sequence +
+// emission-stable fields, `partial` excluded — see anthropic_golden.rs) and the
+// final `AssistantMessage` (byte-compared) are captured.
+function sseEvent(obj) {
+  return `data: ${JSON.stringify(obj)}\n\n`;
+}
+
+const streamScenarios = [
+  {
+    name: "text-stream",
+    model: {
+      ...getModel("together", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+      baseUrl: "http://127.0.0.1:9/v1",
+      compat: undefined,
+    },
+    context: makeContext([makeUserMessage(1, "hi")]),
+    chunks: [
+      sseEvent({ id: "chatcmpl-1", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: { role: "assistant", content: "Hel" }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-1", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: { content: "lo " }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-1", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: { content: "world" }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-1", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 } }),
+      "data: [DONE]\n\n",
+    ],
+  },
+  {
+    name: "tool-call-stream",
+    model: {
+      ...getModel("together", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+      baseUrl: "http://127.0.0.1:9/v1",
+      compat: undefined,
+    },
+    context: makeContext([makeUserMessage(1, "use the tool")], [makeTool("base_tool")]),
+    chunks: [
+      sseEvent({ id: "chatcmpl-2", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_abc", type: "function", function: { name: "base_tool", arguments: "" } }] }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-2", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"value":' } }] }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-2", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"x"}' } }] }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-2", object: "chat.completion.chunk", created: 1, model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 30, completion_tokens: 9, total_tokens: 39 } }),
+      "data: [DONE]\n\n",
+    ],
+  },
+  {
+    name: "thinking-reasoning",
+    model: {
+      ...getModel("deepseek", "deepseek-v4-flash"),
+      baseUrl: "http://127.0.0.1:9/v1",
+      compat: undefined,
+    },
+    context: makeContext([makeUserMessage(1, "think hard")]),
+    chunks: [
+      sseEvent({ id: "chatcmpl-3", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "Let me " }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-3", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { reasoning_content: "think carefully" }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-3", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { content: "Answer: " }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-3", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { content: "42" }, finish_reason: null }] }),
+      sseEvent({ id: "chatcmpl-3", object: "chat.completion.chunk", created: 1, model: "deepseek-v4-flash", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 } }),
+      "data: [DONE]\n\n",
+    ],
+  },
+];
+
+function sseBody(chunks) {
+  return chunks.join("");
+}
+
+async function captureStream(s) {
+  const events = [];
+  const body = sseBody(s.chunks);
+  const stream = streamSimple({ ...s.model, baseUrl: "http://127.0.0.1:9" }, s.context, {
+    apiKey: "fake-key",
+    fetch: async () =>
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+  });
+  for await (const event of stream) {
+    const { partial, ...rest } = event;
+    void partial;
+    events.push(rest);
+  }
+  const final = await stream.result();
+  final.timestamp = 0;
+  return { sseBody: body, events, final: JSON.parse(JSON.stringify(final)) };
+}
+
 // --- Model scenarios for the buildParams (getCompat) path -------------------
 // Models that exercise distinct detectCompat branches.
 const modelScenarios = [
@@ -611,6 +697,17 @@ for (const s of modelScenarios) {
     throw new Error(`buildParams case ${s.name} failed: ${error.stack}`);
   }
   records.push({ section: "buildParams", name: s.name, payload });
+}
+
+// Section 3: stream (raw SSE chunks -> event tape + final message)
+for (const s of streamScenarios) {
+  let payload;
+  try {
+    payload = await captureStream(s);
+  } catch (error) {
+    throw new Error(`stream case ${s.name} failed: ${error.stack}`);
+  }
+  records.push({ section: "stream", name: s.name, payload });
 }
 
 const outFile = join(outDir, "cases.jsonl");
