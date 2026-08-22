@@ -1527,3 +1527,44 @@ is recorded as Deny and the prompt + denial notice render in the terminal.
 Verification: fmt clean, clippy `-D warnings` clean, all 5 black-box tests
 (pending approval) + 88 unit + smoke tests pass.
 
+
+## 2026-08-22 — feat-008 WAVE 3: transform-messages normalizer (committed 181d80d)
+
+- NEW `crates/pirust-ai/src/api/transform_messages.rs` — 1:1 port of Pi's
+  `packages/ai/src/api/transform-messages.ts` (223 lines), the cross-provider
+  message normalizer shared by the openai-completions and anthropic adapters:
+  - **Image downgrade** gated on the model `input` modality, coalescing runs of
+    images into ONE placeholder (`(image omitted: model does not support images)`),
+    preserving a previous-was-placeholder flag for placeholder-text blocks.
+  - **Thinking-block rules**: drop redacted blocks cross-model, keep signatured-or
+    non-empty thinking for the same model, skip empty, convert to plain text
+    cross-model.
+  - **Tool-call ID normalization** via a caller-supplied hook (`NormalizeToolCallId`
+    trait: `(id, model, source) -> String`), applied only cross-model; remaps the
+    matching `toolResult.toolCallId` from the built id_map.
+  - **Second pass**: skip errored/aborted assistant turns; synthesize a `No result
+    provided` (isError:true) tool result for orphaned tool calls (before the next
+    user message and at conversation end).
+- Entry point is `transform_messages_with_normalizer(model, messages, normalize)`;
+  registered in `api/mod.rs`.
+- 7 unit tests. Two golden suites were captured by RUNNING real Pi
+  (`oracle_tm.mjs`, deleted after) and pinned: image downgrade byte-exact; orphaned
+  tool-result structurally exact (key order relaxed since the Rust `AssistantMessage`
+  struct field order is governed by the anthropic adapter's insertion order, not the
+  openai-completions spread order).
+- Verification: `pirust-ai` 80 lib tests green (73 prior + 7 new), fmt + clippy
+  clean. Workspace green except 3 pre-existing unrelated `pirust-tools find.rs`
+  env-git-walk failures (documented previously).
+- Commits: `181d80d` (feature), `9c31af5` (evidence update in feature_list.json).
+
+### NEXT (feat-008 wave 4)
+- `convertMessages` + `convertTools` + `getCompat`/`detectCompat` + `normalizeToolCallId`
+  (pipe-ID logic) — the message/tool serialization for the openai-completions adapter.
+- Then `stream`/`streamSimple` event loop, then `sdk.rs` routing so a non-Anthropic
+  model can actually stream, then remaining adapters + OAuth.
+- 4 commits on master are NOT yet pushed to `origin/master` (`ef725a5`, `560d473`,
+  `181d80d`, `9c31af5`).
+
+### SESSION RESUME POINT (end of this session)
+- Working tree clean; HEAD = `9c31af5`. Next task = feat-008 wave 4 (see above).
+- Repo is restartable via `./init.sh`.
