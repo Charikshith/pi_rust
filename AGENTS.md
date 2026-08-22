@@ -20,6 +20,7 @@ verification path below applies.
 >
 > Behavioral policies are embedded directly (no external dependency required):
 > - **Coding Policy** — the Ponytail ladder: YAGNI → stdlib → native → dep → one-liner → minimum. Install the full Ponytail skill for intensity levels (lite/full/ultra) and debt tracking (`/ponytail-debt`).
+> - **Rust Advantage Principle** — wire/on-disk contract EXACT, internal algorithms IDIOMATIC Rust (see the project rule below): the port improves on Pi, it never mimics TS flaws.
 > - **Editing Discipline** — surgical changes (Karpathy §3): touch only what the feature requires, match existing style, don't "improve" adjacent code.
 > - **Definition of Done** — test-first ordering (Karpathy §4): for bugs, reproduce first; for features, write the check first.
 >
@@ -224,6 +225,40 @@ verified against **Pi as the oracle** — never against self-authored expectatio
   leave a comment citing the fixture.
 - Naming: all Rust code is `pirust*`. Keep original names only for on-disk data / wire
   identifiers that must stay compatible with real Pi (`~/.pi`, `pi-messages`, etc.).
+
+## Rust Advantage Principle (project rule — ALL code, existing and future)
+
+**The port is a concept/feature port, not a syntax port.** "Porting" means: implement
+Pi's *concept and feature* in Rust and **improve on it using Rust's strengths** —
+never mimic TypeScript's flaws.
+
+The split, in priority order:
+
+1. **Wire / on-disk contract: EXACT.** The bytes that cross a boundary must be
+   byte-identical to Pi — request JSON (key order, `null`-vs-missing), ids, `max_tokens`,
+   file/session format, error messages that cross the wire. Verified by oracle goldens.
+   This is the compatibility contract; it never yields.
+2. **Internal algorithms: IDIOMATIC Rust.** Everything that doesn't cross a boundary
+   must be written as if TypeScript never existed:
+   - **Borrow instead of clone**: take `&[T]` / `&Context`, clone only where the
+     algorithm actually rewrites. No "clone the world" to satisfy a caller.
+   - **No fake JS string semantics**: char-based slicing, no `slice_utf16` ceremony
+     for things that are ASCII-after-sanitize, no re-implementing JS's broken
+     lone-surrogate behavior — that is a flaw, not a contract.
+   - **Idiomatic stdlib**: `div_ceil`, iterators, proper error propagation with `Result`
+     (never swallow errors with `unwrap_or_default` just because TS catches-and-continues
+     — propagate like Pi's throws).
+   - **Right tool for the data**: use `String`, `Value`, typed structs, or serde
+     derives where they fit, not whatever TS used.
+   - Genuine Unicode/data semantics (e.g. unpaired-surrogate detection on real input)
+     stay — those are about the data, not TS.
+3. **Existing code**: when a module is touched by a wave and contains TS-mimicry
+   (clone-heavy signatures, fake JS string semantics, swallowed errors), **rewrite it
+   to idiomatic Rust in the same wave** — do not leave a second, worse implementation
+   behind. Each wave may add one such cleanup; never let the debt compound.
+
+This rule applies to **all future feature development and every existing implementation
+that needs a rewrite**. It is part of the harness, not a suggestion.
 
 ## The Oracle Audit Rule (hard requirement — prevents rework)
 
