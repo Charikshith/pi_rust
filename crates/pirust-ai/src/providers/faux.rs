@@ -94,6 +94,7 @@ pub fn faux_tool_call(
         name: name.into(),
         arguments,
         thought_signature: None,
+        namespace: None,
         partial_json: None,
     }
 }
@@ -644,6 +645,7 @@ fn stream_with_deltas(
                     name: tool_call.name.clone(),
                     arguments: Map::new(),
                     thought_signature: None,
+                    namespace: None,
                     partial_json: None,
                 }));
                 sink.push(AssistantMessageEvent::ToolcallStart {

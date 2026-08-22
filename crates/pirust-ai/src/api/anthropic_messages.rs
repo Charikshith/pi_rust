@@ -501,6 +501,7 @@ fn handle_content_block_start(
                 name,
                 arguments,
                 thought_signature: None,
+                namespace: None,
                 partial_json: None,
             }));
             let position = output.content.len() - 1;

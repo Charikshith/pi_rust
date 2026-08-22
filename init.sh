@@ -54,6 +54,10 @@ if command -v node >/dev/null 2>&1; then
   if [ -f scripts/gen-openai-completions-oracle.mjs ]; then
     node scripts/gen-openai-completions-oracle.mjs --check || echo "WARN: openai-completions fixtures differ; run node scripts/gen-openai-completions-oracle.mjs"
   fi
+
+  if [ -f scripts/gen-openai-responses-oracle.mjs ]; then
+    node scripts/gen-openai-responses-oracle.mjs --check || echo "WARN: openai-responses fixtures differ; run node scripts/gen-openai-responses-oracle.mjs"
+  fi
   # 0.84.2 v4 session codec fixtures (feat-008 prerequisite, oracle-upgrade):
   # drives real Pi's jsonl/codec.ts, gated by v4_codec_golden.rs.
   if [ -f scripts/gen-v4-session-oracle.mjs ]; then

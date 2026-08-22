@@ -1712,3 +1712,33 @@ Verification: fmt clean, clippy `-D warnings` clean, all 5 black-box tests
   Only the 3 pre-existing pirust-tools find.rs env failures remain (unchanged).
 - DEFERRED (named, not silent): other adapters (codex-responses, google, vertex, bedrock,
   mistral, pi-messages), OAuth flows, retry.ts assistant-call classifier, transformHeaders.
+
+## feat-008 Wave 8 — openai-responses adapter family (DONE, uncommitted)
+- `types/content.rs`: `ToolCall.namespace: Option<String>` (camelCase `namespace`, TS field);
+  9 construction sites updated. Oracle surfaced a REAL transformMessages bug and it was
+  fixed in the same wave: cross-model text blocks now DROP `textSignature` (TS
+  transform-messages.ts:120-123; previously the Rust port kept it) — pinned by a new
+  oracle case.
+- NEW `api/openai_responses_shared.rs` (792-line openai-responses-shared.ts port):
+  `convert_responses_messages` (input-item conversion, text signatures v1/legacy, pipe ids,
+  foreign item-id hashing, grammar custom-tool calls, deferred additional_tools/tool_search),
+  `convert_responses_tools` (grammar + strict/function), `process_responses_stream` (full
+  Responses SSE state machine: reasoning/text/function_call/custom_tool_call slots,
+  encrypted-reasoning backfill, usage + service-tier pricing, stop-reason map),
+  `split_deferred_tools` port.
+- NEW `api/openai_responses.rs` (openai-responses.ts port): getCompat/detectSessionAffinity,
+  getClientApiKey, buildParams (prompt-cache, reasoning, deferred tools), createClient
+  headers (copilot/xai/session-affinity), retry + onPayload/onResponse + error normalization.
+- NEW `api/azure_openai_responses.rs` (azure-openai-responses.ts port): deployment-name/base-url/
+  api-version resolution, `normalizeAzureBaseUrl` (url crate), buildParams, same stream state
+  machine (ServiceTierMode::Disabled).
+- `auth/mod.rs`: `get_provider_env_value` (provider-env.ts minus Bun sandbox).
+- `sdk.rs`: routes `openai-responses` and `azure-openai-responses`.
+- Oracle: `scripts/gen-openai-responses-oracle.mjs` (13 records: 9 convertMessages,
+  2 convertTools, 2 stream) + `tests/openai_responses_golden.rs` (all byte-identical);
+  init.sh wires `--check`.
+- Gates: pirust-ai lib 94 + goldens green; workspace 539 passed (only the 3 pre-existing
+  pirust-tools find.rs env failures); clippy --all-targets -D warnings clean; fmt clean;
+  both oracle --checks green.
+- DEFERRED (named): openai-codex-responses (websocket+zstd), google-generative-ai,
+  google-vertex, bedrock-converse-stream (SigV4), mistral-conversations, pi-messages, OAuth.

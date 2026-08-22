@@ -248,6 +248,7 @@ mod tests {
                     name: "read".into(),
                     arguments: Map::new(),
                     thought_signature: None,
+                    namespace: None,
                     partial_json: None,
                 }),
             ],

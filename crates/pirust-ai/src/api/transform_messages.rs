@@ -165,7 +165,14 @@ pub fn transform_messages_with_normalizer(
                             }
                         }
                         AssistantContent::Text(text) => {
-                            transformed_content.push(AssistantContent::Text(text));
+                            if is_same_model {
+                                transformed_content.push(AssistantContent::Text(text));
+                            } else {
+                                // Cross-model: drop the textSignature (TS `:120-123`), which
+                                // is only valid for the same provider/model.
+                                transformed_content
+                                    .push(AssistantContent::Text(TextContent::new(text.text)));
+                            }
                         }
                         AssistantContent::ToolCall(tool_call) => {
                             let mut normalized_tool_call = tool_call;
@@ -397,6 +404,7 @@ mod tests {
                 name: "bash".into(),
                 arguments: serde_json::Map::new(),
                 thought_signature: None,
+                namespace: None,
                 partial_json: None,
             })],
             api: Api::from("openai-completions"),
@@ -489,6 +497,7 @@ mod tests {
                 name: "bash".into(),
                 arguments: serde_json::Map::new(),
                 thought_signature: None,
+                namespace: None,
                 partial_json: None,
             })],
             api: Api::from("openai-completions"),
@@ -531,6 +540,7 @@ mod tests {
                 name: "bash".into(),
                 arguments: serde_json::Map::new(),
                 thought_signature: None,
+                namespace: None,
                 partial_json: None,
             })],
             api: Api::from("openai-completions"),

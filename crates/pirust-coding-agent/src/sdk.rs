@@ -299,6 +299,12 @@ fn build_stream_fn(
             pirust_ai::types::ids::known_api::OPENAI_COMPLETIONS => {
                 pirust_ai::api::openai_completions::stream_simple(&model, &context, Some(opts))
             }
+            pirust_ai::types::ids::known_api::OPENAI_RESPONSES => {
+                pirust_ai::api::openai_responses::stream_simple(&model, &context, Some(opts))
+            }
+            pirust_ai::types::ids::known_api::AZURE_OPENAI_RESPONSES => {
+                pirust_ai::api::azure_openai_responses::stream_simple(&model, &context, Some(opts))
+            }
             other => provider_error_stream(
                 &model,
                 &format!("No API provider registered for api: {other}"),

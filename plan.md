@@ -1,48 +1,35 @@
-# feat-008 Wave 7 — openai-completions transport layer + sdk.rs routing
+# feat-008 Wave 8 — openai-responses adapter family (responses + azure + codex)
 
-> STATUS: DONE — all steps implemented (gated green). Next wave (feat-008):
-> remaining adapters (openai-codex-responses, google-generative-ai, google-vertex,
-> bedrock-converse-stream SigV4, mistral-conversations, pi-messages) + OAuth flows.
+> STATUS: DONE — openai-responses + azure-openai-responses landed, oracle-verified (13
+> records). codex (websocket+zstd) stays deferred.
 
 ## Success criterion
-A non-Anthropic `openai-completions` model streams end-to-end: `sdk.rs` dispatches
-on `model.api`, the transport POSTs to `{baseUrl}/chat/completions` with Pi's exact
-headers (Authorization Bearer, model.headers, copilot/xai dynamic, session-affinity),
-retries transient failures per `provider-retry.ts`, surfaces the HTTP status through
-`onResponse`, and normalizes errors via `normalizeProviderError`/`formatProviderError`.
-Pinned by unit tests + the 22-record oracle --check staying green.
+(unchanged) The `openai-responses` API adapter streams end-to-end and its conversion
+layer is byte-identical to real Pi, oracle-pinned.
 
-## Scope boundary
-- In scope: `normalizeProviderError`/`formatProviderError` (error-body.ts), `retryProviderRequest`
-  (provider-retry.ts, incl. abortable backoff), `HttpResponse` status plumb, `createClient`
-  headers (incl. `forcePiUserAgent`, `buildCopilotDynamicHeaders`, session-affinity),
-  `onPayload`/`onResponse` hook slots, `ReqwestTransport` Authorization header, `sdk.rs`
-  routing seam (`build_stream_fn` dispatch + provider cred lookup).
-- Out of scope (named, next waves): other adapters, OAuth flows, `retry.ts` assistant-call
-  retry classifier, transformHeaders extension hook.
+## Steps (all DONE for responses + azure; codex deferred)
+1. `ToolCall.namespace` field + 9 construction sites → DONE.
+2. `openai_responses_shared.rs` (conversion + tool conversion + stream state machine +
+   `split_deferred_tools`) → DONE.
+3. Oracle `gen-openai-responses-oracle.mjs` (13 records) → DONE.
+4. `openai_responses_golden.rs` replays the oracle byte-identically → DONE.
+5. `openai_responses.rs` adapter → DONE (stream golden replayed through the adapter).
+6. `azure_openai_responses.rs` + `api/mod.rs` + `sdk.rs` routing → DONE.
+7. Gate → DONE (clippy -D warnings clean, fmt clean, workspace 539 passed, oracle --check
+   green; only the 3 pre-existing pirust-tools find failures).
 
-## Steps
-1. `http/mod.rs`: add `HttpResponse { status, headers }`, `TransportStatus` variant,
-   `Authorization` header on `HttpRequest`, `with_bearer_auth`; ReqwestTransport fills them → DONE.
-2. New `utils/error_body.rs` → DONE (4 unit tests).
-3. New `utils/provider_retry.rs` → DONE (4 unit tests).
-4. `api/mod.rs`: `ProviderPayloadCallback`/`ProviderResponseCallback` slots + `signal` on
-   `StreamOptions` (drop `Debug` derive); `ProviderResponse { status, headers }` → DONE.
-5. `openai_completions.rs`: header build, onPayload/onResponse, retry, error normalization → DONE.
-6. `sdk.rs`: dispatch `build_stream_fn` on `model.api` → DONE.
-7. Gate → DONE (clippy -D warnings clean, fmt clean, workspace builds, oracle --check green;
-   only 3 pre-existing pirust-tools find.rs env failures).
+## Bonus fix this wave (oracle-forced)
+`transformMessages` now drops `textSignature` on cross-model text blocks (TS
+`transform-messages.ts:120-123`) — the Rust port previously kept it. Pinned by a new
+oracle case.
 
 ## Definition of done
-- [x] `formatProviderError(normalizeProviderError(err))` matches Pi on unit-tested shapes.
-- [x] Retry policy matches provider-retry.ts (status set, x-should-retry, retry-after-ms/-after,
-      exponential jitter, maxRetryDelayMs cap).
-- [x] `sdk.rs` dispatches by api; a non-anthropic model builds an openai-completions stream.
-- [x] Gate green; deferred pieces named not silent.
+- [x] `convertResponsesMessages`/`convertResponsesTools` byte-identical to Pi (oracle).
+- [x] `processResponsesStream` event tape + final message byte-identical (oracle).
+- [x] `sdk.rs` routes `openai-responses` and `azure-openai-responses`.
+- [x] Gate green; deferred adapters named not silent.
 
 ## Deferred (named, next waves)
-- Other adapters: openai-codex-responses, google-generative-ai, google-vertex,
+- openai-codex-responses (websocket + zstd), google-generative-ai, google-vertex,
   bedrock-converse-stream (SigV4), mistral-conversations, pi-messages.
-- OAuth flows (github-copilot token refresh etc.).
-- `utils/retry.ts` assistant-call retry classifier (retryAssistantCall).
-- Extension `transformHeaders` hook (emitBeforeProviderHeaders).
+- OAuth flows.

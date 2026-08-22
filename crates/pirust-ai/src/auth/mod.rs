@@ -70,6 +70,17 @@ pub fn is_oauth_token(key: &str) -> bool {
     key.contains(OAUTH_TOKEN_MARKER)
 }
 
+/// `getProviderEnvValue(name, env)` — `env[name]` then the process env (TS
+/// `provider-env.ts:45-52` minus the Bun sandbox fallback).
+pub fn get_provider_env_value(
+    name: &str,
+    env: Option<&std::collections::HashMap<String, String>>,
+) -> Option<String> {
+    env.and_then(|e| e.get(name))
+        .cloned()
+        .or_else(|| std::env::var(name).ok())
+}
+
 /// The provider → env-var map (TS `getApiKeyEnvVars`'s `envMap`,
 /// `env-api-keys.ts:79-110`), minus the OAuth-only and ambient-credential providers.
 /// `None` means the provider has no simple env-var key (OAuth / ADC / AWS only).

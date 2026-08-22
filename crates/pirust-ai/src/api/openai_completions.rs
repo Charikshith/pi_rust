@@ -1790,7 +1790,7 @@ fn level_name(level: crate::types::ids::ThinkingLevel) -> &'static str {
 }
 
 /// `ThinkingLevel` → `ModelThinkingLevel` (the extended union with `off`).
-fn level_to_model(
+pub(crate) fn level_to_model(
     level: crate::types::ids::ThinkingLevel,
 ) -> crate::types::ids::ModelThinkingLevel {
     match level {
@@ -1805,7 +1805,7 @@ fn level_to_model(
 
 /// `ModelThinkingLevel` → `ThinkingLevel` (panics on `Off` — callers must
 /// handle it first).
-fn model_to_level(
+pub(crate) fn model_to_level(
     level: crate::types::ids::ModelThinkingLevel,
 ) -> crate::types::ids::ThinkingLevel {
     match level {
@@ -2015,7 +2015,7 @@ fn build_client_headers(
 }
 
 /// TS `inferCopilotInitiator` (github-copilot-headers.ts).
-fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
+pub(crate) fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
     match messages.last() {
         Some(Message::User(_)) | None => "user",
         Some(_) => "agent",
@@ -2023,7 +2023,7 @@ fn infer_copilot_initiator(messages: &[Message]) -> &'static str {
 }
 
 /// TS `hasCopilotVisionInput` (github-copilot-headers.ts).
-fn has_copilot_vision_input(messages: &[Message]) -> bool {
+pub(crate) fn has_copilot_vision_input(messages: &[Message]) -> bool {
     messages.iter().any(|msg| match msg {
         Message::User(user) => matches!(&user.content, UserMessageContent::Blocks(blocks) if blocks.iter().any(|c| matches!(c, UserContent::Image(_)))),
         Message::ToolResult(tool) => tool.content.iter().any(|c| matches!(c, UserContent::Image(_))),
@@ -2180,7 +2180,7 @@ async fn run_produce(
 /// Resolve the provider api key (TS `getClientApiKey` `:60-64`): explicit
 /// `api_key` wins, else an Authorization / cf-aig header implies a
 /// pre-authenticated client ("unused"), else an error naming the provider.
-fn resolve_openai_api_key(
+pub(crate) fn resolve_openai_api_key(
     model: &Model,
     opts: &OpenAICompletionsOptions,
 ) -> Result<String, String> {
@@ -2300,7 +2300,7 @@ pub fn now_millis() -> i64 {
 
 /// The initial `output` literal (TS `:492-508`). Key-insertion order per §4e:
 /// role, content, api, provider, model, usage, stopReason, timestamp.
-fn init_output(model: &Model) -> AssistantMessage {
+pub(crate) fn init_output(model: &Model) -> AssistantMessage {
     AssistantMessage {
         role: AssistantRole::Assistant,
         content: Vec::new(),
@@ -2782,6 +2782,7 @@ fn ensure_tool_call_block(
             name: name.clone(),
             arguments,
             thought_signature: None,
+            namespace: None,
             partial_json: None,
         }));
         if let Some(si) = stream_index {

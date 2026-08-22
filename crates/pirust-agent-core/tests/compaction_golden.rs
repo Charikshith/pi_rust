@@ -203,6 +203,7 @@ fn estimate_tokens_per_role() {
                 name: "read".into(),
                 arguments: args,
                 thought_signature: None,
+                namespace: None,
                 partial_json: None,
             }),
         ],

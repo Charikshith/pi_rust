@@ -191,6 +191,7 @@ fn assistant_tool_call(
         name: name.into(),
         arguments,
         thought_signature: None,
+        namespace: None,
         partial_json: None,
     }));
     Message::Assistant(a)

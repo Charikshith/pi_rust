@@ -22,9 +22,12 @@ use crate::types::message::Context;
 use crate::types::model::Model;
 
 pub mod anthropic_messages;
+pub mod azure_openai_responses;
 pub mod constrained_sampling;
 pub mod estimate;
 pub mod openai_completions;
+pub mod openai_responses;
+pub mod openai_responses_shared;
 pub mod transform_messages;
 
 /// Request metadata (TS `StreamOptions.metadata`). Only `user_id` is consumed by the adapter

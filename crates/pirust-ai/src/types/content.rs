@@ -101,6 +101,9 @@ pub struct ToolCall {
     /// Google-specific opaque signature for reusing thought context.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    /// OpenAI Responses namespace for calls to dynamically loaded or namespaced tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     /// Transient streaming accumulator for the raw tool-argument JSON fragments
     /// (`ToolCall & { partialJson }` in Pi's api adapters). Deleted on normal tool-call
     /// completion, but persisted into sessions when a turn is aborted/interrupted
@@ -157,6 +160,7 @@ mod tests {
             name: "read".into(),
             arguments: args,
             thought_signature: None,
+            namespace: None,
             partial_json: None,
         };
         roundtrip(
