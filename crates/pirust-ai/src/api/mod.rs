@@ -20,6 +20,7 @@ use crate::types::message::Context;
 use crate::types::model::Model;
 
 pub mod anthropic_messages;
+pub mod constrained_sampling;
 pub mod openai_completions;
 
 /// Request metadata (TS `StreamOptions.metadata`). Only `user_id` is consumed by the adapter

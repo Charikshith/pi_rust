@@ -1077,6 +1077,7 @@ fn build_llm_tools(tools: &Option<Vec<Arc<dyn AgentTool>>>) -> Option<Vec<Tool>>
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 parameters: t.parameters(),
+                constrained_sampling: None,
             })
             .collect()
     })

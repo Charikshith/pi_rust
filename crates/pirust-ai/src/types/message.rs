@@ -149,6 +149,48 @@ pub enum Message {
     ToolResult(ToolResultMessage),
 }
 
+/// OpenAI grammar variants for constrained sampling (TS `GrammarFormat`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GrammarFormat {
+    OpenaiLark,
+    OpenaiRegex,
+}
+
+/// Per-provider grammar encodings of the same intended language (TS
+/// `GrammarVariants` = `Partial<Record<GrammarFormat,string>>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrammarVariants {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_lark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_regex: Option<String>,
+}
+
+/// Provider-side constrained-sampling config for a tool (TS
+/// `ConstrainedSamplingConfig`). Rendered from JSON; the `json_schema` variant
+/// selects strict JSON-schema sampling, `grammar` provides grammar encodings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ConstrainedSamplingConfig {
+    #[serde(rename = "json_schema")]
+    JsonSchema {
+        strict: ConstrainedSamplingStrictness,
+    },
+    Grammar {
+        variants: GrammarVariants,
+    },
+}
+
+/// How strictly a JSON-schema-constrained tool must be sampled (TS `"prefer"
+/// | "require"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConstrainedSamplingStrictness {
+    Prefer,
+    Require,
+}
+
 /// A tool definition offered to the model (TS `Tool`). `parameters` is a JSON Schema
 /// (TS `TSchema`); ported as opaque JSON — `schemars`/`jsonschema` integration lands
 /// with the tool crate (feat-004).
@@ -157,6 +199,8 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constrained_sampling: Option<ConstrainedSamplingConfig>,
 }
 
 /// The full request context sent to a provider (TS `Context`).
