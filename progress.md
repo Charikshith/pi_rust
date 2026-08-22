@@ -8,6 +8,36 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
+
+## 2026-08-22 — feat-008 WAVE 2: openai-completions helpers
+
+- Started the remaining feat-008 work (provider streaming adapters + OAuth). Full scope
+  mapped: ~11,500 TS lines across packages/ai/src/api/* (openai-completions 1609,
+  openai-codex-responses 1650, anthropic-messages 1401, bedrock-converse-stream 1233,
+  mistral-conversations 934, google-vertex 597, google-generative-ai 525, pi-messages
+  433, ...), 60 provider files, OAuth. Not completable correctly in one wave — shipped
+  the first verified increment.
+- NEW `crates/pirust-ai/src/api/openai_completions.rs`: the deterministic helpers every
+  openai-completions provider (cerebras/deepseek/xai/groq/together/openrouter/nvidia/zai,
+  ~18 providers) calls in its stream loop:
+  - `short_hash` — byte-correct port of TS `shortHash` (utils/hash.ts): u32 wrapping
+    imul + base-36 (toString(36)), UTF-16 code-unit iteration. Pinned to oracle values
+    captured by running real Pi (incl. unicode + long inputs).
+  - `map_stop_reason` — finish_reason → StopReason with Pi's exact error wording.
+  - `parse_chunk_usage` — RawChunkUsage → Usage: normalizes the three cache-token
+    placements (prompt_tokens_details.cached_tokens wins over prompt_cache_hit_tokens
+    / cached_tokens), input floor at 0, reasoning subset, cost via existing
+    calculate_cost.
+- Verified: 3 unit tests pass (oracle-pinned), pirust-ai 60 lib tests green, fmt +
+  clippy clean. Workspace green except the 3 pre-existing unrelated pirust-tools
+  find.rs env failures.
+- REMAINING feat-008: stream/streamSimple event loop + buildParams + convertMessages/
+  convertTools + getCompat/detectCompat (with grammar/JSON-schema helpers),
+  normalizeToolCallId, routing seam in sdk.rs build_stream_fn, golden oracle script
+  for the stream path, other adapters, OAuth flows.
+- Resume point: next wave = convertMessages (needs transformMessages + getCompat) or
+  the stream event loop against a gen-* oracle script.
+
 ## 2026-08-22 — feat-013 COMPLETED (all 9 plan steps)
 
 - **feat-013 TUI customer readiness is DONE.** All nine `plan.md` steps implemented;
