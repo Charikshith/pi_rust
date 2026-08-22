@@ -21,6 +21,7 @@ use crate::types::model::Model;
 
 pub mod anthropic_messages;
 pub mod constrained_sampling;
+pub mod estimate;
 pub mod openai_completions;
 pub mod transform_messages;
 
@@ -55,6 +56,8 @@ pub struct StreamOptions {
     pub max_retries: Option<u32>,
     pub max_retry_delay_ms: Option<u64>,
     pub metadata: Option<Metadata>,
+    /// Extra sampling params merged last over the request body (TS `samplingParams`).
+    pub sampling_params: Option<serde_json::Value>,
 }
 
 /// The higher-level "simple" options (TS `SimpleStreamOptions extends StreamOptions`,
@@ -101,6 +104,21 @@ impl AnthropicOptions {
         self.transport = Some(Arc::new(transport) as Arc<dyn DynTransport>);
         self
     }
+}
+
+/// OpenAI-completions-specific options (TS `OpenAICompletionsOptions extends
+/// StreamOptions`, `openai-completions.ts:145-153`): the shared base plus
+/// `toolChoice`, `reasoningEffort`, and `thinkingBudgets`.
+#[derive(Debug, Clone, Default)]
+pub struct OpenAICompletionsOptions {
+    /// Shared base options.
+    pub base: StreamOptions,
+    /// `tool_choice`: a string (→ `{type:string}`) or a passthrough object.
+    pub tool_choice: Option<serde_json::Value>,
+    /// Reasoning effort level (`openai-completions.ts:147`), e.g. `"high"`.
+    pub reasoning_effort: Option<crate::types::ids::ThinkingLevel>,
+    /// Per-level thinking budgets (TS `ThinkingBudgets`).
+    pub thinking_budgets: Option<crate::types::ids::ThinkingBudgets>,
 }
 
 /// The provider streaming contract (TS `ProviderStreams`, `types.ts:227-230`). Every provider

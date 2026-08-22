@@ -48,6 +48,12 @@ if command -v node >/dev/null 2>&1; then
   if [ -f scripts/gen-tui-oracle.mjs ]; then
     node scripts/gen-tui-oracle.mjs --check || echo "WARN: tui fixtures differ; run node scripts/gen-tui-oracle.mjs"
   fi
+  # feat-008 openai-completions conversion fixtures (convertMessages/convertTools/
+  # getCompat/buildParams), driven by real Pi's adapter, gated by
+  # openai_completions_golden.rs.
+  if [ -f scripts/gen-openai-completions-oracle.mjs ]; then
+    node scripts/gen-openai-completions-oracle.mjs --check || echo "WARN: openai-completions fixtures differ; run node scripts/gen-openai-completions-oracle.mjs"
+  fi
   # 0.84.2 v4 session codec fixtures (feat-008 prerequisite, oracle-upgrade):
   # drives real Pi's jsonl/codec.ts, gated by v4_codec_golden.rs.
   if [ -f scripts/gen-v4-session-oracle.mjs ]; then

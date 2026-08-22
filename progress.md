@@ -9,6 +9,87 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 # Session Progress Log
 
 
+## 2026-08-22 — feat-008 WAVE 5: buildParams + estimate + Rust-idiomatic refactors
+
+User direction (Rust advantage): keep wire/on-disk contract EXACT but make
+internal algorithms idiomatic, allocation-minimal Rust — not TS-mimicry. This
+wave delivered the `buildParams` port + the two promised refactors, all green.
+
+- NEW `crates/pirust-ai/src/api/estimate.rs` — port of `utils/estimate.ts`
+  (`estimateContextTokens`/`estimateMessageTokens`/`getLastAssistantUsageInfo`/
+  deferred-tool accounting) as pure borrow-based fns + `div_ceil`. The together
+  fixture pins it byte-exactly: `estimateContextTokens` = 39 for the 1-user +
+  1-tool context (1 msg token + 38 tool-definition tokens), producing the
+  fixture `max_tokens: 126937` (131072 - 39 - 4096). 7 unit tests incl. the
+  oracle-pinned 39.
+- NEW `build_params` in `openai_completions.rs` (+ `OpenAICompletionsOptions`
+  in api/mod.rs, `sampling_params` added to StreamOptions): ports the full TS
+  buildParams — exact key order (model, messages, stream, prompt_cache_*,
+  stream_options, store, max_tokens/max_completion_tokens, temperature, tools,
+  tool_choice, thinking-format keys, budget field, provider, providerOptions,
+  samplingParams), cache-control (system prompt + last tool + last message),
+  resolveCacheRetention, clampOpenAIPromptCacheKey, thinking-budget clamp,
+  chat-template kwarg resolution, all 11 thinking-format branches. Replays all
+  6 buildParams oracle records BYTE-FOR-BYTE on first run (deepseek 384000,
+  together 126937, zai thinking, openrouter cache_control+store, nvidia,
+  moonshot-kimi). `clamp_max_tokens_to_context` exported for streamSimple.
+- Refactors (the user's two flagged spots):
+  1. `transform_messages_with_normalizer` + `downgrade_unsupported_images` now
+     borrow `&[Message]` — the caller (`convert_messages`) no longer clones the
+     full message vec; clones happen only where the algorithm rewrites.
+  2. `normalize_tool_call_id` dropped the UTF-16 `slice_utf16` ceremony: pipe
+     halves are ASCII-post-sanitize so byte-slicing is identical; the openai
+     >40 truncation is now `chars().take(40)` — identical on ASCII ids, and
+     never produces a lone surrogate (JS would). `sanitize_surrogates` keeps
+     the UTF-16 detection because it is genuinely about the data (unpaired
+     surrogates from lenient decode).
+  - `ThinkingLevelMap::get(level)`/`off_value()` accessors added.
+- Verified: pirust-ai 98 tests green (85 lib + 13 golden), workspace 526 passed
+  (only the 3 pre-existing pirust-tools find env failures), clippy/fmt clean,
+  oracle --check idempotent.
+- REMAINING feat-008: stream/streamSimple event loop (needs the HTTP SSE
+  machinery; buildParams + conversion are done), routing seam in sdk.rs, other
+  adapters (bedrock-converse-stream, openai-responses), OAuth flows.
+- Resume point: next wave = the openai-completions `stream`/`streamSimple` event
+  loop against a fake-fetch SSE harness (the oracle already simulates it), then
+  sdk.rs routing.
+
+## 2026-08-22 — feat-008 WAVE 4: openai-completions conversion layer (convertMessages/convertTools/compat)
+
+- Ported the message/tool conversion layer of `openai-completions.ts` into
+  `crates/pirust-ai/src/api/openai_completions.rs` + built the first oracle script
+  for it, verified byte-for-byte against real Pi.
+- NEW `scripts/gen-openai-completions-oracle.mjs`: drives real Pi's exported
+  `convertMessages` (12 scenarios) + real Pi `streamSimple` with `onPayload`
+  capture + fake fetch (7 buildParams scenarios exercising getCompat detect
+  branches) → `tests/fixtures/pi/openai-completions/cases.jsonl` (19 records).
+  Deterministic + idempotent; wired into `init.sh --check`.
+- NEW Rust in `openai_completions.rs`: `ResolvedOpenAICompletionsCompat` /
+  `OpenAICompletionsCompat` (typed model.compat overrides) + `MaxTokensField`/
+  `ThinkingFormat`/`ThinkingTokenBudgetField`/`CacheControlFormat`/
+  `DeferredToolsMode` enums; `detect_compat`/`get_compat` (exact TS port incl.
+  isZai/isTogether/isMoonshot/isNonStandard/useMaxTokens/isGrok/developer-role/
+  cache-control); `sanitize_surrogates` (UTF-16 code-unit port);
+  `has_header`/`get_client_api_key`/`has_tool_history`/`get_deferred_tool_names`/
+  `get_tools_by_name`; content discriminators; `convert_tools` (grammar custom
+  + strict JSON-schema, errors propagate with Pi wording);
+  `normalize_tool_call_id` (pipe-separated IDs, UTF-16 sanitize, 40-char
+  truncate + shortHash fallback); `convert_messages -> Result<Vec<Value>,String>`
+  (all compat branches, toolResult batch coalescing, kimi system-tools,
+  reasoning_details).
+- NEW `crates/pirust-ai/tests/openai_completions_golden.rs`: all 12
+  convertMessages records replay byte-identically vs Pi's literal output;
+  buildParams records pinned present for the future buildParams wave.
+- Verified: pirust-ai 92 tests green (80 lib + 12), workspace clippy/fmt/build
+  clean; only the 3 pre-existing pirust-tools find env failures remain
+  (confirmed failing on clean stash). Oracle --check green + idempotent.
+- REMAINING feat-008: stream/streamSimple event loop + buildParams (oracle
+  records already pinned), routing seam in sdk.rs, other adapters
+  (anthropic-messages done in feat-002), OAuth flows.
+- Resume point: next wave = stream event loop + buildParams against the pinned
+  buildParams oracle records, or the sdk.rs routing seam.
+
+
 ## 2026-08-22 — feat-008 WAVE 2: openai-completions helpers
 
 - Started the remaining feat-008 work (provider streaming adapters + OAuth). Full scope

@@ -55,42 +55,41 @@ fn includes_image_modality(model: &crate::types::model::Model) -> bool {
 
 /// `downgradeUnsupportedImages` — when the model cannot see images, replace
 /// image content in user/tool messages with a placeholder.
+///
+/// Borrows the input and returns a new vec, cloning only the messages it
+/// rewrites (image-capable models pass through with a cheap `.to_vec()` — the
+/// caller is never forced to clone up-front).
 fn downgrade_unsupported_images(
-    messages: Vec<Message>,
+    messages: &[Message],
     model: &crate::types::model::Model,
 ) -> Vec<Message> {
     if includes_image_modality(model) {
-        return messages;
+        return messages.to_vec();
     }
     messages
-        .into_iter()
+        .iter()
         .map(|msg| match msg {
             Message::User(user) => {
-                let blocks = match user.content {
+                let blocks = match &user.content {
                     UserMessageContent::Blocks(blocks) => blocks,
-                    UserMessageContent::Text(text) => {
-                        return Message::User(UserMessage {
-                            content: UserMessageContent::Text(text),
-                            ..user
-                        })
-                    }
+                    UserMessageContent::Text(_) => return msg.clone(),
                 };
                 Message::User(UserMessage {
                     content: UserMessageContent::Blocks(replace_images_with_placeholder(
-                        blocks,
+                        blocks.clone(),
                         NON_VISION_USER_IMAGE_PLACEHOLDER,
                     )),
-                    ..user
+                    ..user.clone()
                 })
             }
             Message::ToolResult(tool) => Message::ToolResult(ToolResultMessage {
                 content: replace_images_with_placeholder(
-                    tool.content,
+                    tool.content.clone(),
                     NON_VISION_TOOL_IMAGE_PLACEHOLDER,
                 ),
-                ..tool
+                ..tool.clone()
             }),
-            other => other,
+            other => other.clone(),
         })
         .collect()
 }
@@ -111,7 +110,7 @@ impl<F: Fn(&str, &NormalizeCtx) -> String + Sync + Send> NormalizeToolCallId for
 /// assistant message) to a provider-compatible id.
 pub fn transform_messages_with_normalizer(
     model: &crate::types::model::Model,
-    messages: Vec<Message>,
+    messages: &[Message],
     normalize_tool_call_id: Option<&dyn NormalizeToolCallId>,
 ) -> Vec<Message> {
     let mut id_map: HashMap<String, String> = HashMap::new();
@@ -356,7 +355,7 @@ mod tests {
     #[test]
     fn no_image_model_downgrades_images_with_coalescing() {
         let model = model_with_image(false);
-        let out = transform_messages_with_normalizer(&model, vec![user_with_image()], None);
+        let out = transform_messages_with_normalizer(&model, &[user_with_image()], None);
         // "look", "(image omitted...)", "after" — a single coalesced placeholder.
         if let Message::User(u) = &out[0] {
             let blocks = match &u.content {
@@ -377,7 +376,7 @@ mod tests {
     fn image_downgrade_matches_real_pi_oracle() {
         // Ground truth from running real Pi's transformMessages on the same input.
         let model = model_with_image(false);
-        let out = transform_messages_with_normalizer(&model, vec![user_with_image()], None);
+        let out = transform_messages_with_normalizer(&model, &[user_with_image()], None);
         let actual = serde_json::to_string(&out).unwrap();
         assert_eq!(
             actual,
@@ -415,7 +414,7 @@ mod tests {
         });
         let out = transform_messages_with_normalizer(
             &model,
-            vec![assistant_with_tool, user_text("go")],
+            &[assistant_with_tool, user_text("go")],
             Some(&|id: &str, _ctx: &NormalizeCtx| -> String { format!("norm_{id}") }),
         );
         // Zero out the synthetic timestamp before comparing (nondeterministic).
@@ -438,7 +437,7 @@ mod tests {
     #[test]
     fn image_model_passes_through() {
         let model = model_with_image(true);
-        let out = transform_messages_with_normalizer(&model, vec![user_with_image()], None);
+        let out = transform_messages_with_normalizer(&model, &[user_with_image()], None);
         if let Message::User(u) = &out[0] {
             match &u.content {
                 UserMessageContent::Blocks(b) => assert_eq!(b.len(), 3, "unchanged"),
@@ -467,18 +466,15 @@ mod tests {
             end_turn: None,
         };
         let before = vec![Message::Assistant(err_assistant.clone())];
-        let out = transform_messages_with_normalizer(&model, before, None);
+        let out = transform_messages_with_normalizer(&model, &before, None);
         assert!(
             out.is_empty(),
             "errored assistant turn must be dropped, got {out:?}"
         );
 
         err_assistant.stop_reason = StopReason::Aborted;
-        let out = transform_messages_with_normalizer(
-            &model,
-            vec![Message::Assistant(err_assistant)],
-            None,
-        );
+        let out =
+            transform_messages_with_normalizer(&model, &[Message::Assistant(err_assistant)], None);
         assert!(out.is_empty(), "aborted assistant turn must be dropped");
     }
 
@@ -510,7 +506,7 @@ mod tests {
         });
         let out = transform_messages_with_normalizer(
             &model,
-            vec![assistant_with_tool, user_text("hi")],
+            &[assistant_with_tool, user_text("hi")],
             None,
         );
         // assistant(call_1), user interrupts -> synthetic error result for call_1, then user.
@@ -563,7 +559,7 @@ mod tests {
         let normalizer = |id: &str, _ctx: &NormalizeCtx| -> String { format!("norm_{id}") };
         let out = transform_messages_with_normalizer(
             &model,
-            vec![assistant, tool_result],
+            &[assistant, tool_result],
             Some(&normalizer),
         );
         // The tool call id is normalized in the assistant message AND the tool result.

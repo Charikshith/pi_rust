@@ -117,6 +117,29 @@ pub struct ThinkingLevelMap {
     pub max: Option<Option<String>>,
 }
 
+impl ThinkingLevelMap {
+    /// Look up the provider value for a thinking level (TS `map[level]`): the
+    /// flattened value, or `None` when absent or explicitly `null`.
+    pub fn get(&self, level: crate::types::ids::ThinkingLevel) -> Option<&str> {
+        let v = match level {
+            crate::types::ids::ThinkingLevel::Minimal => self.minimal.as_ref(),
+            crate::types::ids::ThinkingLevel::Low => self.low.as_ref(),
+            crate::types::ids::ThinkingLevel::Medium => self.medium.as_ref(),
+            crate::types::ids::ThinkingLevel::High => self.high.as_ref(),
+            crate::types::ids::ThinkingLevel::Xhigh => self.xhigh.as_ref(),
+            crate::types::ids::ThinkingLevel::Max => self.max.as_ref(),
+        };
+        v.and_then(|inner| inner.as_deref())
+    }
+
+    /// The `off` value flattened (`map.off`): `None` when absent, `Some(None)`
+    /// stays as `None`-meaning-unset; the double-option collapses to a plain
+    /// `Option<&str>`.
+    pub fn off_value(&self) -> Option<&str> {
+        self.off.as_ref().and_then(|inner| inner.as_deref())
+    }
+}
+
 /// A model in the unified model system (TS `Model<TApi>`). Field order mirrors the TS
 /// interface so serialized key order matches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
