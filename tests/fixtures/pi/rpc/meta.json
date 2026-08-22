@@ -1,0 +1,6 @@
+{
+  "exitCode": 0,
+  "commandCount": 38,
+  "responseCount": 39,
+  "notes": "Captured by driving real packages/coding-agent/src/modes/rpc/rpc-mode.ts runRpcMode in a child process over real OS pipes with a stub runtime host/session. {TMP} normalizes the temp spec dir. Stub values are listed in gen-rpc-oracle.mjs buildSpec()."
+}

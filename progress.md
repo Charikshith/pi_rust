@@ -9,6 +9,63 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 # Session Progress Log
 
 
+## 2026-08-22 — feat-012 WAVE 1: RPC protocol foundation + oracle (offline + LIVE)
+
+Started feat-012 (RPC mode). Wave 1 delivered the wire layer, oracle-verified:
+
+- ORACLE (offline): `scripts/gen-rpc-oracle.mjs` drives REAL `runRpcMode`
+  (`../pi/packages/coding-agent/src/modes/rpc/rpc-mode.ts`) in a child process
+  over real OS pipes with a stub runtime host/session. KEY FINDING: Pi's
+  handleInputLine handlers interleave nondeterministically run-to-run, so the
+  capture is LOCK-STEP — command[i] is sent only after its predecessors'
+  responses are observed; per-command wait predicates live in buildSpec().
+  Fixture: tests/fixtures/pi/rpc/{requests,responses}.corpus.jsonl (38/39),
+  deterministic (3x --check), wired into init.sh.
+- ORACLE (LIVE): user directive — test against ggml-org/Qwen3.5-0.8B-GGUF at
+  http://127.0.0.1:8080. New `scripts/gen-rpc-live-oracle.mjs`: temp
+  PI_CODING_AGENT_DIR + models.json {"providers":{"anthropic":{"baseUrl":
+  "http://127.0.0.1:8080"}}} + ANTHROPIC_API_KEY=dummy, spawns real `pi --mode
+  rpc --provider anthropic --model claude-opus-4-8`, drives get_state →
+  set_thinking_level → prompt → get_last_assistant_text → get_messages and
+  freezes the FULL event tape (61 lines) to
+  tests/fixtures/pi/rpc-live/live.corpus.jsonl (structure reference, not byte
+  golden — model text varies). Also added reusable `scripts/run-pi.mjs`
+  launcher (real pi from TS source, ../pi untouched).
+- RUST: new `crates/pirust-coding-agent/src/rpc/{mod,jsonl,types}.rs`:
+  jsonl.rs = strict LF-only framing port (CRLF strip, UTF-8 chunk-boundary
+  buffering per StringDecoder, U+2028/U+2029 NOT separators, final flush);
+  types.rs = typed RpcCommand (28 variants) + ParsedInput +
+  RpcResponse envelope with manual Serialize for JS-canonical key order
+  (id?,type,command,success,data?/error) + RpcSessionState (camelCase,
+  skip-None = JSON.stringify's undefined omission) + extension UI req/resp.
+- GOLDENS: tests/rpc_golden.rs — all 39 captured responses rebuilt from our
+  types are BYTE-IDENTICAL to Pi's stdout lines (key order, omitted keys,
+  error wording incl. V8 parse message + "Unknown command:"/"undefined");
+  all 38 requests parse into the typed enum as Pi's union discriminates them.
+- Gate: fmt+clippy(-D warnings) clean; workspace green except the 3 pre-existing
+  pirust-tools find env failures; gen-rpc-oracle --check idempotent.
+- PRE-EXISTING ISSUE FOUND (not fixed here): ./init.sh fails bash parsing on the
+  committed HEAD copy (CRLF working tree; `bash -n` fails before my change).
+  Gates were run as individual commands this wave.
+- REMAINING feat-012: Wave 2 rpc_mode.rs dispatch loop over an RpcRuntimeHost
+  (harness-backed); Wave 3 main.rs wiring + signals/shutdown + live differential;
+  Wave 4 RpcClient port.
+- Resume point: Wave 2.
+
+## 2026-08-22 — feat-008 CLOSED (user decision: remaining providers + OAuth skipped)
+
+- User decision: skip the remaining non-openai adapters (bedrock-converse-stream,
+  mistral-conversations, google-generative-ai, google-vertex, pi-messages,
+  openai-codex-responses/websocket) and ALL OAuth flows "for now — we will come
+  to this later". Recorded as SKIPPED BY AUTHOR in feat-008 evidence;
+  feature_list.json feat-008 → done. Next feature: feat-012 (RPC mode).
+- OpenAI-compatible coverage is COMPLETE and oracle-verified: anthropic-messages
+  (feat-002), openai-completions (waves 1–7: helpers, conversion/compat,
+  buildParams, estimate, stream event-generator, transport + error/retry),
+  openai-responses + azure-openai-responses (wave 8); all routed in sdk.rs.
+- Consequence (documented): models whose `api` names a skipped adapter resolve
+  in the catalog but error at stream time until the adapter lands.
+
 ## 2026-08-22 — feat-008 WAVE 5: buildParams + estimate + Rust-idiomatic refactors
 
 User direction (Rust advantage): keep wire/on-disk contract EXACT but make
@@ -167,12 +224,11 @@ wave delivered the `buildParams` port + the two promised refactors, all green.
 ## Current State
 
 **Last Updated:** 2026-08-22
-**Active Feature:** feat-008 — P7: remaining ai providers + catalog generator
-(NOT STARTED — prerequisite oracle upgrade 0.80.10 → 0.84.2 in progress; the
-v4 harness-swap prerequisite wave is DONE — see 2026-08-22 entry below).
+**Active Feature:** feat-012 — RPC mode (JSON-RPC over stdio) (NOT STARTED — next up;
+feat-008 closed with remaining providers + OAuth SKIPPED BY AUTHOR, see 2026-08-22 entry).
 feat-007 DONE (Waves 1-7, commits b71f4f7..3540ec7).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-008 (remaining providers + catalog generator).
+**Next feature:** feat-012 (RPC mode); feat-009 (orchestrator) depends on it.
 **Session resume:** read feature_list.json + progress.md; next session starts
   the feat-008 provider waves (remaining adapters + catalog generator). The v4
   harness-swap prerequisite is DONE (2026-08-22 entry): harness drives the v4

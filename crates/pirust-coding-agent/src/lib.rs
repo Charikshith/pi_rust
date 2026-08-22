@@ -39,6 +39,7 @@ pub mod migrations;
 pub mod models;
 pub mod print_mode;
 pub mod provider_attribution;
+pub mod rpc;
 pub mod runtime_host;
 pub mod sdk;
 pub mod session;

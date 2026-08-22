@@ -1,0 +1,38 @@
+{not json
+{"type":"get_state"}
+{"type":"extension_ui_response","id":"nonexistent","value":"x"}
+{"id":"a","type":"set_thinking_level","level":"high"}
+{"id":"b","type":"cycle_thinking_level"}
+{"id":"c","type":"get_available_thinking_levels"}
+{"id":"d","type":"set_steering_mode","mode":"one-at-a-time"}
+{"id":"e","type":"set_follow_up_mode","mode":"all"}
+{"id":"f","type":"compact","customInstructions":"focus on tests"}
+{"type":"compact"}
+{"id":"g","type":"set_auto_compaction","enabled":false}
+{"id":"h","type":"set_auto_retry","enabled":true}
+{"id":"i","type":"abort_retry"}
+{"id":"j","type":"bash","command":"echo hi"}
+{"id":"k","type":"abort_bash"}
+{"id":"l","type":"abort"}
+{"id":"m","type":"steer","message":"mid-run change"}
+{"id":"n","type":"follow_up","message":"after this"}
+{"id":"o","type":"new_session"}
+{"id":"p","type":"switch_session","sessionPath":"{TMP}/other.session.jsonl"}
+{"id":"q","type":"fork","entryId":"e1"}
+{"id":"r","type":"clone"}
+{"id":"s","type":"get_fork_messages"}
+{"id":"t","type":"get_entries"}
+{"id":"u","type":"get_entries","since":"nope"}
+{"id":"v","type":"get_tree"}
+{"id":"w","type":"get_last_assistant_text"}
+{"id":"x","type":"set_session_name","name":"   "}
+{"id":"y","type":"set_session_name","name":"  My Session  "}
+{"id":"z","type":"get_messages"}
+{"id":"aa","type":"get_commands"}
+{"id":"ab","type":"get_session_stats"}
+{"id":"ac","type":"set_model","provider":"faux","modelId":"missing-model"}
+{"id":"ad","type":"set_model","provider":"faux","modelId":"faux-1"}
+{"id":"ae","type":"cycle_model"}
+{"id":"af","type":"get_available_models"}
+{"type":"bogus_command"}
+{"id":"ag","type":"prompt","message":"hello again","streamingBehavior":"followUp"}

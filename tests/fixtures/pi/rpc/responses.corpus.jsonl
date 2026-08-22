@@ -1,0 +1,39 @@
+{"line":"{\"type\":\"response\",\"command\":\"parse\",\"success\":false,\"error\":\"Failed to parse command: Expected property name or '}' in JSON at position 1 (line 1 column 2)\"}"}
+{"line":"{\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"model\":{\"id\":\"faux-1\",\"name\":\"Faux Model\",\"api\":\"faux:{FAUX_API}\",\"provider\":\"faux\",\"baseUrl\":\"http://localhost:0\",\"reasoning\":false,\"input\":[\"text\",\"image\"],\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"contextWindow\":128000,\"maxTokens\":16384},\"thinkingLevel\":\"off\",\"isStreaming\":false,\"isCompacting\":false,\"steeringMode\":\"all\",\"followUpMode\":\"all\",\"sessionId\":\"sess_rpc_test_0000\",\"autoCompactionEnabled\":true,\"messageCount\":2,\"pendingMessageCount\":0}}"}
+{"line":"{\"id\":\"a\",\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}"}
+{"line":"{\"id\":\"b\",\"type\":\"response\",\"command\":\"cycle_thinking_level\",\"success\":true,\"data\":{\"level\":\"medium\"}}"}
+{"line":"{\"id\":\"c\",\"type\":\"response\",\"command\":\"get_available_thinking_levels\",\"success\":true,\"data\":{\"levels\":[\"off\",\"minimal\",\"low\",\"medium\",\"high\"]}}"}
+{"line":"{\"id\":\"d\",\"type\":\"response\",\"command\":\"set_steering_mode\",\"success\":true}"}
+{"line":"{\"id\":\"e\",\"type\":\"response\",\"command\":\"set_follow_up_mode\",\"success\":true}"}
+{"line":"{\"id\":\"f\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"[stub summary]\",\"firstKeptEntryId\":\"e2\",\"tokensBefore\":1234}}"}
+{"line":"{\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"[stub summary]\",\"firstKeptEntryId\":\"e2\",\"tokensBefore\":1234}}"}
+{"line":"{\"id\":\"g\",\"type\":\"response\",\"command\":\"set_auto_compaction\",\"success\":true}"}
+{"line":"{\"id\":\"h\",\"type\":\"response\",\"command\":\"set_auto_retry\",\"success\":true}"}
+{"line":"{\"id\":\"i\",\"type\":\"response\",\"command\":\"abort_retry\",\"success\":true}"}
+{"line":"{\"id\":\"j\",\"type\":\"response\",\"command\":\"bash\",\"success\":true,\"data\":{\"output\":\"hi\\n\",\"exitCode\":0,\"cancelled\":false,\"truncated\":false,\"__rpcId\":\"j\"}}"}
+{"line":"{\"id\":\"k\",\"type\":\"response\",\"command\":\"abort_bash\",\"success\":true}"}
+{"line":"{\"id\":\"l\",\"type\":\"response\",\"command\":\"abort\",\"success\":true}"}
+{"line":"{\"id\":\"m\",\"type\":\"response\",\"command\":\"steer\",\"success\":true}"}
+{"line":"{\"id\":\"n\",\"type\":\"response\",\"command\":\"follow_up\",\"success\":true}"}
+{"line":"{\"id\":\"o\",\"type\":\"response\",\"command\":\"new_session\",\"success\":true,\"data\":{\"cancelled\":false}}"}
+{"line":"{\"id\":\"p\",\"type\":\"response\",\"command\":\"switch_session\",\"success\":true,\"data\":{\"cancelled\":false}}"}
+{"line":"{\"id\":\"q\",\"type\":\"response\",\"command\":\"fork\",\"success\":true,\"data\":{\"text\":\"hello world\",\"cancelled\":false}}"}
+{"line":"{\"id\":\"r\",\"type\":\"response\",\"command\":\"clone\",\"success\":true,\"data\":{\"cancelled\":false}}"}
+{"line":"{\"id\":\"s\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"hello world\"}]}}"}
+{"line":"{\"id\":\"t\",\"type\":\"response\",\"command\":\"get_entries\",\"success\":true,\"data\":{\"entries\":[{\"id\":\"e1\",\"parentId\":null,\"type\":\"message\",\"message\":{\"role\":\"user\"}},{\"id\":\"e2\",\"parentId\":\"e1\",\"type\":\"message\",\"message\":{\"role\":\"assistant\"}}],\"leafId\":\"e2\"}}"}
+{"line":"{\"id\":\"u\",\"type\":\"response\",\"command\":\"get_entries\",\"success\":false,\"error\":\"Entry not found: nope\"}"}
+{"line":"{\"id\":\"v\",\"type\":\"response\",\"command\":\"get_tree\",\"success\":true,\"data\":{\"tree\":[{\"entry\":{\"id\":\"e1\",\"parentId\":null,\"type\":\"message\",\"message\":{\"role\":\"user\"}},\"children\":[{\"entry\":{\"id\":\"e2\",\"parentId\":\"e1\",\"type\":\"message\",\"message\":{\"role\":\"assistant\"}},\"children\":[]}]}],\"leafId\":\"e2\"}}"}
+{"line":"{\"id\":\"w\",\"type\":\"response\",\"command\":\"get_last_assistant_text\",\"success\":true,\"data\":{\"text\":\"hi there\"}}"}
+{"line":"{\"id\":\"x\",\"type\":\"response\",\"command\":\"set_session_name\",\"success\":false,\"error\":\"Session name cannot be empty\"}"}
+{"line":"{\"id\":\"y\",\"type\":\"response\",\"command\":\"set_session_name\",\"success\":true}"}
+{"line":"{\"id\":\"z\",\"type\":\"response\",\"command\":\"get_messages\",\"success\":true,\"data\":{\"messages\":[{\"role\":\"user\",\"content\":\"hello world\",\"timestamp\":1700000000000},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi there\"}],\"api\":\"anthropic-messages\",\"provider\":\"anthropic\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input\":10,\"output\":5,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":15,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}},\"stopReason\":\"stop\",\"timestamp\":1700000000000}]}}"}
+{"line":"{\"id\":\"aa\",\"type\":\"response\",\"command\":\"get_commands\",\"success\":true,\"data\":{\"commands\":[]}}"}
+{"line":"{\"id\":\"ab\",\"type\":\"response\",\"command\":\"get_session_stats\",\"success\":true,\"data\":{\"sessionId\":\"sess_rpc_test_0000\",\"userMessages\":1,\"assistantMessages\":1,\"toolCalls\":0,\"toolResults\":0,\"totalMessages\":2,\"tokens\":{\"input\":10,\"output\":5,\"cacheRead\":0,\"cacheWrite\":0,\"total\":15},\"cost\":0.000037}}"}
+{"line":"{\"id\":\"ac\",\"type\":\"response\",\"command\":\"set_model\",\"success\":false,\"error\":\"Model not found: faux/missing-model\"}"}
+{"line":"{\"id\":\"ad\",\"type\":\"response\",\"command\":\"set_model\",\"success\":true,\"data\":{\"id\":\"faux-1\",\"name\":\"Faux Model\",\"api\":\"faux:{FAUX_API}\",\"provider\":\"faux\",\"baseUrl\":\"http://localhost:0\",\"reasoning\":false,\"input\":[\"text\",\"image\"],\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"contextWindow\":128000,\"maxTokens\":16384}}"}
+{"line":"{\"id\":\"ae\",\"type\":\"response\",\"command\":\"cycle_model\",\"success\":true,\"data\":{\"model\":{\"id\":\"faux-1\",\"name\":\"Faux Model\",\"api\":\"faux:{FAUX_API}\",\"provider\":\"faux\",\"baseUrl\":\"http://localhost:0\",\"reasoning\":false,\"input\":[\"text\",\"image\"],\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"contextWindow\":128000,\"maxTokens\":16384},\"thinkingLevel\":\"medium\",\"isScoped\":false}}"}
+{"line":"{\"id\":\"af\",\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[{\"id\":\"faux-1\",\"name\":\"Faux Model\",\"api\":\"faux:{FAUX_API}\",\"provider\":\"faux\",\"baseUrl\":\"http://localhost:0\",\"reasoning\":false,\"input\":[\"text\",\"image\"],\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"contextWindow\":128000,\"maxTokens\":16384}]}}"}
+{"line":"{\"type\":\"response\",\"command\":\"bogus_command\",\"success\":false,\"error\":\"Unknown command: bogus_command\"}"}
+{"line":"{\"id\":\"ag\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"}
+{"line":"{\"type\":\"queue_update\",\"steering\":[],\"followUp\":[]}"}
+{"line":"{\"type\":\"agent_settled\"}"}
