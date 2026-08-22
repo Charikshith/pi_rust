@@ -8,6 +8,40 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
+## 2026-08-22 — feat-013 COMPLETED (all 9 plan steps)
+
+- **feat-013 TUI customer readiness is DONE.** All nine `plan.md` steps implemented;
+  `feature_list.json` feat-013 → done with evidence; detailed completion in the
+  feature's evidence + `plan.md` (retained as the historical record).
+- Step 1 (nested-runtime panic): production runs through the async `run_async` turn
+  task boundary; Ctrl+C/Esc abort + cancellation notice; delayed-provider black-box
+  tests (tui_delayed_provider.rs).
+- Step 2 (state/event contract): explicit `TurnState` machine, monotonic `turn_id` to
+  drop stale late events, bounded (256) event channel + `MessageUpdate` coalescing.
+- Step 3 (runtime identity): UI-agnostic `Agent` accessors
+  (`model`/`set_model`/`thinking_level`/`set_thinking_level`) in pirust-agent-core;
+  `TuiRuntimeInfo`/`TuiRuntimeStatus` seam implemented by `SingleTurnSession`; status
+  line now shows cwd·session·provider/model·context tokens·cost·thinking·tools·turn-state.
+- Step 4 (slash commands): command registry dispatch for /help,/hotkeys,/session,/name,
+  /model,/models,/resume,/compact,/restart,/new,/refresh-model-list,/quit; `/` palette
+  with filtering/arrows/Enter/Esc + availability markers.
+- Step 5 (pickers): /model and /resume filterable pickers (single-model/single-session
+  runtime), active cwd in status.
+- Step 6 (customer-critical states): CompactionStart/End, AutoRetryStart, AgentSettled
+  rendered; errors actionable inline.
+- Step 7 (tool approval): before_tool_call handshake with r/a/d (RunOnce/AlwaysAllow/
+  Deny), cwd + destructive-risk warning; run/allow/deny all black-box tested.
+- Step 8 (terminal hardening): 80x24/120x40/40x10 size tests, resize-during-idle
+  re-render, long tool-output truncation preview.
+- Step 9 (gate): fmt + clippy (--all-targets -D warnings) clean; `cargo test
+  --workspace` green except the 3 pre-existing unrelated `pirust-tools/src/find.rs`
+  failures (environment-dependent git-walk — present on HEAD, unchanged). New tests:
+  `tui_commands_status.rs` (7 tests). Local llama-server smoke deferred (no server
+  at 127.0.0.1:8080).
+- **Resume point:** next logical feature is feat-008 (remaining AI providers + catalog
+  generator), already in-progress with its v4 harness-swap prerequisite done.
+
+
 ## 2026-08-22 � TUI ARCHITECTURE AUDIT SAVED
 
 - User-facing TUI review completed. The existing code should continue; a fresh rewrite is not recommended.

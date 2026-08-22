@@ -18,10 +18,11 @@ use std::thread;
 use std::time::Duration;
 
 use pirust_agent_core::harness::types::SessionHeader;
+use pirust_coding_agent::interactive_mode::InteractiveSession;
 use pirust_coding_agent::print_mode::{
     AgentSessionEvent, Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession,
     PromptOptions, SessionEventListener, SessionStateView, Subscription, ThrownValue,
-    ToolApprovalDecider, ToolApprovalDecision,
+    ToolApprovalDecider, ToolApprovalDecision, TuiRuntimeInfo, TuiRuntimeStatus,
 };
 use pirust_tui::terminal::Terminal;
 
@@ -206,6 +207,22 @@ impl PrintModeSession for DelayedSession {
     }
 }
 
+impl TuiRuntimeInfo for DelayedSession {
+    fn runtime_status(&self) -> TuiRuntimeStatus {
+        TuiRuntimeStatus {
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_name: "Test Model".into(),
+            context_window: 1_000_000,
+            reasoning_supported: true,
+            thinking_level: "off".into(),
+            context_tokens: 0,
+            cost: 0.0,
+            tools_enabled: true,
+        }
+    }
+}
+
 fn make_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -246,7 +263,7 @@ fn delayed_submit_streams_then_completes() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 
@@ -289,7 +306,7 @@ fn delayed_submit_cancel_aborts_before_release() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 
@@ -337,7 +354,7 @@ fn delayed_submit_error_renders_notice() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 
@@ -380,7 +397,7 @@ fn tool_approval_prompt_renders_and_deny_blocks() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 
@@ -439,7 +456,7 @@ fn resize_during_idle_is_picked_up() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 

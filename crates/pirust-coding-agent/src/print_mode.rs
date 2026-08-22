@@ -665,6 +665,38 @@ pub enum ToolApprovalDecision {
 pub type ToolApprovalDecider =
     Arc<dyn Fn(ToolApprovalRequest) -> BoxFuture<'static, ToolApprovalDecision> + Send + Sync>;
 
+/// The runtime identity/status the TUI's persistent status line shows
+/// (plan.md step 3). `AgentHarness`/the session owns the state; this is a
+/// read-only projection, so the TUI stays UI-agnostic-free.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuiRuntimeStatus {
+    /// Provider id of the active model, e.g. `"anthropic"`.
+    pub provider: String,
+    /// Model id, e.g. `"claude-sonnet-4-5"`.
+    pub model: String,
+    /// Human model name, e.g. `"Claude Sonnet 4.5"`.
+    pub model_name: String,
+    /// Context window in tokens.
+    pub context_window: u64,
+    /// Whether the model advertises reasoning support.
+    pub reasoning_supported: bool,
+    /// Active reasoning level (`thinking_level_as_str`).
+    pub thinking_level: String,
+    /// Context usage: input + output tokens of the current transcript.
+    pub context_tokens: u64,
+    /// Total cost of the current transcript in USD.
+    pub cost: f64,
+    /// Whether tools are enabled for the current session.
+    pub tools_enabled: bool,
+}
+
+/// The slice of the runtime the TUI reads for status rendering. `SingleTurnSession`
+/// implements it from the real `Agent`; test stubs implement it directly.
+pub trait TuiRuntimeInfo: Send + Sync {
+    /// A snapshot of the runtime identity/status for the status line.
+    fn runtime_status(&self) -> TuiRuntimeStatus;
+}
+
 /// `session.subscribe`'s return value: the unsubscribe thunk.
 pub struct Subscription {
     unsubscribe: Box<dyn FnOnce() + Send>,

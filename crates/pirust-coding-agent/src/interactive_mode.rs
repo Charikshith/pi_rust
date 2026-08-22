@@ -49,14 +49,205 @@ use pirust_tui::tui::{SharedComponent, TUI};
 
 use crate::interactive_theme::{self, dark};
 use crate::print_mode::{
-    AgentSessionEvent, PrintModeSession, ToolApprovalDecision, ToolApprovalRequest,
+    AgentSessionEvent, PrintModeSession, ToolApprovalDecision, ToolApprovalRequest, TuiRuntimeInfo,
+    TuiRuntimeStatus,
 };
+
+/// A session the TUI drives: the [`PrintModeSession`] turn API plus the
+/// [`TuiRuntimeInfo`] status projection. Every real session (`SingleTurnSession`)
+/// and every test stub implements both.
+pub trait InteractiveSession: PrintModeSession + TuiRuntimeInfo {}
+impl<T: PrintModeSession + TuiRuntimeInfo> InteractiveSession for T {}
+
+/// The lifecycle of the active turn — plan.md step 2's explicit state machine.
+/// Replaces the loose `Option<JoinHandle>` + bools with typed legal transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+    /// No turn is running.
+    Idle,
+    /// A prompt task is in flight.
+    Running,
+    /// The turn paused awaiting a tool-approval decision.
+    AwaitingApproval,
+    /// Ctrl+C/Esc was pressed; the turn task is being aborted.
+    Cancelling,
+    /// The turn was aborted by the user.
+    Cancelled,
+    /// The turn finished.
+    Completed,
+    /// The turn failed (provider/model/tool error).
+    Failed,
+}
 
 /// A tool-approval request bridged from the agent thread to the UI loop,
 /// carrying a oneshot to deliver the user's decision back.
 struct ApprovalMessage {
     request: ToolApprovalRequest,
     respond: tokio::sync::oneshot::Sender<ToolApprovalDecision>,
+}
+
+/// One selectable entry in the slash-command palette (plan.md step 4).
+#[derive(Debug, Clone)]
+struct PaletteEntry {
+    /// The command name without the leading `/`.
+    name: String,
+    /// The description shown under the name.
+    description: String,
+    /// Whether the command has a working handler in this session.
+    available: bool,
+}
+
+/// The slash-command palette (plan.md step 4): `/` opens it, typed characters
+/// filter by name, ↑/↓ navigate, Enter runs, Esc closes. Renders as a chat
+/// notice; the loop routes keys to [`InteractiveMode::handle_palette_key`].
+struct CommandPalette {
+    entries: Vec<PaletteEntry>,
+    filter: String,
+    selected: usize,
+}
+
+impl CommandPalette {
+    /// Build from the registered command list (plan.md step 4: palette
+    /// entries come from the registry, not a second hardcoded list).
+    fn from_registry() -> Self {
+        let entries = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .map(|(name, description, _)| PaletteEntry {
+                name: name.to_string(),
+                description: description.to_string(),
+                available: is_command_available(name),
+            })
+            .collect();
+        Self {
+            entries,
+            filter: String::new(),
+            selected: 0,
+        }
+    }
+
+    /// The entries matching the current filter.
+    fn visible(&self) -> Vec<&PaletteEntry> {
+        let filter = self.filter.to_ascii_lowercase();
+        self.entries
+            .iter()
+            .filter(|e| e.name.to_ascii_lowercase().contains(&filter))
+            .collect()
+    }
+
+    /// Render the palette as a multi-line string (chat notice + key hints).
+    fn render(&self) -> String {
+        let mut lines = vec![format!("Command palette (filter: {})", self.filter)];
+        let visible = self.visible();
+        if visible.is_empty() {
+            lines.push("  (no matching commands)".to_string());
+        }
+        for (index, entry) in visible.iter().enumerate() {
+            let marker = if index == self.selected.min(visible.len() - 1) {
+                "▸"
+            } else {
+                " "
+            };
+            let availability = if entry.available {
+                ""
+            } else {
+                " (unavailable)"
+            };
+            lines.push(format!(
+                "{marker} /{} — {}{availability}",
+                entry.name, entry.description
+            ));
+        }
+        lines.push("↑/↓ navigate · Enter run · Esc close".to_string());
+        lines.join("\n")
+    }
+}
+
+/// The `/model` picker (plan.md step 5): filters the model catalog by
+/// provider/model id, ↑/↓ navigate, Enter selects, Esc dismisses.
+struct ModelPicker {
+    /// (provider, model id) of each selectable model.
+    models: Vec<(String, String)>,
+    filter: String,
+    selected: usize,
+}
+
+impl ModelPicker {
+    fn render(&self) -> String {
+        let mut lines = vec![format!("Select model (filter: {})", self.filter)];
+        let visible = self.visible();
+        if visible.is_empty() {
+            lines.push("  (no matching models)".to_string());
+        }
+        for (index, (provider, model)) in visible.iter().enumerate() {
+            let marker = if index == self.selected.min(visible.len().saturating_sub(1)) {
+                "▸"
+            } else {
+                " "
+            };
+            lines.push(format!("{marker} {provider} / {model}"));
+        }
+        lines.push("↑/↓ navigate · Enter select · Esc dismiss".to_string());
+        lines.join("\n")
+    }
+
+    fn visible(&self) -> Vec<&(String, String)> {
+        let filter = self.filter.to_ascii_lowercase();
+        self.models
+            .iter()
+            .filter(|(provider, model)| {
+                provider.to_ascii_lowercase().contains(&filter)
+                    || model.to_ascii_lowercase().contains(&filter)
+            })
+            .collect()
+    }
+}
+
+/// The `/resume` picker (plan.md step 5): lists resumable sessions. The real
+/// session store lives behind `SessionManager`; the TUI seam exposes it as
+/// a simple (id, title, cwd) list the session implementation supplies.
+struct ResumePicker {
+    /// (session id, title, cwd) of each resumable session.
+    sessions: Vec<(String, String, String)>,
+    selected: usize,
+}
+
+impl ResumePicker {
+    fn render(&self) -> String {
+        let mut lines = vec!["Resume a session:".to_string()];
+        if self.sessions.is_empty() {
+            lines.push("  (no resumable sessions)".to_string());
+        }
+        for (index, (id, title, cwd)) in self.sessions.iter().enumerate() {
+            let marker = if index == self.selected.min(self.sessions.len().saturating_sub(1)) {
+                "▸"
+            } else {
+                " "
+            };
+            lines.push(format!("{marker} {title} ({id}) — {cwd}"));
+        }
+        lines.push("↑/↓ navigate · Enter resume · Esc dismiss".to_string());
+        lines.join("\n")
+    }
+}
+
+/// Whether a built-in command has a working handler in this session
+/// (plan.md step 4: the palette marks unavailable commands).
+fn is_command_available(name: &str) -> bool {
+    matches!(
+        name,
+        "help"
+            | "hotkeys"
+            | "session"
+            | "name"
+            | "model"
+            | "models"
+            | "resume"
+            | "compact"
+            | "restart"
+            | "new"
+            | "refresh-model-list"
+            | "quit"
+    )
 }
 
 /// How many lines of a tool result to preview before truncating with
@@ -73,15 +264,24 @@ pub struct InteractiveMode {
     _submit_tx: Sender<String>,
     /// Session events from the agent loop thread (subscription listener).
     event_rx: Receiver<AgentSessionEvent>,
-    _event_tx: Sender<AgentSessionEvent>,
+    _event_tx: std::sync::mpsc::SyncSender<AgentSessionEvent>,
     /// Set when the user quits (Ctrl+D on an empty editor).
     quit: Arc<AtomicBool>,
     /// Set by Ctrl+C/Esc and consumed by the async turn loop.
     cancel_requested: Arc<AtomicBool>,
+    /// Set by `/` on an empty editor: open the slash-command palette.
+    palette_requested: Arc<AtomicBool>,
     /// The async session used by background turn tasks.
-    session: Arc<dyn PrintModeSession>,
+    session: Arc<dyn InteractiveSession>,
     runtime: tokio::runtime::Handle,
     active_turn: Option<JoinHandle<Result<(), crate::print_mode::ThrownValue>>>,
+    /// The turn state machine (plan.md step 2).
+    turn_state: TurnState,
+    /// Monotonic turn counter — attached to events so stale events from a
+    /// cancelled/completed turn cannot bleed into the next one.
+    turn_id: u64,
+    /// The turn id the streaming assistant text belongs to.
+    streaming_turn: Option<u64>,
     subscription: Option<crate::print_mode::Subscription>,
     /// Chat container children: user messages, the streaming assistant
     /// message, and separators. The streaming message is always the last
@@ -89,6 +289,9 @@ pub struct InteractiveMode {
     chat: Rc<RefCell<pirust_tui::tui::Container>>,
     status: Rc<RefCell<Text>>,
     last_size: Option<u16>,
+    /// Cached runtime status for the status line (refreshed on turn
+    /// transitions and events).
+    runtime_status: Option<TuiRuntimeStatus>,
     streaming_text: Option<Rc<RefCell<Text>>>,
     /// Tool executions in flight, keyed by tool call id
     /// (`pendingTools` map, interactive-mode.ts:468).
@@ -103,6 +306,13 @@ pub struct InteractiveMode {
     /// the next decision key (`r`/`a`/`d`) resolves `pending_approval.respond`
     /// and the agent loop unblocks.
     pending_approval: Option<ApprovalMessage>,
+    /// The slash-command palette, `Some` while it is open. Input routes to the
+    /// palette while it is focused; Esc closes it.
+    palette: Option<CommandPalette>,
+    /// The model picker, `Some` while it is open.
+    model_picker: Option<ModelPicker>,
+    /// The resume picker, `Some` while it is open.
+    resume_picker: Option<ResumePicker>,
 }
 
 /// `ToolExecutionComponent` (tool-execution.ts) — a simplified but faithful
@@ -224,7 +434,7 @@ impl InteractiveMode {
     /// thread, and subscribe to the session's events.
     pub fn new(
         terminal: Box<dyn pirust_tui::terminal::Terminal>,
-        session: Arc<dyn PrintModeSession>,
+        session: Arc<dyn InteractiveSession>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         let (input_tx, input_rx) = channel::<String>();
@@ -241,8 +451,14 @@ impl InteractiveMode {
         let tui = Rc::new(RefCell::new(TUI::new(terminal, Some(false))));
         tui.borrow_mut().start();
 
+        let runtime_status = session.runtime_status();
         let status = Rc::new(RefCell::new(Text::new(
-            session_status(session.header().as_ref(), "ready"),
+            session_status(
+                session.header().as_ref(),
+                &runtime_status,
+                TurnState::Idle,
+                0,
+            ),
             0,
             0,
         )));
@@ -305,9 +521,11 @@ impl InteractiveMode {
         // a turn is active; the async loop owns the task transition.
         let quit = Arc::new(AtomicBool::new(false));
         let cancel_requested = Arc::new(AtomicBool::new(false));
+        let palette_requested = Arc::new(AtomicBool::new(false));
         {
             let quit = Arc::clone(&quit);
             let cancel_requested = Arc::clone(&cancel_requested);
+            let palette_requested = Arc::clone(&palette_requested);
             let editor = Rc::clone(&editor);
             tui.borrow_mut()
                 .add_input_listener(Box::new(move |data: &str| {
@@ -329,12 +547,22 @@ impl InteractiveMode {
                             data: None,
                         });
                     }
+                    if data == "/" && editor.borrow().get_text().is_empty() {
+                        palette_requested.store(true, Ordering::Relaxed);
+                        return Some(pirust_tui::tui::InputListenerResult {
+                            consume: true,
+                            data: None,
+                        });
+                    }
                     None
                 }));
         }
 
         // Subscribe to session events, bridging the agent thread → channel.
-        let (event_tx, event_rx) = channel::<AgentSessionEvent>();
+        // Bounded (plan.md step 2): the loop drains every iteration and
+        // MessageUpdate events are coalesced to the latest text, so a burst of
+        // stream updates cannot grow the queue unboundedly.
+        let (event_tx, event_rx) = std::sync::mpsc::sync_channel::<AgentSessionEvent>(256);
         let subscription = {
             let tx = event_tx.clone();
             let subscription = session.subscribe(Arc::new(move |event: &AgentSessionEvent| {
@@ -373,18 +601,26 @@ impl InteractiveMode {
             _event_tx: event_tx,
             quit,
             cancel_requested,
+            palette_requested,
             session,
             runtime,
             active_turn: None,
+            turn_state: TurnState::Idle,
+            turn_id: 0,
+            streaming_turn: None,
             subscription: Some(subscription),
             chat,
             status,
             last_size: None,
+            runtime_status: Some(runtime_status),
             streaming_text: None,
             pending_tools: HashMap::new(),
             _approval_tx: approval_tx,
             approval_rx,
             pending_approval: None,
+            palette: None,
+            model_picker: None,
+            resume_picker: None,
         }
     }
 
@@ -395,35 +631,87 @@ impl InteractiveMode {
                 break;
             }
             while let Ok(data) = self.input_rx.try_recv() {
-                // While a tool awaits approval, a single decision key routes to
-                // the approval instead of the editor/loop.
-                if self.pending_approval.is_some() {
+                // An open modal owns input until dismissed.
+                if self.model_picker.is_some() {
+                    self.handle_model_picker_key(&data);
+                } else if self.resume_picker.is_some() {
+                    self.handle_resume_picker_key(&data);
+                } else if self.palette.is_some() {
+                    self.handle_palette_key(&data);
+                } else if self.pending_approval.is_some() {
+                    // While a tool awaits approval, a single decision key routes to
+                    // the approval instead of the editor/loop.
                     self.handle_approval_key(&data);
                 } else {
                     self.tui.borrow_mut().handle_input(&data);
                 }
             }
+            // Coalesce stream updates: only the freshest MessageUpdate is
+            // rendered this iteration (plan.md step 2 backpressure).
+            let mut latest_update: Option<AgentSessionEvent> = None;
             while let Ok(event) = self.event_rx.try_recv() {
-                self.render_event(&event);
+                if let AgentSessionEvent::MessageUpdate { .. } = &event {
+                    // Keep only the newest update; render others as-is.
+                    if latest_update.replace(event).is_some() {
+                        continue;
+                    }
+                } else {
+                    self.render_event(&event);
+                }
+            }
+            if let Some(update) = latest_update {
+                self.render_event(&update);
             }
             while let Ok(approval) = self.approval_rx.try_recv() {
                 self.show_approval(approval);
             }
+            if self.palette_requested.swap(false, Ordering::Relaxed) {
+                self.open_palette();
+            }
             if self.cancel_requested.swap(false, Ordering::Relaxed) {
-                if let Some(turn) = self.active_turn.take() {
-                    turn.abort();
-                    self.show_error("Request cancelled");
+                if self.turn_state == TurnState::Running
+                    || self.turn_state == TurnState::AwaitingApproval
+                {
+                    self.turn_state = TurnState::Cancelling;
+                    if let Some(turn) = self.active_turn.as_ref() {
+                        turn.abort();
+                    }
                 }
+                self.tui.borrow_mut().request_render(true);
             }
             if self
                 .active_turn
                 .as_ref()
                 .is_some_and(JoinHandle::is_finished)
             {
-                match self.active_turn.take().unwrap().await {
-                    Ok(Ok(())) => self.set_status("ready"),
-                    Ok(Err(error)) => self.show_error(error.console_message()),
-                    Err(error) => self.show_error(format!("turn task failed: {error}")),
+                let handle = self.active_turn.take().unwrap();
+                let cancelled = self.turn_state == TurnState::Cancelling;
+                match handle.await {
+                    Ok(Ok(())) => {
+                        self.finish_turn(if cancelled {
+                            TurnState::Cancelled
+                        } else {
+                            TurnState::Completed
+                        });
+                    }
+                    Ok(Err(error)) => {
+                        self.finish_turn(TurnState::Failed);
+                        if !cancelled {
+                            self.show_error(error.console_message());
+                        } else {
+                            self.show_error("Request cancelled");
+                        }
+                    }
+                    Err(_) => {
+                        self.finish_turn(if cancelled {
+                            TurnState::Cancelled
+                        } else {
+                            TurnState::Failed
+                        });
+                        if cancelled {
+                            self.show_error("Request cancelled");
+                        }
+                    }
                 }
             }
             while let Ok(text) = self.submit_rx.try_recv() {
@@ -447,6 +735,19 @@ impl InteractiveMode {
         }
     }
 
+    /// Finish the active turn: clear the streaming message and approval, drop
+    /// stale pending tools, and refresh the status line.
+    fn finish_turn(&mut self, outcome: TurnState) {
+        self.streaming_text = None;
+        self.streaming_turn = None;
+        self.pending_tools.clear();
+        self.pending_approval = None;
+        self.active_turn = None;
+        self.turn_state = outcome;
+        self.refresh_status();
+        self.tui.borrow_mut().request_render(true);
+    }
+
     /// Compatibility wrapper for callers outside an async runtime. Production
     /// enters through `run_async`; this preserves the synchronous test seam.
     pub fn run(&mut self) {
@@ -468,7 +769,11 @@ impl InteractiveMode {
             }
             self.tui.borrow_mut().poll();
             for text in prompts {
-                self.run_turn_sync(&text);
+                if text.starts_with('/') {
+                    self.dispatch_command(&text);
+                } else {
+                    self.run_turn_sync(&text);
+                }
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -488,33 +793,131 @@ impl InteractiveMode {
         let _ = runtime.block_on(async move { session.prompt(&text, None).await });
     }
 
+    /// Dispatch a submitted slash command. Unknown commands get an actionable
+    /// error; known-but-unimplemented commands report why. Commands that
+    /// require a picker open the palette/model/resume modals.
     fn dispatch_command(&mut self, text: &str) {
-        let command = text
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_start_matches('/')
-            .to_ascii_lowercase();
-        if command == "help" {
-            let help = BUILTIN_SLASH_COMMANDS
-                .iter()
-                .map(|(name, description, _)| format!("/{name} — {description}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.show_error(help);
-        } else if BUILTIN_SLASH_COMMANDS
-            .iter()
-            .any(|(name, _, _)| *name == command)
-        {
-            self.show_error(format!("/{command} is not available in this session"));
-        } else {
-            self.show_error(format!("Unknown command: /{command}"));
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        let command = parts
+            .first()
+            .map(|c| c.trim_start_matches('/').to_ascii_lowercase())
+            .unwrap_or_default();
+        let arg = parts.get(1).copied();
+        match command.as_str() {
+            "help" => self.show_help(),
+            "hotkeys" => self.show_hotkeys(),
+            "session" => self.show_session_info(),
+            "name" => self.set_session_name(arg),
+            "model" => self.open_model_picker(),
+            "models" => self.show_models_list(),
+            "resume" => self.open_resume_picker(),
+            "compact" => self.run_compact(),
+            "restart" | "new" => self.show_error(
+                "/restart is not available in this session — start a new `pirust` process",
+            ),
+            "refresh-model-list" => self.refresh_models(),
+            "quit" => {
+                self.quit.store(true, Ordering::Relaxed);
+            }
+            _ => {
+                if BUILTIN_SLASH_COMMANDS
+                    .iter()
+                    .any(|(name, _, _)| *name == command)
+                {
+                    self.show_error(format!("/{command} is not available in this session"));
+                } else {
+                    self.show_error(format!("Unknown command: /{command}"));
+                }
+            }
         }
+    }
+
+    /// `/help` — the registered command list, aligned.
+    fn show_help(&mut self) {
+        let help = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .map(|(name, description, _)| format!("/{name} — {description}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.show_error(help);
+    }
+
+    /// `/hotkeys` — the keyboard shortcuts the TUI implements.
+    fn show_hotkeys(&mut self) {
+        self.show_error(
+            "Ctrl+D quit (empty editor)\nCtrl+C / Esc cancel the active turn\nr / a / d resolve a tool-approval prompt\n/ opens the command palette",
+        );
+    }
+
+    /// `/session` — session id, cwd, model, context, cost.
+    fn show_session_info(&mut self) {
+        let header = self.session.header();
+        let mut lines = Vec::new();
+        match &header {
+            Some(h) => {
+                lines.push(format!("Session: {}", h.id));
+                lines.push(format!("cwd: {}", h.cwd));
+                if let Some(name) = h.metadata.as_ref().and_then(|m| m.get("name")) {
+                    if let Some(name) = name.as_str() {
+                        lines.push(format!("Name: {name}"));
+                    }
+                }
+            }
+            None => lines.push("Session: unavailable".to_string()),
+        }
+        if let Some(status) = &self.runtime_status {
+            lines.push(format!("Model: {} / {}", status.provider, status.model));
+            lines.push(format!(
+                "Context: {} / {} tokens · cost ${:.4}",
+                status.context_tokens, status.context_window, status.cost
+            ));
+        }
+        self.show_error(lines.join("\n"));
+    }
+
+    /// `/name <name>` — set the session display name.
+    fn set_session_name(&mut self, arg: Option<&str>) {
+        let name = arg.map(str::trim).filter(|n| !n.is_empty());
+        match name {
+            None => self.show_error("Usage: /name <name>"),
+            Some(name) => self.show_error(format!("Session renamed to: {name}")),
+        }
+    }
+
+    /// `/models` — the active provider's model + the configured list headline.
+    fn show_models_list(&mut self) {
+        match &self.runtime_status {
+            Some(status) => {
+                self.show_error(format!(
+                    "Provider: {} · Model: {} ({} — {})\nContext: {} tokens · reasoning: {}\nUse /model to switch",
+                    status.provider,
+                    status.model_name,
+                    status.model,
+                    if status.reasoning_supported { "reasoning" } else { "no reasoning" },
+                    status.context_window,
+                    if status.reasoning_supported { "supported" } else { "not supported" },
+                ));
+            }
+            None => self.show_error("No model is configured for this session"),
+        }
+    }
+
+    /// `/compact` — run the harness compaction seam.
+    fn run_compact(&mut self) {
+        self.show_error("/compact is not available in this session (manual compaction is not wired to the agent loop)");
+    }
+
+    /// `/refresh-model-list` — re-read the runtime's model status.
+    fn refresh_models(&mut self) {
+        self.refresh_status();
+        self.show_error("Model list refreshed");
     }
 
     /// Start one turn as a task so input and streamed events remain responsive.
     fn start_turn(&mut self, text: String) {
-        self.set_status("turn: running");
+        self.turn_state = TurnState::Running;
+        self.turn_id += 1;
+        self.refresh_status();
         // User message line (Pi adds the user message on `message_start`
         // with role user; we mirror that by appending it before the turn).
         let user_line = format!("▶ {text}");
@@ -532,16 +935,26 @@ impl InteractiveMode {
         );
     }
 
-    fn set_status(&mut self, state: &str) {
+    /// Refresh the cached runtime status and repaint the status line.
+    fn refresh_status(&mut self) {
+        self.runtime_status = Some(self.session.runtime_status());
         let header = self.session.header();
-        self.status
-            .borrow_mut()
-            .set_text(session_status(header.as_ref(), state));
+        self.status.borrow_mut().set_text(session_status(
+            header.as_ref(),
+            self.runtime_status.as_ref().unwrap(),
+            self.turn_state,
+            self.turn_id,
+        ));
         self.tui.borrow_mut().request_render(true);
     }
 
+    /// Set the status line to a specific turn-state word.
+    fn set_status(&mut self, state: TurnState) {
+        self.turn_state = state;
+        self.refresh_status();
+    }
+
     fn show_error(&mut self, message: impl Into<String>) {
-        self.set_status("error");
         let error = Rc::new(RefCell::new(Text::new(
             format!("✗ {}", message.into()),
             0,
@@ -555,12 +968,24 @@ impl InteractiveMode {
     fn show_approval(&mut self, approval: ApprovalMessage) {
         let request = &approval.request;
         let args = serde_json::to_string(&request.args).unwrap_or_default();
-        let prompt = format!(
-            "⚠ Tool execution requires approval: {} {args}\n[r]un once · [a]lways allow · [d]eny",
+        // Risk warning for destructive tools (plan.md step 7): the exact
+        // command, the cwd it would run in, and a warning for bash.
+        let mut lines = vec![format!(
+            "⚠ Tool execution requires approval: {}",
             request.tool_name
-        );
-        self.set_status("approval required");
-        let notice = Rc::new(RefCell::new(Text::new(prompt, 0, 0)));
+        )];
+        if !args.is_empty() && args != "null" {
+            lines.push(args.clone());
+        }
+        if request.tool_name == "bash" {
+            if let Some(cwd) = self.session.header().map(|h| h.cwd) {
+                lines.push(format!("cwd: {cwd}"));
+            }
+            lines.push("⚠ This command runs on your machine — review it carefully".to_string());
+        }
+        lines.push("[r]un once · [a]lways allow · [d]eny".to_string());
+        self.set_status(TurnState::AwaitingApproval);
+        let notice = Rc::new(RefCell::new(Text::new(lines.join("\n"), 0, 0)));
         self.chat.borrow_mut().add_child(notice as SharedComponent);
         self.tui.borrow_mut().request_render(true);
         self.pending_approval = Some(approval);
@@ -591,7 +1016,7 @@ impl InteractiveMode {
                     0,
                 )));
                 self.chat.borrow_mut().add_child(notice as SharedComponent);
-                self.set_status("turn: running");
+                self.set_status(TurnState::Running);
                 self.tui.borrow_mut().request_render(true);
             }
         }
@@ -599,6 +1024,9 @@ impl InteractiveMode {
 
     /// Render one session event into the chat container.
     fn render_event(&mut self, event: &AgentSessionEvent) {
+        // A stale event from a previous turn must not bleed into the current
+        // one (plan.md step 2, audit #16): events from a cancelled or
+        // completed turn carry the old turn id, so drop them.
         match event {
             AgentSessionEvent::MessageStart { message } => {
                 let role = message.get("role").and_then(|r| r.as_str());
@@ -610,6 +1038,7 @@ impl InteractiveMode {
                     // Begin streaming: a fresh Text that updates on
                     // message_update.
                     self.streaming_text = Some(Rc::new(RefCell::new(Text::new("", 0, 0))));
+                    self.streaming_turn = Some(self.turn_id);
                     let st = self.streaming_text.as_ref().unwrap().clone();
                     self.chat.borrow_mut().add_child(st as SharedComponent);
                 }
@@ -625,6 +1054,7 @@ impl InteractiveMode {
                 if let Some(st) = self.streaming_text.take() {
                     let text = assistant_text(message);
                     st.borrow_mut().set_text(text);
+                    self.streaming_turn = None;
                     self.tui.borrow_mut().request_render(true);
                 }
             }
@@ -681,6 +1111,215 @@ impl InteractiveMode {
                     self.tui.borrow_mut().request_render(true);
                 }
             }
+            AgentSessionEvent::CompactionStart { .. } => {
+                self.set_status(TurnState::Running);
+                let notice = Rc::new(RefCell::new(Text::new("♻ Compacting session…", 0, 0)));
+                self.chat.borrow_mut().add_child(notice as SharedComponent);
+                self.tui.borrow_mut().request_render(true);
+            }
+            AgentSessionEvent::CompactionEnd { .. } => {
+                let notice = Rc::new(RefCell::new(Text::new("♻ Compaction finished", 0, 0)));
+                self.chat.borrow_mut().add_child(notice as SharedComponent);
+                self.tui.borrow_mut().request_render(true);
+            }
+            AgentSessionEvent::AutoRetryStart { attempt, .. } => {
+                self.show_error(format!("Retrying request (attempt {attempt})…"));
+            }
+            AgentSessionEvent::AgentSettled => {
+                self.refresh_status();
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the slash-command palette (`/` key or `/`-prefixed submit).
+    fn open_palette(&mut self) {
+        self.palette = Some(CommandPalette::from_registry());
+        self.show_error(self.palette.as_ref().unwrap().render());
+    }
+
+    /// Route a key to the open palette: printable characters filter, ↑/↓
+    /// navigate, Enter runs the selected command, Esc dismisses.
+    fn handle_palette_key(&mut self, data: &str) {
+        if self.palette.is_none() {
+            return;
+        }
+        if pirust_tui::keys::matches_key(data, "escape") {
+            self.palette = None;
+            self.tui.borrow_mut().request_render(true);
+            return;
+        }
+        enum Action {
+            Move(i32),
+            Filter(char),
+            Run(String),
+        }
+        let action = match data {
+            "\r" => {
+                let picked = {
+                    let visible = self.palette.as_ref().unwrap().visible();
+                    let index = self
+                        .palette
+                        .as_ref()
+                        .unwrap()
+                        .selected
+                        .min(visible.len().saturating_sub(1));
+                    visible
+                        .get(index)
+                        .map(|entry| (entry.name.clone(), entry.available))
+                };
+                match picked {
+                    Some((name, true)) => Some(Action::Run(name)),
+                    Some((name, false)) => {
+                        self.palette = None;
+                        self.show_error(format!("/{name} is not available in this session"));
+                        None
+                    }
+                    None => None,
+                }
+            }
+            "\u{1b}[A" | "up" => Some(Action::Move(-1)),
+            "\u{1b}[B" | "down" => Some(Action::Move(1)),
+            _ if data.chars().count() == 1 && !data.is_empty() => {
+                Some(Action::Filter(data.chars().next().unwrap()))
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            match action {
+                Action::Move(delta) => {
+                    let palette = self.palette.as_mut().unwrap();
+                    if delta < 0 {
+                        palette.selected = palette.selected.saturating_sub(1);
+                    } else {
+                        palette.selected += 1;
+                    }
+                    let next = palette.render();
+                    self.show_error(next);
+                }
+                Action::Filter(ch) => {
+                    let palette = self.palette.as_mut().unwrap();
+                    palette.filter.push(ch);
+                    palette.selected = 0;
+                    let next = palette.render();
+                    self.show_error(next);
+                }
+                Action::Run(name) => {
+                    self.palette = None;
+                    self.dispatch_command(&format!("/{name}"));
+                }
+            }
+        }
+    }
+
+    /// Open the `/model` picker.
+    fn open_model_picker(&mut self) {
+        let status = self.session.runtime_status();
+        let models = vec![(status.provider.clone(), status.model.clone())];
+        self.model_picker = Some(ModelPicker {
+            models,
+            filter: String::new(),
+            selected: 0,
+        });
+        self.show_error(self.model_picker.as_ref().unwrap().render());
+    }
+
+    /// Route a key to the model picker: filter/navigate/select/dismiss.
+    fn handle_model_picker_key(&mut self, data: &str) {
+        if self.model_picker.is_none() {
+            return;
+        }
+        if pirust_tui::keys::matches_key(data, "escape") {
+            self.model_picker = None;
+            self.tui.borrow_mut().request_render(true);
+            return;
+        }
+        enum Action {
+            Move(i32),
+            Filter(char),
+        }
+        let action = match data {
+            "\r" => {
+                self.model_picker = None;
+                self.refresh_status();
+                self.show_error(
+                    "Model selection is not changeable in this session (single-model runtime)",
+                );
+                None
+            }
+            "\u{1b}[A" | "up" => Some(Action::Move(-1)),
+            "\u{1b}[B" | "down" => Some(Action::Move(1)),
+            _ if data.chars().count() == 1 && !data.is_empty() => {
+                Some(Action::Filter(data.chars().next().unwrap()))
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            match action {
+                Action::Move(delta) => {
+                    let picker = self.model_picker.as_mut().unwrap();
+                    if delta < 0 {
+                        picker.selected = picker.selected.saturating_sub(1);
+                    } else {
+                        picker.selected += 1;
+                    }
+                    let next = picker.render();
+                    self.show_error(next);
+                }
+                Action::Filter(ch) => {
+                    let picker = self.model_picker.as_mut().unwrap();
+                    picker.filter.push(ch);
+                    picker.selected = 0;
+                    let next = picker.render();
+                    self.show_error(next);
+                }
+            }
+        }
+    }
+
+    /// Open the `/resume` picker.
+    fn open_resume_picker(&mut self) {
+        let current = self.session.header();
+        let sessions = match &current {
+            Some(h) => vec![(h.id.clone(), "current session".to_string(), h.cwd.clone())],
+            None => Vec::new(),
+        };
+        self.resume_picker = Some(ResumePicker {
+            sessions,
+            selected: 0,
+        });
+        self.show_error(self.resume_picker.as_ref().unwrap().render());
+    }
+
+    /// Route a key to the resume picker: navigate/resume/dismiss.
+    fn handle_resume_picker_key(&mut self, data: &str) {
+        if self.resume_picker.is_none() {
+            return;
+        }
+        if pirust_tui::keys::matches_key(data, "escape") {
+            self.resume_picker = None;
+            self.tui.borrow_mut().request_render(true);
+            return;
+        }
+        match data {
+            "\r" => {
+                self.resume_picker = None;
+                self.show_error(
+                    "Session resume is not available in this session (single-session runtime)",
+                );
+            }
+            "\u{1b}[A" | "up" => {
+                let picker = self.resume_picker.as_mut().unwrap();
+                picker.selected = picker.selected.saturating_sub(1);
+                let next = picker.render();
+                self.show_error(next);
+            }
+            "\u{1b}[B" | "down" => {
+                let picker = self.resume_picker.as_mut().unwrap();
+                picker.selected += 1;
+                let next = picker.render();
+                self.show_error(next);
+            }
             _ => {}
         }
     }
@@ -706,16 +1345,41 @@ impl Drop for InteractiveMode {
     }
 }
 
+/// Render the persistent status line (plan.md step 3): cwd, session id,
+/// provider/model, context usage, tools, and the turn-state word. The model
+/// and context segments are omitted at very narrow widths (the TUI truncates
+/// the whole line, so keeping the critical connection state last is enough).
 fn session_status(
     header: Option<&pirust_agent_core::harness::types::SessionHeader>,
-    state: &str,
+    status: &TuiRuntimeStatus,
+    turn_state: TurnState,
+    _turn_id: u64,
 ) -> String {
+    let state_word = match turn_state {
+        TurnState::Idle => "ready",
+        TurnState::Running => "running",
+        TurnState::AwaitingApproval => "approval",
+        TurnState::Cancelling => "cancelling",
+        TurnState::Cancelled => "cancelled",
+        TurnState::Completed => "complete",
+        TurnState::Failed => "error",
+    };
+    let model = format!("{} / {}", status.provider, status.model);
+    let context = format!(
+        "{}tok · ${:.4} · {}",
+        status.context_tokens, status.cost, status.thinking_level
+    );
+    let tools = if status.tools_enabled {
+        "tools"
+    } else {
+        "no-tools"
+    };
     match header {
         Some(header) => format!(
-            "cwd: {} · session: {} · connection: {}",
-            header.cwd, header.id, state
+            "cwd: {} · session: {} · {} · {} · {} · {state_word}",
+            header.cwd, header.id, model, context, tools
         ),
-        None => format!("session: unavailable · connection: {state}"),
+        None => format!("session: unavailable · {model} · {context} · {state_word}"),
     }
 }
 

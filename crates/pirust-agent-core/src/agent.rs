@@ -361,6 +361,26 @@ impl Agent {
         self.inner.state.lock().unwrap().set_messages(messages);
     }
 
+    /// The current model (`state.model`).
+    pub fn model(&self) -> Model {
+        self.inner.state.lock().unwrap().model.clone()
+    }
+
+    /// Replace the model (copy-on-assign, agent.ts:82-84).
+    pub fn set_model(&self, model: &Model) {
+        self.inner.state.lock().unwrap().model = model.clone();
+    }
+
+    /// The current reasoning level (`state.thinkingLevel`).
+    pub fn thinking_level(&self) -> ThinkingLevel {
+        self.inner.state.lock().unwrap().thinking_level
+    }
+
+    /// Replace the reasoning level (`state.thinkingLevel`).
+    pub fn set_thinking_level(&self, level: ThinkingLevel) {
+        self.inner.state.lock().unwrap().thinking_level = level;
+    }
+
     /// Replace the tools (copy-on-assign, agent.ts:80-82).
     pub fn set_tools(&self, tools: &[Arc<dyn AgentTool>]) {
         self.inner.state.lock().unwrap().set_tools(tools);

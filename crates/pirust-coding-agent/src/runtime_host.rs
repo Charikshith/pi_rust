@@ -53,7 +53,8 @@ use serde_json::Value;
 use crate::print_mode::{
     AgentSessionRuntimeHost, Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession,
     RebindSessionFn, SessionEventListener, SessionStateView, Subscription, ThrownValue,
-    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalRequest,
+    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalRequest, TuiRuntimeInfo,
+    TuiRuntimeStatus,
 };
 use crate::session::SessionManager;
 
@@ -506,6 +507,37 @@ impl PrintModeSession for SingleTurnSession {
             .tool_approval_decider
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(decider);
+    }
+}
+
+impl TuiRuntimeInfo for SingleTurnSession {
+    fn runtime_status(&self) -> TuiRuntimeStatus {
+        let model = self.agent.model();
+        let thinking_level = self.agent.thinking_level();
+        let tools_enabled = !self.agent.tool_names().is_empty();
+        // Aggregate token usage + cost across the assistant messages in the
+        // transcript (the session's current context).
+        let mut context_tokens = 0u64;
+        let mut cost = 0.0f64;
+        for message in self.agent.messages() {
+            if let AgentMessage::Llm(pirust_ai::types::Message::Assistant(assistant)) = &message {
+                context_tokens = context_tokens
+                    .saturating_add(assistant.usage.input)
+                    .saturating_add(assistant.usage.output);
+                cost += assistant.usage.cost.total;
+            }
+        }
+        TuiRuntimeStatus {
+            provider: model.provider.0.clone(),
+            model: model.id.clone(),
+            model_name: model.name.clone(),
+            context_window: model.context_window,
+            reasoning_supported: model.reasoning,
+            thinking_level: crate::models::thinking_level_as_str(thinking_level).to_string(),
+            context_tokens,
+            cost,
+            tools_enabled,
+        }
     }
 }
 

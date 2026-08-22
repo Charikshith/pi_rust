@@ -13,9 +13,11 @@ use std::thread;
 use std::time::Duration;
 
 use pirust_agent_core::harness::types::SessionHeader;
+use pirust_coding_agent::interactive_mode::InteractiveSession;
 use pirust_coding_agent::print_mode::{
     AgentSessionEvent, Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession,
     PromptOptions, SessionEventListener, SessionStateView, Subscription, ThrownValue,
+    TuiRuntimeInfo, TuiRuntimeStatus,
 };
 use pirust_tui::terminal::Terminal;
 
@@ -153,6 +155,22 @@ impl PrintModeSession for StubSession {
     async fn reload(&self) {}
 }
 
+impl TuiRuntimeInfo for StubSession {
+    fn runtime_status(&self) -> TuiRuntimeStatus {
+        TuiRuntimeStatus {
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_name: "Test Model".into(),
+            context_window: 1_000_000,
+            reasoning_supported: true,
+            thinking_level: "off".into(),
+            context_tokens: 0,
+            cost: 0.0,
+            tools_enabled: true,
+        }
+    }
+}
+
 fn make_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -170,7 +188,7 @@ fn submit_routes_through_editor_to_prompt() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 
@@ -216,7 +234,7 @@ fn ctrl_d_on_empty_editor_quits_without_prompt() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 
@@ -249,7 +267,7 @@ fn events_stream_into_chat_container() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 
@@ -306,7 +324,7 @@ fn tool_events_render_into_chat() {
     let runtime = make_runtime();
     let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
         terminal,
-        Arc::clone(&session) as Arc<dyn PrintModeSession>,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
         runtime.handle().clone(),
     );
 

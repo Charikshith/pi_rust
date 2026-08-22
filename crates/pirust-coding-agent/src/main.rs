@@ -478,7 +478,8 @@ async fn run(parsed: args::Args) -> i32 {
 /// `bindCurrentSessionExtensions` (interactive-mode.ts:1858-1860) — the
 /// interactive session binds extensions with `mode: "tui"` before the loop.
 async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
-    use pirust_coding_agent::interactive_mode::InteractiveMode;
+    use pirust_coding_agent::interactive_mode::{InteractiveMode, InteractiveSession};
+    use pirust_coding_agent::print_mode::PrintModeSession;
 
     // Bind the extension runner (plan-mode + tool blocking active in the TUI).
     let binding = pirust_coding_agent::print_mode::ExtensionBinding {
@@ -487,7 +488,6 @@ async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
             pirust_coding_agent::print_mode::CommandContextActions::placeholder(),
         on_error: Arc::new(|_| {}),
     };
-    let session: Arc<dyn pirust_coding_agent::print_mode::PrintModeSession> = session;
     if let Err(error) = session.bind_extensions(binding).await {
         eprintln!(
             "Warning: failed to bind extensions: {}",
@@ -497,6 +497,7 @@ async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
 
     let runtime = tokio::runtime::Handle::current();
     let terminal = Box::new(pirust_tui::terminal::ProcessTerminal::new());
+    let session: Arc<dyn InteractiveSession> = session;
     let mut mode = InteractiveMode::new(terminal, session, runtime);
     mode.run_async().await;
     0
