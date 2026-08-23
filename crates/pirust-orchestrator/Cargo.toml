@@ -10,8 +10,26 @@ description = "Daemon supervising headless pirust workers — pirust port of @ea
 name = "pirust-orchestrator"
 path = "src/main.rs"
 
+# Also a library so golden suites can exercise the protocol/server layers
+# without spawning the binary (same pattern as pirust-coding-agent).
+[lib]
+name = "pirust_orchestrator"
+path = "src/lib.rs"
+
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+# preserve_order: test fixtures round-trip real Pi's JSON key order (schemas.ts
+# field declaration order / real construction-site literal order) — a plain
+# BTreeMap-backed serde_json::Value would silently re-sort keys alphabetically.
+serde_json = { workspace = true, features = ["preserve_order"] }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }  # ByteConnection/PiServerListener traits (Wave 3)
+futures = { workspace = true }      # Promise.all-equivalent concurrent awaits (Wave 4b)
+# Wave 4b: server-assigned session/connection/server ids (`randomUUID()` in
+# sessions.ts/server.ts is a v4 UUID, not the agent-core session tree's v7 —
+# pirust-orchestrator has no dependency on pirust-agent-core, so this is a
+# fresh, minimal dep, not a duplicate of uuid.rs's v7 generator). Already
+# resolved transitively at 1.24.0 (Cargo.lock) via other workspace members.
+uuid = { version = "1", features = ["v4"] }

@@ -1,0 +1,80 @@
+{"kind":"roundtrip","description":"null","input":{"t":"null"},"hex":"f6"}
+{"kind":"roundtrip","description":"false","input":{"t":"bool","v":false},"hex":"f4"}
+{"kind":"roundtrip","description":"true","input":{"t":"bool","v":true},"hex":"f5"}
+{"kind":"roundtrip","description":"int 0","input":{"t":"int","v":0},"hex":"00"}
+{"kind":"roundtrip","description":"int 1","input":{"t":"int","v":1},"hex":"01"}
+{"kind":"roundtrip","description":"int 10","input":{"t":"int","v":10},"hex":"0a"}
+{"kind":"roundtrip","description":"int 23 (minimal boundary)","input":{"t":"int","v":23},"hex":"17"}
+{"kind":"roundtrip","description":"int 24 (1-byte arg boundary)","input":{"t":"int","v":24},"hex":"1818"}
+{"kind":"roundtrip","description":"int 25","input":{"t":"int","v":25},"hex":"1819"}
+{"kind":"roundtrip","description":"int 100","input":{"t":"int","v":100},"hex":"1864"}
+{"kind":"roundtrip","description":"int 1000 (2-byte arg)","input":{"t":"int","v":1000},"hex":"1903e8"}
+{"kind":"roundtrip","description":"int 1_000_000 (4-byte arg)","input":{"t":"int","v":1000000},"hex":"1a000f4240"}
+{"kind":"roundtrip","description":"int 1_000_000_000_000 (8-byte arg)","input":{"t":"int","v":1000000000000},"hex":"1b000000e8d4a51000"}
+{"kind":"roundtrip","description":"int MAX_SAFE_INTEGER","input":{"t":"int","v":9007199254740991},"hex":"1b001fffffffffffff"}
+{"kind":"roundtrip","description":"int -1","input":{"t":"int","v":-1},"hex":"20"}
+{"kind":"roundtrip","description":"int -10","input":{"t":"int","v":-10},"hex":"29"}
+{"kind":"roundtrip","description":"int -24","input":{"t":"int","v":-24},"hex":"37"}
+{"kind":"roundtrip","description":"int -25","input":{"t":"int","v":-25},"hex":"3818"}
+{"kind":"roundtrip","description":"int -100","input":{"t":"int","v":-100},"hex":"3863"}
+{"kind":"roundtrip","description":"int -1000","input":{"t":"int","v":-1000},"hex":"3903e7"}
+{"kind":"roundtrip","description":"int -1_000_000","input":{"t":"int","v":-1000000},"hex":"3a000f423f"}
+{"kind":"roundtrip","description":"int MIN_SAFE_INTEGER","input":{"t":"int","v":-9007199254740991},"hex":"3b001ffffffffffffe"}
+{"kind":"roundtrip","description":"float 1.1","input":{"t":"float","v":1.1},"hex":"fb3ff199999999999a"}
+{"kind":"roundtrip","description":"negative zero","input":{"t":"negZero"},"hex":"fb8000000000000000"}
+{"kind":"roundtrip","description":"bytes [1,2,3,4]","input":{"t":"bytes","hex":"01020304"},"hex":"4401020304"}
+{"kind":"roundtrip","description":"text empty","input":{"t":"text","v":""},"hex":"60"}
+{"kind":"roundtrip","description":"text IETF","input":{"t":"text","v":"IETF"},"hex":"6449455446"}
+{"kind":"roundtrip","description":"text u-umlaut (2-byte utf8)","input":{"t":"text","v":"ü"},"hex":"62c3bc"}
+{"kind":"roundtrip","description":"text CJK (3-byte utf8)","input":{"t":"text","v":"水"},"hex":"63e6b0b4"}
+{"kind":"roundtrip","description":"text surrogate-pair emoji (4-byte utf8)","input":{"t":"text","v":"𐅑"},"hex":"64f0908591"}
+{"kind":"roundtrip","description":"array empty","input":{"t":"array","v":[]},"hex":"80"}
+{"kind":"roundtrip","description":"array [1,2,3]","input":{"t":"array","v":[{"t":"int","v":1},{"t":"int","v":2},{"t":"int","v":3}]},"hex":"83010203"}
+{"kind":"roundtrip","description":"array nested","input":{"t":"array","v":[{"t":"int","v":1},{"t":"array","v":[{"t":"int","v":2},{"t":"int","v":3}]},{"t":"array","v":[{"t":"int","v":4},{"t":"int","v":5}]}]},"hex":"8301820203820405"}
+{"kind":"roundtrip","description":"map {a:1,b:[2,3]}","input":{"t":"map","v":[["a",{"t":"int","v":1}],["b",{"t":"array","v":[{"t":"int","v":2},{"t":"int","v":3}]}]]},"hex":"a26161016162820203"}
+{"kind":"roundtrip","description":"object with an undefined property omits that key only","input":{"t":"map","v":[["omitted",{"t":"null"}],["zero",{"t":"int","v":0}],["empty",{"t":"text","v":""}],["no",{"t":"bool","v":false}],["nil",{"t":"null"}]]},"hex":"a4647a65726f0065656d70747960626e6ff4636e696cf6"}
+{"kind":"roundtrip","description":"leading BOM text preserved","input":{"t":"text","v":"﻿"},"hex":"63efbbbf"}
+{"kind":"encode_reject","description":"NaN is not finite","input":{"t":"nan"}}
+{"kind":"encode_reject","description":"+Infinity is not finite","input":{"t":"posInf"}}
+{"kind":"encode_reject","description":"-Infinity is not finite","input":{"t":"negInf"}}
+{"kind":"encode_reject","description":"unsafe positive integer (MAX_SAFE_INTEGER + 1)","input":{"t":"int","v":9007199254740992}}
+{"kind":"encode_reject","description":"unsafe negative integer (MIN_SAFE_INTEGER - 1)","input":{"t":"int","v":-9007199254740992}}
+{"kind":"encode_reject","description":"nesting deeper than 64","input":{"t":"nested","depth":65}}
+{"kind":"decode_reject","description":"empty input","hex":""}
+{"kind":"decode_reject","description":"truncated integer","hex":"18"}
+{"kind":"decode_reject","description":"reserved additional information","hex":"1c"}
+{"kind":"decode_reject","description":"indefinite byte string","hex":"5f"}
+{"kind":"decode_reject","description":"indefinite text string","hex":"7f"}
+{"kind":"decode_reject","description":"indefinite array","hex":"9f"}
+{"kind":"decode_reject","description":"indefinite map","hex":"bf"}
+{"kind":"decode_reject","description":"tag","hex":"c000"}
+{"kind":"decode_reject","description":"undefined simple value","hex":"f7"}
+{"kind":"decode_reject","description":"unsupported simple value","hex":"e0"}
+{"kind":"decode_reject","description":"break outside an indefinite item","hex":"ff"}
+{"kind":"decode_reject","description":"float16","hex":"f93c00"}
+{"kind":"decode_reject","description":"float32","hex":"fa3f800000"}
+{"kind":"decode_reject","description":"positive infinity float64","hex":"fb7ff0000000000000"}
+{"kind":"decode_reject","description":"NaN float64","hex":"fb7ff8000000000000"}
+{"kind":"decode_reject","description":"truncated float64","hex":"fb3ff00000"}
+{"kind":"decode_reject","description":"truncated byte string","hex":"44010203"}
+{"kind":"decode_reject","description":"truncated text string","hex":"636162"}
+{"kind":"decode_reject","description":"truncated array","hex":"8201"}
+{"kind":"decode_reject","description":"truncated map","hex":"a16161"}
+{"kind":"decode_reject","description":"trailing data","hex":"0000"}
+{"kind":"decode_reject","description":"non-string map key","hex":"a10102"}
+{"kind":"decode_reject","description":"duplicate map key","hex":"a2616101616102"}
+{"kind":"decode_reject","description":"invalid UTF-8 byte","hex":"61ff"}
+{"kind":"decode_reject","description":"overlong UTF-8","hex":"62c080"}
+{"kind":"decode_reject","description":"UTF-8 surrogate","hex":"63eda080"}
+{"kind":"decode_reject","description":"unsafe positive integer (arg)","hex":"1b0020000000000000"}
+{"kind":"decode_reject","description":"unsafe negative integer (arg)","hex":"3b001fffffffffffff"}
+{"kind":"decode_reject","description":"unsafe integer encoded as float64","hex":"fb4340000000000000"}
+{"kind":"decode_reject","description":"decoder nesting deeper than 64","hex":"8181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181f6"}
+{"kind":"decode_reject","description":"oversized declared byte-string length","hex":"5a01000001"}
+{"kind":"decode_reject","description":"oversized declared text-string length","hex":"7a01000001"}
+{"kind":"decode_reject","description":"oversized declared array length","hex":"9a000f4241"}
+{"kind":"decode_reject","description":"oversized declared map length","hex":"ba000f4241"}
+{"kind":"decode_limit","description":"stricter maxContainerLength on decode","hex":"83010203","options":{"maxContainerLength":2}}
+{"kind":"decode_limit","description":"stricter maxByteLength on decode","hex":"626162","options":{"maxByteLength":2}}
+{"kind":"encode_reject","description":"stricter maxContainerLength on encode","input":{"t":"array","v":[{"t":"int","v":1},{"t":"int","v":2},{"t":"int","v":3}]},"options":{"maxContainerLength":2}}
+{"kind":"encode_reject","description":"stricter maxByteLength on encode","input":{"t":"text","v":"ab"},"options":{"maxByteLength":2}}

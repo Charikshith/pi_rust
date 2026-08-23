@@ -8,6 +8,397 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
+## 2026-08-23 — feat-009 WAVE 4b DONE (the live PiServer state machine: sessions/snapshots/server)
+
+Builds the live state machine on top of Wave 4a's real types: `sessions.rs`
+(`LiveSessionManager`), `snapshots.rs` (`ServerSnapshotPublisher`),
+`server.rs` (`PiServer`), and `testing/service.rs` (the ported
+`TestServerService`/`TestSessionRuntime` reference double).
+
+- New `crates/pirust-orchestrator/src/sessions.rs`: `LiveSessionManager`/
+  `LiveSession` — `execute_command`'s full 9-variant `Command` dispatch,
+  `acquire()`'s `openingSessions` dedup, `run_operation`/`OperationGuard`
+  (try/finally-equivalent operation-count bookkeeping via `Drop`), and
+  **the five-condition `maybe_dispose` gate** (analysis doc gotcha 6 —
+  server not closing, session ready, not already disposing, zero attached
+  connections, zero in-flight operations, and — unless terminal — phase
+  idle), implemented exactly as specified since every command handler
+  depends on it for resource safety.
+- New `crates/pirust-orchestrator/src/snapshots.rs`: `ServerSnapshotPublisher`
+  — revision incremented only inside `perform_broadcast` (never on `get()`),
+  broadcasts serialized via a lock, two independent broadcast scopes.
+- New `crates/pirust-orchestrator/src/server.rs`: `PiServer`/`Inner` built
+  via `Arc::new_cyclic` (so `sessions`/`snapshots` can hold a `Weak<Inner>`
+  back-reference instead of TS's options-bag-of-closures), handshake
+  timeout, hello-first/hello-once enforcement, `finish_handshake`'s version
+  check + snapshot-race handling, `fail_protocol`.
+- New `crates/pirust-orchestrator/src/testing/{mod,service}.rs`: faithful
+  port of Pi's own reference double, including its `Deferred`-style
+  `pendingPrompt` that only resolves via `finish_prompt()`/`abort()`.
+- **Concurrency porting notes (named, not silent):** TS's shared
+  `Promise`-keyed maps (`openingSessions`, `disposing`, handshake-done) have
+  no direct Rust equivalent as a clonable map value, so this port uses
+  `tokio::sync::watch` channels instead. `ConnectionState` and
+  `TestSessionRuntime`'s internal state are deliberately kept behind
+  `std::sync::Mutex` rather than `tokio::sync::Mutex`, specifically because
+  a sync guard cannot be held across an `.await` — this structurally
+  enforces the "re-validate connection state after every await" discipline
+  (gotcha 7) instead of relying on manual review.
+- **Named simplifications vs TS:** `PiSessionRuntime::dispose()` is
+  infallible (TS's can reject); `to_protocol_error` only handles
+  `PiServerError` (the other TS branches are structurally unreachable given
+  Rust's typed traits); concurrent `close()` callers each run their own
+  `close_server_state` rather than sharing one TS-style `closePromise`;
+  `on_error` has no `catch_unwind` wrapper.
+- **Two real design bugs self-caught while porting** (fixed before first
+  compile, not left in): `terminate()` must call the `PiServer`-level
+  `Inner::disconnect`, not `LiveSessionManager::disconnect` (`sessions.ts`'s
+  own `disconnect` callback is wired to `PiServer.disconnect`); `list
+  _metadata`'s stored/live merge must preserve `item.parent_session_id`
+  when overlaying a live snapshot's `to_metadata()` output, since TS's
+  `{...item, ...toMetadata(snapshot)}` spread never clobbers fields
+  `toMetadata()` doesn't produce.
+- **Oracle scope decision (named, not silent):** `scripts/
+  gen-orchestrator-oracle.mjs` was not extended with `sessions.test.ts`/
+  `server.test.ts` scenarios this wave. Instead, the five-condition gate
+  and the full command lifecycle are covered by plain Rust unit tests
+  against the ported `testing/service.rs` double directly:
+  `maybe_dispose_gate_blocks_on_each_condition_independently` (all five
+  conditions individually, plus already-disposing and terminal-bypass),
+  `full_command_lifecycle_create_attach_prompt_abort_detach` (create →
+  attach → prompt → busy-rejection → abort → detach through the real
+  dispatch), `list_metadata_merges_stored_and_live_sessions`. Real
+  oracle-replay parity against those two TS test files remains open for a
+  future wave.
+- **Two test-only bugs caught and fixed during the gate run** (not
+  production bugs): the lifecycle test originally awaited its first prompt
+  command inline, but the test double's `prompt()` only resolves once
+  `finish_prompt()`/`abort()` releases it — matching TS's own
+  `Deferred`-backed double and `sessions.test.ts`'s own "does not queue
+  prompts ... while a prompt response is pending" pattern of never
+  awaiting the initial request — fixed by spawning it and synchronizing
+  the same way the real test does; and the gate test originally reused one
+  session id across all six sub-cases, but the double locks an id until
+  its runtime disposes and five of the six sub-cases deliberately never
+  dispose — fixed by giving each sub-case its own id.
+- Gate: `cargo fmt` clean; `cargo clippy -p pirust-orchestrator
+  --all-targets --no-deps -D warnings` clean (4 findings fixed:
+  `type_complexity` on `on_error` → new `ErrorHandler` type alias,
+  `let_and_return` in `execute_detach`, `large_enum_variant` on
+  `PiSessionRuntimeEvent::Progress` → boxed); `cargo test
+  -p pirust-orchestrator` 20/20 green (6 suites: lib unit tests including 3
+  new `sessions.rs` + 3 new `snapshots.rs` tests, plus the existing golden
+  suites); `cargo test --workspace` 847 passed / 2 ignored / 0 failed
+  (the previously-documented pre-existing `pirust-tools` `find.rs`
+  failures and the `pirust-tui/latex.rs` clippy finding were not observed
+  in this run — not investigated further, out of this wave's scope).
+- **Resume point:** Wave 5 (Unix transport — `listener.rs`'s real
+  bind-then-link implementation, `testing/client.rs`, oracle scenarios
+  from `unix.test.ts`/`unix-connection.test.ts`) per `plan.md`.
+
+## 2026-08-23 — feat-009 WAVE 4a DONE (deep schema typing: Command/CommandResult/ServerEvent/SessionSnapshot/TranscriptItem)
+
+Replaces Wave 2's opaque `ProtocolJson` payload bodies with the real
+`schemas.ts` unions, as planned. **This is Wave 4a only** — `sessions.rs`
+(`LiveSessionManager`), `snapshots.rs` (`ServerSnapshotPublisher`), and
+`server.rs` (the live `PiServer` connection/session state machine) are
+still ahead as Wave 4b, since they need these types to exist first.
+
+- New types in `crates/pirust-orchestrator/src/protocol/schemas.rs`:
+  `ThinkingLevel`, `SessionPhase`, `ModelRef`/`ModelCost`/`ModelMetadata`,
+  `TextOrImageContent` (shared by `UserContent`/`ToolContent` — identical
+  shapes in `schemas.ts` today), `AssistantContent`, `Usage`/`UsageCost`,
+  `UserTranscriptItem`/`AssistantTranscriptItem`/`ToolTranscriptItem`/
+  `TranscriptItem` (role→status two-level dispatch, cross-field consistency
+  enforced by construction — e.g. `Complete` tool items can't carry
+  `isError: true`), `TranscriptProgress` (enforces `item_updated` excludes
+  `User` items, `item_finished` additionally excludes non-terminal
+  Streaming/Running items), `SessionMetadata`/`SessionSnapshot`/
+  `ServerSnapshot`, `Command`/`CommandResult`/`ServerEvent`. `RequestEnvelope
+  .request`/`ResponseEnvelope::Success.result`/`EventEnvelope.event`/
+  `ServerHello.snapshot` now typed as `Command`/`CommandResult`/
+  `ServerEvent`/`ServerSnapshot` respectively instead of opaque
+  `ProtocolJson`.
+- **Field-order fidelity cross-checked against REAL construction call
+  sites** (`protocol.ts`'s `toProtocolModelMetadata`/`toProtocolUsage`/
+  `toProtocolUserMessage`/`toProtocolAssistantMessage`/
+  `toProtocolToolResultMessage`; `sessions.ts`'s `toMetadata`;
+  `testing/service.ts`'s `seed()` literal), not just `schemas.ts`'s
+  declaration order — confirmed a genuinely non-obvious detail this way:
+  `Usage.reasoning`, when present, sits BETWEEN `cacheWrite` and
+  `totalTokens` (its schema position), not appended at the end; every
+  `to_json` implementation places optional fields inline at their schema
+  position accordingly, not generically at the tail.
+- `scripts/gen-orchestrator-oracle.mjs` extended with `protocol.test.ts`'s
+  remaining battery: assistant-item status/stopReason consistency (5
+  accept + 5 reject), tool-item status/isError consistency (3 accept + 3
+  reject), nonterminal-item-reported-as-finished rejection (2), nested JSON
+  tool details, full-field `SessionMetadata`. Codec fixture grew from 31 to
+  51 records; all 4 previously-`"scope":"deferred"` records from Wave 2 are
+  now asserted normally (un-deferred) in `tests/codec_golden.rs`.
+- **Real bug found+fixed via the oracle** (not assumed): a test case
+  literally copied from `protocol.test.ts`'s own hand-written object
+  literal put `status`/`isError` BEFORE `timestamp` — but that literal was
+  never claiming to represent real construction order (the test targets
+  validation acceptance, not order), and it actually contradicts
+  `toProtocolToolResultMessage`'s real order (`...timestamp, status,
+  isError`). Fixed by reordering the oracle's own input literal to match
+  the real construction site, with the reasoning recorded in a comment —
+  a good reminder mid-wave that "this exact line appears in Pi's test
+  file" is not the same claim as "this is Pi's real canonical wire order."
+- Also fixed 3 `clippy::wrong_self_convention` findings (`to_json(&self)` on
+  `Copy` enums `ThinkingLevel`/`SessionPhase`/`ModelInputKind` → `to_json
+  (self)`), and the two call sites that passed them as bare `T::to_json`
+  function references (`.map(T::to_json)` → `.map(|t| t.to_json())`, since
+  a bare fn-pointer reference doesn't get the auto-deref a method call
+  does).
+- Gate: `cargo test -p pirust-orchestrator` 14/14 green (same test
+  functions as Wave 3, now exercising far more fixture data), fmt clean,
+  clippy `-p pirust-orchestrator --all-targets --no-deps -D warnings`
+  clean, `cargo test --workspace` 841 passed / 2 ignored (unchanged count
+  — no new `#[test]` functions this wave, just deeper fixture coverage of
+  existing ones), 0 failed, oracle `--check` idempotent (51 codec cases).
+  Workspace-wide clippy still shows only the same pre-existing unrelated
+  `pirust-tui/latex.rs` finding.
+- **Resume point:** Wave 4b (`sessions.rs`/`snapshots.rs`/`server.rs` — the
+  live `PiServer` state machine, now built against these real types) per
+  `plan.md`.
+
+## 2026-08-23 — feat-009 WAVE 3 DONE (errors + connection + listener traits)
+
+Pure type/trait definitions, no oracle needed (same proportionality
+precedent as `auth_guidance.rs`) — unit-tested only, per `plan.md`.
+
+- New `crates/pirust-orchestrator/src/errors.rs`: port of `errors.ts`.
+  Collapsed TS's `PiServerError` subclasses (`SessionBusyError`/
+  `SessionLockedError`/`SessionNotFoundError`/`NotImplementedError` — each
+  just sets `.name` and a default message) into one `PiServerError` struct
+  + convenience constructors (`busy`/`session_locked`/`not_found`/
+  `not_implemented`), since Rust has no inheritance and no reader-visible
+  `error.name`, and `sessions.ts`'s own real throw sites mostly construct
+  the base class directly anyway. `PiServerOperationErrorCode` (5 of the 7
+  `ProtocolErrorCode` variants — `version`/`internal_error` excluded,
+  server-machinery-only) + a `From` conversion onto the wire error code.
+  `InternalServerError` wraps `anyhow::Error` as the cause, always displays
+  the opaque `INTERNAL_SERVER_ERROR_MESSAGE` regardless of cause (cause
+  reachable only via `Error::source`, never serialized).
+- New `crates/pirust-orchestrator/src/connection.rs`: `ByteConnection`/
+  `ByteConnectionHandler` traits (`async_trait` — new workspace-pattern dep
+  for this crate, matching `pirust-agent-core`'s existing use for
+  `AgentTool`/`ExecutionEnv`), `ByteConnectionAcceptor` closure type,
+  `ConnectionStage` enum, `is_terminal_connection`. **Scope note (named,
+  not silent):** `ConnectionState` here carries only `id`/`decoder`
+  (reusing Wave 2's real `ClientMessageDecoder`)/`session_ids`/`stage`/
+  `disconnected`/`handshake_complete` — TS's `connection: ByteConnection`,
+  `handshake?: Promise<void>`, and `handshakeTimeout: NodeJS.Timeout`
+  fields are deferred to Wave 4/5, once the real async `PiServer`/transport
+  need concrete `tokio` shapes for them (inventing those shapes now, before
+  anything drives them, risks getting them wrong and redoing the work).
+- New `crates/pirust-orchestrator/src/listener.rs`: `PiServerListener`
+  trait (`address`/`start`/`close`).
+- Gate: `cargo test -p pirust-orchestrator` 14/14 green (7 new unit tests),
+  fmt clean, clippy `-p pirust-orchestrator --all-targets --no-deps -D
+  warnings` clean on first try, `cargo test --workspace` 841 passed / 2
+  ignored (was 834), 0 failed. Workspace-wide clippy still shows only the
+  same pre-existing unrelated `pirust-tui/latex.rs` finding.
+- **Resume point:** Wave 4 (sessions + snapshots + `PiServer` state
+  machine — now also carries the deep `Command`/`CommandResult`/
+  `ServerEvent`/`SessionSnapshot`/`TranscriptItem` schema typing deferred
+  from Wave 2) per `plan.md`.
+
+## 2026-08-23 — feat-009 WAVE 2 DONE (schemas + codec validation layer, envelope scope)
+
+**Scope decision made while implementing (named, not silent):** `schemas.ts`
+has ~30 wire types. Fully typing every `Command`/`CommandResult`/
+`ServerEvent`/`TranscriptItem`/`SessionSnapshot` variant in isolation this
+wave would have been a lot of code with no real behavior to check it
+against yet. Scoped Wave 2 down to the **envelope layer only** —
+`ClientMessage` (`hello`/`request`), `ServerMessage` (`hello`/`hello_error`/
+`response`/`event`), `ProtocolError` — and represented the `request`/
+`result`/`event`/`snapshot` payload BODIES as generic, `JsonValueSchema`-
+validated JSON (`ProtocolJson`) rather than deeply typing them. That deep
+shape validation (assistant/tool item status consistency, `SessionMetadata`
+required fields, `Command` variant shapes, image-rejection in `prompt`) is
+now explicitly Wave 4's job (`sessions.rs`), where those types get built
+against real session-lifecycle behavior instead of in isolation — `plan.md`
+and `schemas.rs`'s own module docs both say so.
+
+- `scripts/gen-orchestrator-oracle.mjs` extended: imports `codec.ts` +
+  `schemas.ts` directly (still self-contained, no resolve-hook). Captured
+  31 cases from `protocol.test.ts`'s real battery: version-negotiation
+  asymmetry (client hello accepts ANY non-negative integer; server hello
+  requires the EXACT literal `PROTOCOL_VERSION` — confirmed by reading
+  `schemas.ts:387` vs `:414` before writing any Rust), hello/request/
+  response/event valid+invalid shapes, outbound frame-length enforcement,
+  incremental fragmented decode, and the validated-decoder's own permanent
+  "failed" latch (distinct from `FrameDecoder`'s Wave-1 one). 27 cases
+  tagged `"scope":"wave2"` (implemented + asserted this wave); 4 tagged
+  `"scope":"deferred"` (captured for Wave 4 reuse, explicitly skipped-not-
+  silently-passed in the Rust test) — one bug caught immediately: my first
+  draft used a structurally-invalid fake event body that real Pi's OWN
+  schema rejects even though I intended it as a "valid opaque event"
+  fixture; fixed by using a real `server_snapshot` event instead.
+- New `crates/pirust-orchestrator/src/protocol/schemas.rs`: `ProtocolJson`
+  (the `JsonValueSchema` value domain, rejects CBOR byte strings anywhere)
+  + manual field-access validators (`require_object`/`require_field`/
+  `deny_unknown_fields`/`require_id`/`require_integer`/...) standing in for
+  TypeBox's `Check` — chosen over serde derive macros specifically because
+  `ResponseEnvelope`'s `ok:true`/`ok:false` boolean-discriminated split and
+  literal-string tag fields (`type`, `role`) don't map cleanly onto serde's
+  string-keyed `#[serde(tag=...)]` mechanism. `ClientHello`/`RequestEnvelope`/
+  `ClientMessage`/`ServerHello`/`ServerHelloError`/`ResponseEnvelope`/
+  `EventEnvelope`/`ServerMessage`/`ProtocolError`/`ProtocolErrorCode`.
+  Field-order fidelity for `to_json` cross-checked against REAL construction
+  call sites in `server.ts`/`sessions.ts` (not just schema declaration
+  order) for every type that has one; `ClientHello`/`RequestEnvelope` have
+  no reference client in this checkout, so their order follows schema
+  declaration order as the best available inference (documented residual).
+- New `crates/pirust-orchestrator/src/protocol/codec.rs`: `encode_client_message`/
+  `encode_server_message` (skip TS's pre-encode `parse()` call — a Rust
+  caller can't construct an invalid `ClientMessage` in the first place, so
+  TS's own "validates messages before encoding" test is type-system-moot,
+  documented in the module doc), `is_supported_protocol_version`,
+  `ClientMessageDecoder`/`ServerMessageDecoder` (the permanently-latching
+  wrapper around Wave 1's `FrameDecoder`, distinguishing "already a
+  `ProtocolValidationError`, rethrow as-is" from "a `CborError`/`FrameError`,
+  wrap with an `Invalid {kind} protocol frame/framing:` prefix" exactly like
+  `ValidatedMessageDecoder`'s own catch block does).
+- New `tests/codec_golden.rs`: replays all 31 fixture records (27 asserted,
+  4 explicitly skipped-and-counted as deferred). Real bug caught+fixed:
+  `pirust-orchestrator`'s `Cargo.toml` was missing serde_json's
+  `preserve_order` feature (present on `pirust-coding-agent` for the exact
+  same reason) — a plain `BTreeMap`-backed `serde_json::Value` silently
+  re-sorted the test fixture's JSON object keys alphabetically before my
+  test even got to compare hex, which would have produced a real-looking
+  but meaningless byte mismatch against the `serverHello` case (5-field
+  nested snapshot). Fixed by adding the feature; re-verified.
+- Gate: `cargo test -p pirust-orchestrator` 7/7 suites green, fmt clean,
+  clippy `-p pirust-orchestrator --all-targets --no-deps -D warnings`
+  clean (one dead-code warning for an unused generic literal-string
+  validator, removed rather than `#[allow]`ed since nothing needs it this
+  wave), `cargo test --workspace` 834 passed / 2 ignored (was 832), 0
+  failed, oracle `--check` idempotent.
+- **Resume point:** Wave 3 (errors + connection + listener traits — no
+  oracle needed, pure type/trait definitions) per `plan.md`.
+
+## 2026-08-23 — feat-009 SCOPE CORRECTED + WAVE 1 DONE (CBOR + framing codec)
+
+**Scope correction (before any code was written):** feat-009's original
+description (spawn `pirust --mode rpc` workers, Radius remote presence,
+JSONL-over-socket — mirroring `packages/orchestrator`) is now stale. Real
+Pi renamed `packages/orchestrator` to `packages/server` (commit `8495f9d0d`)
+and redesigned it into a generic, transport-neutral, multi-session
+multiplexing library with a binary CBOR-over-length-prefixed-frames wire
+protocol — no process-spawning, no Radius, no CLI. Confirmed no package in
+`pi_space/pi` (including `packages/coding-agent`) implements the library's
+`PiServerService` yet, so it's a standalone library with no first-party
+consumer. `docs/analysis/04-orchestrator.md` was rewritten end-to-end to
+document the real, current package (§1-9: purpose, API surface, wire
+protocol, connection/session lifecycle, Unix transport, Rust porting notes,
+the open Windows-Unix-socket question, and what is/isn't oracle-verifiable).
+`feature_list.json`'s feat-009 entry rewritten to match (dependencies now
+just `feat-000`, not `feat-007`+`feat-012` — the new design doesn't spawn
+`--mode rpc` workers at all). `plan.md` replaced with a 6-wave plan for the
+corrected scope. User chose "Option A" (build against current Pi) over
+building the stale design.
+
+**WAVE 1 DONE (CBOR + framing, pure codec, no I/O):**
+- `scripts/gen-orchestrator-oracle.mjs`: imports
+  `packages/protocol/src/cbor/{encoder,decoder,index}.ts` and `framing.ts`
+  directly (both self-contained, zero cross-package imports — no
+  resolve-hook needed) and drives them with a tagged-JSON-value battery
+  (all of `cbor.test.ts`'s known RFC 8949 vectors + the undefined-omission/
+  BOM/`__proto__` cases + every decode-rejection hex literal + the
+  depth/length-limit cases) plus every `framing.test.ts` scenario (encode,
+  `assertCompleteFrame`, byte-at-a-time/coalesced/multi-block/every-split-
+  point `FrameDecoder.push`, oversized-length failed-state latching).
+  80 CBOR cases + 23 framing cases → `tests/fixtures/pi/orchestrator/
+  {cbor,framing}.cases.jsonl`; `--check` idempotent.
+- New `crates/pirust-orchestrator/src/protocol/{cbor,framing}.rs` (+
+  `mod.rs`, `lib.rs` — the crate gained a library target alongside its
+  existing bin, same pattern as `pirust-coding-agent`). `CborValue` uses a
+  single `Number(f64)` variant (JS has one runtime number type; int-vs-float
+  is classified at encode time exactly like `encodeValue` does) with a
+  bitwise-`f64` `PartialEq` so `-0.0 != 0.0` matches `Object.is`. Both
+  modules hand-rolled rather than using a generic CBOR crate (documented
+  reasoning in the module docs — this exact restricted RFC 8949 subset with
+  float-width/tag/indefinite-length rejections isn't what general crates
+  are tuned for; same call as `edit_diff.rs` in feat-004).
+- Documented, not silent: several JS-only encode-rejection cases (BigInt/
+  Symbol/Function/Date/Map/cyclic refs/array holes/symbol-keyed objects)
+  are type-system-moot for a `CborValue`-typed Rust encoder input and are
+  intentionally NOT in the fixture (the oracle script's own header comment
+  says why). One narrow residual noted in `cbor.rs`'s module docs: the
+  8-byte argument decode path uses exact `u64` arithmetic where JS uses
+  native `f64` arithmetic for the same multiply-add — only diverges in an
+  already-malformed/adversarial band near `Number.MAX_SAFE_INTEGER`, not
+  exercised by any oracle case.
+- New `tests/cbor_golden.rs` / `tests/framing_golden.rs`: replay every
+  fixture record. Two real bugs caught by the goldens on first run (both
+  fixed): (1) the "omitted key" fixture record needed a hand-written
+  expected value instead of generic `untag()` — Rust has no way to
+  represent "an omitted map key" as an encode *input* distinct from simply
+  not including it, so only the decode direction is meaningful there,
+  documented in the test; (2) the `encode_reject` test branch was reading
+  caller-options off the wrong JSON path (`&record` instead of
+  `&record["options"]`), silently defaulting to unbounded limits and
+  missing the two stricter-limit encode-rejection cases — fixed to read
+  `record.get("options")`.
+- Gate: `cargo test -p pirust-orchestrator` 5/5 suites green; `cargo fmt`
+  clean; `cargo clippy -p pirust-orchestrator --all-targets --no-deps -D
+  warnings` clean; `cargo test --workspace` 832 passed / 2 ignored (up from
+  827 — exactly the new suites), 0 failed. The one remaining
+  `cargo clippy --workspace` finding (`pirust-tui/src/latex.rs`
+  question-mark lint) is the same pre-existing, previously-documented issue
+  from earlier waves (feat-012 Waves 2-4 progress entries) — not touched,
+  not introduced by this wave.
+- **Resume point:** Wave 2 (schemas + codec validation layer) — see
+  `plan.md` for the full 6-wave breakdown. Wave 5 (Unix transport) has an
+  open question flagged up front in `docs/analysis/04-orchestrator.md` §8:
+  whether a real Windows AF_UNIX socket (via e.g. the `interprocess` crate)
+  is viable on this dev machine, since Pi's own code makes no Windows
+  transport branch at all.
+
+## 2026-08-23 — feat-012 CLOSED (WAVE 4: RpcClient port + black-box tests — all 4 waves done)
+
+feat-012 (RPC mode) is now fully DONE — see `feature_list.json`'s feat-012
+evidence for the full Wave 4 detail. Condensed:
+
+- New `crates/pirust-coding-agent/src/rpc/client.rs`: 1:1 port of
+  `rpc-client.ts` (601 lines) — `RpcClient` over `tokio::process` with typed
+  async methods for all 28 commands, `subscribe()` (a
+  `broadcast::Receiver<Arc<AgentSessionEvent>>` replacing TS's closure-based
+  `onEvent`), `wait_for_idle`/`collect_events`/`prompt_and_wait` built on a
+  shared `drain_until_settled` helper.
+- `types.rs` gained `Serialize` on `RpcCommand`/`ThinkingLevel`/`QueueMode`/
+  `StreamingBehavior` + `skip_serializing_if` on every `Option` command field
+  (the client now SENDS commands too) and `Deserialize` on
+  `RpcCommandSource`/`RpcSlashCommand`/`SourceInfoSerde`.
+- Named divergences (not silent): no node+cliPath wrapper (pirust is a
+  compiled binary); `stop()`'s SIGTERM shells out to `kill -TERM <pid>` on
+  Unix, force-kill on Windows (no SIGTERM there, same gap `rpc::run` already
+  carries server-side); an unmatched `type:"response"` line is dropped rather
+  than mis-forwarded as an event; `cycle_model`/`get_tree` typed to match our
+  own host's current (flatter) shapes, not Pi's richer ones.
+- Tested two ways: 5 fast unit tests (command-serialization shape, JS
+  `null`-template formatting, `get_data` decoding) + 2 black-box integration
+  tests (`tests/rpc_client_test.rs`) against a REAL spawned child process via
+  a new test-only fixture binary `src/bin/rpc_test_fixture.rs`
+  (`FIXTURE_MODE=echo_clone/exit_after_line`) — no method-mocking, no Node
+  needed. Closes Wave 3's "no automated #[test] spawns a real binary
+  end-to-end" gap for the client's own process lifecycle.
+- Gate: `cargo fmt --check` clean, `cargo test --workspace` 827 passed / 2
+  ignored / 0 failed (820→827, exactly the 7 new tests), clippy
+  `--all-targets -D warnings` clean except the same pre-existing unrelated
+  `pirust-tui/latex.rs` error prior waves already documented as not touched.
+- REMAINING (feat-012-wide, named not silent): no live differential against
+  real Pi's own `--mode rpc` binary; `killTrackedDetachedChildren()` on
+  signal not ported; RPC sessions remain in-memory only (no on-disk v4
+  session file); SIGTERM/SIGHUP exit codes unverified on this Windows dev
+  machine.
+- **Resume point:** next feature is feat-009 (orchestrator daemon) — its
+  dependencies (feat-007, feat-012) are both now done.
+
 ## 2026-08-23 — feat-012 WAVE 3: main.rs wiring + RPC process loop (live-verified against real binary)
 
 Continuation of the same session/user directive as Wave 2. User picked option
@@ -327,17 +718,25 @@ wave delivered the `buildParams` port + the two promised refactors, all green.
 ## Current State
 
 **Last Updated:** 2026-08-23
-**Active Feature:** feat-012 — RPC mode (JSON-RPC over stdio) (Waves 1-3 DONE,
-Wave 4 next — RpcClient port; feat-008 closed with remaining providers + OAuth
-SKIPPED BY AUTHOR, see 2026-08-22 entry).
-feat-007 DONE (Waves 1-7, commits b71f4f7..3540ec7).
+**Active Feature:** feat-009 (PiServer session-multiplex library,
+`pirust-orchestrator`) — SCOPE CORRECTED, Wave 1 (CBOR + framing codec)
+DONE, Wave 2 (schemas + codec validation, envelope scope) DONE, Wave 3
+(errors + connection + listener traits) DONE, Wave 4a (deep schema typing:
+Command/CommandResult/ServerEvent/SessionSnapshot/TranscriptItem) DONE.
+See the 2026-08-23 progress entries above and `plan.md` for the full
+6-wave breakdown. feat-012 (RPC mode) DONE (all 4 waves, see "feat-012
+CLOSED" entry below). feat-008 closed earlier with remaining providers +
+OAuth SKIPPED BY AUTHOR (2026-08-22 entry). feat-007 DONE (Waves 1-7,
+commits b71f4f7..3540ec7).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** feat-012 (RPC mode); feat-009 (orchestrator) depends on it.
-**Session resume:** read feature_list.json + progress.md; next session starts
-  the feat-008 provider waves (remaining adapters + catalog generator). The v4
-  harness-swap prerequisite is DONE (2026-08-22 entry): harness drives the v4
-  `Session`; `session-manager.ts` port dropped (harness never used it);
-  `gen-agent-oracle` rework deferred (0.84.2 harness is a stub — no tape).
+**Next feature:** continue feat-009 Wave 4b (`sessions.rs`/`snapshots.rs`/
+`server.rs` — the live `PiServer` state machine, now built against Wave
+4a's real types) — see `plan.md`. feat-010 (dynamic WASM extensions) is
+the other remaining not-started feature (depends on feat-008, done).
+**Session resume:** read feature_list.json + progress.md +
+  `docs/analysis/04-orchestrator.md` (rewritten 2026-08-23 — do not use any
+  memory of the old orchestrator/Radius design, it no longer matches Pi)
+  + `plan.md` before continuing feat-009.
 **Open process incidents (two, same failure mode, same project)**:
 1. Wave 5's first fork attempt committed+pushed to `origin/master` despite
    explicit "do not commit/push" instructions before failing on a

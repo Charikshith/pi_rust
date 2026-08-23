@@ -1,282 +1,148 @@
-# feat-012 — RPC mode (JSON-RPC over stdio)
+# feat-009 - PiServer session-multiplex library (pirust-orchestrator)
 
-**Success criterion:** `pirust --mode rpc` speaks Pi's exact JSONL RPC protocol —
-commands on stdin, responses + events on stdout, byte-compatible shapes and error
-wording — verified against real Pi as the oracle; plus an `RpcClient` for embedding,
-mirroring `rpc-client.ts`.
+**Success criterion:** `pirust-orchestrator` speaks Pi's exact binary wire
+protocol (length-prefixed CBOR frames, TypeBox-schema-shaped messages) and
+reproduces `PiServer`'s connection/session lifecycle behavior, verified
+against real Pi's own conformance test suite as the oracle - same pattern as
+every prior wave. See `docs/analysis/04-orchestrator.md` (rewritten
+2026-08-23) for the full analysis; this plan assumes that document as read.
 
-Source: `pi/packages/coding-agent/src/modes/rpc/`
-(`rpc-mode.ts` 817, `rpc-client.ts` 601, `jsonl.ts` 58, `rpc-types.ts` 289).
-Pi's own tests mirror the seam: `test/rpc-jsonl.test.ts`, `rpc.test.ts`.
+**Scope correction (2026-08-23):** the original feat-009 description (spawn
+`pirust --mode rpc` workers, Radius remote presence, JSONL-over-socket) was
+based on a version of Pi that no longer exists. Real Pi renamed
+`packages/orchestrator` to `packages/server` and redesigned it into a
+generic, transport-neutral session-multiplexing library with **no
+process-spawning and no Radius**. This plan builds the current thing.
 
-**Architecture note (named, not silent):** Pi's rpc-mode runs over
-`AgentSessionRuntime` + the full interactive `AgentSession`. Our side has
-`AgentHarness` (v4 Session) + `SingleTurnSession` (print-mode bridge) — no
-`AgentSession` equivalent. The protocol layer (framing, types, dispatch shape,
-error wording) ports 1:1; commands whose backing capability does not exist yet
-(fork/clone/switch_session/export_html/bash-in-session, extension UI proxying)
-return Pi-exact *shapes* driven by our host semantics, with gaps named here and
-in module docs — never silently invented.
+**Named, not silent:** no package in `pi_space/pi` (including
+`packages/coding-agent`) implements `PiServerService` yet. So Waves 1-5
+below port real, oracle-verifiable Pi library code. Wave 6 (an
+`AgentHarness`-backed `PiServerService` + a runnable binary) is a
+**pirust-side addition** with no Pi oracle to check it against - build it,
+but its evidence must say so plainly, the same way `sdk.rs`'s
+`SingleTurnSession` bridge was labeled in feat-005.
 
 ## Waves
 
-1. **Wave 1 — protocol foundation + oracle**
-   - `scripts/gen-rpc-oracle.mjs`: drive REAL `runRpcMode` from `../pi` in a child
-     process with a stub `AgentSessionRuntime` (same seam as gen-printmode-oracle),
-     feed command lines on fake stdin, capture exact stdout lines →
-     `tests/fixtures/pi/rpc/{commands,responses}.corpus.jsonl`.
-   - `crates/pirust-coding-agent/src/rpc/{mod,jsonl,types}.rs`:
-     `serialize_json_line` + strict LF-only reader port (`jsonl.ts`);
-     serde types for RpcCommand/RpcResponse/RpcExtensionUIRequest/RpcExtensionUIResponse
-     with JS-canonical field order (`rpc-types.ts`).
-   - `tests/rpc_golden.rs`: replay captured tapes — parse each captured request,
-     assert our serializer emits byte-identical responses.
-   - Verify: `cargo test -p pirust-coding-agent`, clippy/fmt clean, oracle --check.
+1. **Wave 1 - CBOR + framing (pure codec, no I/O)**
+   - `scripts/gen-orchestrator-oracle.mjs`: import `packages/protocol/src/
+     cbor/{encoder,decoder}.ts` and `framing.ts` directly (both are
+     self-contained, no cross-package imports) and drive them with (a) the
+     known hex vectors already in `cbor.test.ts`/`framing.test.ts`, (b) a
+     wider generated battery (nested containers, boundary integers, UTF-8
+     edge cases, every documented rejection case) -> `tests/fixtures/pi/
+     orchestrator/{cbor,framing}.cases.jsonl`.
+   - `crates/pirust-orchestrator/src/protocol/{cbor,framing}.rs`: hand-rolled
+     port (not a generic CBOR crate - see analysis doc §6 for why), matching
+     the exact restricted RFC 8949 subset and the 4-byte-BE frame format.
+   - `tests/cbor_golden.rs` + `tests/framing_golden.rs`: replay every
+     captured case, byte-identical encode and equivalent decode, matching
+     every rejection case's error class.
+   - Verify: `cargo test -p pirust-orchestrator`, clippy/fmt clean, oracle
+     `--check` idempotent.
 
-2. **Wave 2 — rpc mode core**: `rpc_mode.rs` command loop over a new
-   `RpcRuntimeHost` (harness + SessionManager): prompt/steer/follow_up/abort/
-   get_state/model+thinking commands/compaction/get_entries/get_tree/messages/
-   last-assistant-text/name; Pi-exact error strings for unknown/failed commands;
-   extension_ui_request/response plumbing where the host supports it.
-   Verify: golden tape replay through the real dispatch loop.
+2. **Wave 2 - schemas + codec (validation layer) — DONE 2026-08-23, scope
+   narrowed to the envelope layer** (see `feature_list.json`'s feat-009
+   evidence for the full writeup). Implemented: `ClientMessage`
+   (`hello`/`request`), `ServerMessage` (`hello`/`hello_error`/`response`/
+   `event`), `ProtocolError`/`ProtocolErrorCode`, and the codec composition
+   (`encode_client_message`/`encode_server_message`/`ClientMessageDecoder`/
+   `ServerMessageDecoder`/`is_supported_protocol_version`) — all hand-written
+   validators (not serde derive; `ResponseEnvelope`'s boolean `ok`-
+   discriminated split doesn't map cleanly onto serde's tag mechanism).
+   `request`/`result`/`event`/`snapshot` payload bodies are generic
+   `ProtocolJson` (the `JsonValueSchema` domain) this wave, NOT the real
+   `Command`/`CommandResult`/`ServerEvent`/`SessionSnapshot` unions — that
+   deep shape typing moved to Wave 4 below (folded in, not skipped), since
+   it makes more sense to build those types against real session-lifecycle
+   behavior than in isolation. `scripts/gen-orchestrator-oracle.mjs`
+   captured the full `protocol.test.ts` battery either way (31 cases; 4
+   tagged `"scope":"deferred"` for Wave 4 reuse).
 
-3. **Wave 3 — wiring**: main.rs replaces the "not supported" stub (main.rs:172);
-   SIGTERM/SIGHUP handling + shutdown semantics (exit 143/129); stdin-end
-   shutdown; backpressure. Integration test spawning `pirust --mode rpc`.
+3. **Wave 3 - errors + connection + listener traits — DONE 2026-08-23**
+   (see `feature_list.json`'s feat-009 evidence for the full writeup).
+   `errors.rs`: one `PiServerError` struct + convenience constructors
+   (not TS's subclass hierarchy — no inheritance/`.name` in Rust) +
+   `InternalServerError`. `connection.rs`: `ByteConnection`/
+   `ByteConnectionHandler` traits (`async_trait`), `ConnectionStage`,
+   `is_terminal_connection`; `ConnectionState` scoped down to the fields
+   that don't need a concrete async-runtime shape yet (`connection`/
+   `handshake`/`handshakeTimeout` deferred to Wave 4/5). `listener.rs`:
+   `PiServerListener` trait. No oracle needed (pure type/trait definitions,
+   same proportionality precedent as `auth_guidance.rs`) — unit-tested
+   only, 14/14 green.
 
-4. **Wave 4 — client**: `rpc_client.rs` port of rpc-client.ts over tokio::process;
-   black-box tests mirroring Pi's rpc-client-*.test.ts.
+4. **Wave 4 - sessions + snapshots + PiServer (the state machine), split into
+   two sub-waves once the real size became clear:**
 
-## Wave 2 concrete plan (2026-08-23)
+   **Wave 4a - deep schema typing — DONE 2026-08-23** (see
+   `feature_list.json`'s feat-009 evidence for the full writeup). Replaced
+   Wave 2's generic `ProtocolJson` payload bodies with the real typed
+   unions: `ThinkingLevel`/`SessionPhase`/`ModelRef`/`ModelMetadata`,
+   content types, `Usage`, `TranscriptItem`/`TranscriptProgress` (role→
+   status two-level dispatch + cross-field consistency enforced by
+   construction), `SessionMetadata`/`SessionSnapshot`/`ServerSnapshot`,
+   `Command`/`CommandResult`/`ServerEvent`. `RequestEnvelope`/
+   `ResponseEnvelope`/`EventEnvelope`/`ServerHello` now carry these real
+   types instead of opaque JSON. Field order cross-checked against REAL
+   `protocol.ts`/`sessions.ts` construction sites, not just schema
+   declaration order (caught a genuinely non-obvious detail: `Usage
+   .reasoning` sits between `cacheWrite` and `totalTokens` when present,
+   not at the end). Oracle extended with `protocol.test.ts`'s full
+   remaining battery (assistant/tool status consistency, nonterminal
+   items, nested tool details) — 51 codec cases total, the 4 Wave-2
+   `"scope":"deferred"` records now asserted normally.
 
-Scope: the command subset plan.md's own Wave 2 line names — prompt/steer/
-follow_up/abort/get_state/model+thinking commands/steering+follow-up modes/
-compact/set_auto_compaction/set_auto_retry/abort_retry/get_entries/get_tree/
-get_last_assistant_text/get_messages/set_session_name. Explicitly OUT: fork,
-clone, switch_session, new_session, export_html, bash, abort_bash,
-get_fork_messages, get_commands, extension_ui plumbing — all need the
-AgentSession-equivalent capability the architecture note above says pirust
-doesn't have yet. main.rs wiring stays Wave 3 (unchanged stub).
+   **Wave 4b - the live state machine — DONE 2026-08-23** (see
+   `feature_list.json`'s feat-009 evidence for the full writeup): `sessions.rs`
+   (`LiveSessionManager`, the five-condition `maybe_dispose` gate —
+   analysis doc §7 gotcha 6 — implemented exactly as specified),
+   `snapshots.rs` (`ServerSnapshotPublisher`, serialized broadcast queue),
+   `server.rs` (`PiServer` connection/handshake state machine, hello-once
+   enforcement, version check, `fail_protocol`) — built against Wave
+   4a's real types instead of opaque JSON. `testing/service.rs` ported as
+   the reference double (`TestServerService`/`TestSessionRuntime`).
+   - Oracle scope decision (named, not silent): adapting `test/
+     sessions.test.ts`/`test/server.test.ts` into `gen-orchestrator-oracle.mjs`
+     was deferred rather than attempted this wave — the gate and full command
+     lifecycle are instead covered by plain Rust unit tests against the ported
+     `testing/service.rs` double directly. Real oracle-replay parity against
+     those two TS test files remains open for a future wave.
 
-1. `pirust-agent-core`: make `AgentHarness::model`/`thinking_level`
-   interior-mutable (`Mutex` in `HarnessShared`, matching `Agent`'s own
-   pattern), add `set_model`/`set_thinking_level`; store the active turn's
-   `CancellationToken` in `HarnessShared` and add `abort()`; add
-   `pending_message_count()` (steer_queue.len() + follow_up_queue.len()).
-   → verify: `cargo test -p pirust-agent-core` green, existing harness tests
-   unaffected (no external callers of the old `&Model` signature).
-2. `pirust-coding-agent/src/rpc/host.rs`: new `RpcRuntimeHost<St>` wrapping
-   `Arc<AgentHarness<St>>` + `Arc<dyn ModelSource>` + RPC-only queue-mode/
-   auto-compaction/auto-retry flags Pi tracks at the `AgentSession` level
-   that `AgentHarness` has no home for yet (named, not silent).
-   → verify: constructs against a real `V4Session` + faux `StreamFn` in a
-   unit test.
-3. `pirust-coding-agent/src/rpc/mode.rs`: `handle_command` dispatch mirroring
-   `rpc-mode.ts`'s switch for the Wave-2 subset, Pi-exact error strings
-   (`Model not found: {provider}/{modelId}`, `Entry not found: {since}`,
-   `Session name cannot be empty`, `Unknown command: {type}`).
-   → verify: unit/integration tests driving `handle_command` directly (no
-   main.rs wiring yet) against a real harness + a scripted `Faux` stream fn,
-   plus one live run against the user's local llama-server
-   (`ggml-org/Qwen3.5-0.8B-GGUF` at `127.0.0.1:8080`) exercising a real
-   `prompt` end-to-end.
-4. Gate: fmt + clippy `-D warnings` clean, `cargo test --workspace` green
-   (same 3 pre-existing `pirust-tools` failures allowed), no oracle drift.
-5. Best-effort structural check: replay the 38 requests already captured in
-   `tests/fixtures/pi/rpc/commands.corpus.jsonl` through `handle_command` and
-   confirm every one parses + dispatches without panicking. NOT a byte
-   comparison (our harness's session state differs from Pi's stub) — named
-   as a residual for Wave 3's live differential, not silently skipped.
+5. **Wave 5 - Unix transport**
+   - Resolve the Windows question named in analysis doc §8 FIRST (try a
+     real cross-platform local-socket crate - `interprocess` - before
+     assuming named pipes are needed; this is the dev machine's own OS, so
+     it can be verified directly, not just reasoned about).
+   - `transports/unix.rs`: port `listener.ts`'s bind-then-link scheme,
+     platform-conditional path-length check (107 Linux / 103 elsewhere),
+     stale-socket probe-and-cleanup, backpressure (`max_pending_bytes`),
+     graceful-close-with-deadline.
+   - Oracle: `test/unix.test.ts` + `test/unix-connection.test.ts` scenarios
+     (fragmented hello, version/hello-ordering enforcement, oversized-frame
+     handling, stale-socket recovery) replayed against the Rust listener
+     using a Rust `ProtocolTestClient` equivalent (`testing/client.rs`).
+   - Verify: `cargo test -p pirust-orchestrator` full conformance battery
+     green, clippy/fmt clean, `./init.sh` green.
 
-## Status
+6. **Wave 6 - pirust-side addition (named as such, not Pi-verified): a real
+   `PiServerService` over `AgentHarness` + a runnable `pirust-orchestrator`
+   binary.** Only start this after Waves 1-5 are gated green. Scope and
+   test strategy (scripted `Faux` provider through a real `AgentHarness`,
+   NOT an oracle replay - there is nothing in Pi to replay against) to be
+   planned concretely once Wave 5 lands.
 
-- [x] Wave 1 — DONE 2026-08-22:
-  - `scripts/gen-rpc-oracle.mjs`: drives real `runRpcMode` from `../pi` in a child
-    process over REAL OS pipes with a stub runtime host; LOCK-STEP capture (each
-    command waits for its response) because Pi's async handlers interleave
-    nondeterministically otherwise. 38 requests → 39 responses, deterministic
-    (3× `--check` green). Wired into `init.sh`.
-  - `scripts/gen-rpc-live-oracle.mjs` + frozen `tests/fixtures/pi/rpc-live/live.corpus.jsonl`:
-    LIVE end-to-end tape of real `pi --mode rpc` against local llama-server
-    (`ggml-org/Qwen3.5-0.8B-GGUF` at `http://127.0.0.1:8080`, Anthropic-compatible
-    /v1/messages, via models.json baseUrl override + PI_CODING_AGENT_DIR temp dir).
-    Reference capture for event-stream structure (message_update deltas,
-    thinking_level_changed-before-response ordering), not a byte golden.
-  - `scripts/run-pi.mjs`: reusable launcher running real pi from TS source.
-  - `crates/pirust-coding-agent/src/rpc/{mod,jsonl,types}.rs` + `tests/rpc_golden.rs`:
-    strict LF-only JSONL framing port (CRLF strip, UTF-8 chunk-boundary safety,
-    U+2028 not a separator); typed RpcCommand/RpcResponse/RpcSessionState/UI
-    types with JS-canonical key order + omitted-undefined semantics. ALL 39
-    captured responses rebuild BYTE-IDENTICALLY; all 38 requests parse as Pi's
-    union would discriminate them (incl. parse-error + `Unknown command:` wording).
-  - Gate: fmt/clippy/-D-warnings clean, workspace green except the 3 pre-existing
-    pirust-tools find env failures, oracle --check idempotent.
-  - NOTE: `./init.sh` itself currently fails to parse under bash (pre-existing;
-    CRLF working-tree copy also fails `bash -n` on committed HEAD) — gate run as
-    individual commands this wave.
-- [x] Wave 2 — DONE 2026-08-23:
-  - `pirust-agent-core`: `AgentHarness::model`/`thinking_level` made interior-mutable
-    (`Mutex`) with `set_model`/`set_thinking_level`; new `abort()` (cancels a
-    stored `CancellationToken` for the in-flight turn); new `messages()`
-    (context messages), `entries()` (root-first branch entries),
-    `pending_message_count()` (steer + follow-up queue lengths). `user_message`
-    made `pub`. No external callers of the old `&Model`-returning signature, so
-    this was a safe internal change.
-  - NEW `crates/pirust-coding-agent/src/rpc/host.rs`: `RpcRuntimeHost<St>` —
-    an `AgentHarness` + `ModelSource` + the RPC-only state Pi tracks at the
-    `AgentSession` level that the harness has no home for (`steeringMode`/
-    `followUpMode`/`autoCompactionEnabled`/`autoRetryEnabled`), defaults
-    pinned to the Wave-1 oracle's `get_state` fixture (`"all"`/`"all"`/`true`).
-  - NEW `crates/pirust-coding-agent/src/rpc/mode.rs`: `handle_command` dispatch
-    covering prompt/steer/follow_up/abort, get_state, set_model/cycle_model/
-    get_available_models, set_thinking_level/cycle_thinking_level/
-    get_available_thinking_levels, set_steering_mode/set_follow_up_mode,
-    compact/set_auto_compaction, set_auto_retry/abort_retry, get_session_stats,
-    get_entries/get_tree/get_last_assistant_text/get_messages,
-    set_session_name, get_commands (trivially empty). Pi-exact error strings
-    reused where the oracle names them (`Model not found: {provider}/{modelId}`,
-    `Entry not found: {since}`, `Session name cannot be empty`). Found and
-    fixed one real wire-fidelity bug while writing this: Pi's
-    `success(id, cmd, null)` for `cycle_model`/`cycle_thinking_level` emits an
-    explicit `"data":null` key (JS `null !== undefined`), NOT an omitted key —
-    `RpcResponse::success_with(id, cmd, Value::Null)` used for those two, not
-    the data-omitting `success()`. `new_session`/`bash`/`abort_bash`/
-    `export_html`/`switch_session`/`fork`/`clone`/`get_fork_messages` return a
-    real named error (not "Unknown command:") — each needs the
-    AgentSession-equivalent capability this port doesn't have yet (see the
-    architecture note above); `main.rs` wiring is still Wave 3.
-  - NEW `crates/pirust-coding-agent/tests/rpc_dispatch.rs`: 10 tests against a
-    real `AgentHarness` + scripted `Faux` provider (get_state defaults vs the
-    oracle fixture, set/cycle model, thinking-level cycling gated by
-    `model.reasoning`, queue modes + pending count, session name validation,
-    get_entries "not found", named-not-"Unknown" errors, full prompt→
-    get_last_assistant_text→get_messages round trip) PLUS one LIVE test
-    (`live_prompt_against_local_llama_server`) driving a real HTTP turn
-    against the user's running `ggml-org/Qwen3.5-0.8B-GGUF` llama-server at
-    `127.0.0.1:8080` through the exact same `handle_command` dispatch —
-    skips (not fails) when no server is reachable, same convention as
-    `scripts/gen-rpc-live-oracle.mjs`. The live test caught a real bug during
-    development (missing `api_key` in the test's own stream fn — our client
-    correctly refuses an unauthenticated request even though llama-server
-    ignores it) and surfaced a genuine model characteristic worth recording:
-    this particular 0.8B reasoning model spends its entire token budget on a
-    `thinking` block for a trivial prompt and never reaches visible text, even
-    at 8192 max_tokens / 60s, and ignores an explicit `thinking:{type:
-    "disabled"}` request param — confirmed via manual `curl` probing, not
-    assumed. The live assertion was scoped to what the round trip actually
-    guarantees (a real persisted assistant message with content), not to
-    specific text, to avoid a flaky/dishonest test.
-  - Gate: `cargo fmt --check` clean, `cargo clippy -p pirust-coding-agent -p
-    pirust-agent-core --all-targets --no-deps -D warnings` clean (a pre-existing,
-    unrelated `pirust-tui/src/latex.rs` clippy error reproduces even on a clean
-    stash — not touched, not mine), `cargo test --workspace`: 820 passed / 2
-    ignored, 0 failed.
-  - Deferred to Wave 3 (named in plan.md's own step 5, not silent): a byte-level
-    oracle replay of `tests/fixtures/pi/rpc/commands.corpus.jsonl` through this
-    dispatch loop. Skipped this wave because that tape was captured against
-    Pi's own stub `AgentSessionRuntime`/session state, which this harness does
-    not reproduce; Wave 3's live differential is the right place for it.
-- [x] Wave 3 — DONE 2026-08-23:
-  - `crates/pirust-coding-agent/src/rpc/run.rs` (NEW): `run_rpc_mode` — the
-    stdin-JSONL/stdout-JSONL process loop. Blocking OS thread reads stdin lines
-    into an unbounded mpsc channel; each line is dispatched on its own task
-    tracked in a `tokio::task::JoinSet` (not a bare `tokio::spawn`) so a clean
-    stdin-EOF shutdown can drain every in-flight command before returning exit
-    code 0 — mirrors `rpc-mode.ts`'s default `shutdown()` awaiting outstanding
-    handlers. `SIGTERM`→143 / `SIGHUP`→129 wired on `#[cfg(unix)]` via
-    `tokio::signal::unix`; Windows has no equivalent (same documented gap
-    `print_mode::NoSignals` already carries for every other mode). Harness
-    loop events (+ synthesized `agent_settled`) are forwarded straight to raw
-    stdout via `install_event_forwarding`, reusing `runtime_host::to_session_event`
-    (now `pub(crate)`) — the identical `AgentSessionEvent` shape `--mode json`
-    already emits, not a new one.
-  - `crates/pirust-coding-agent/src/main.rs`: replaced the `--mode rpc` "not
-    supported" stub with real wiring — builds an in-memory `V4Session` +
-    `AgentHarness` via a new `sdk::create_agent_harness_session`, rejects
-    `@file` args (RPC has no file-attachment concept), branches the v3
-    `SessionManager`/`--name`-persistence bootstrap to skip entirely for RPC
-    (that machinery is print/interactive-mode-only), then hands off to
-    `rpc::run::run_rpc_mode`.
-  - `crates/pirust-coding-agent/src/sdk.rs`: extracted `resolve_agent_ingredients`
-    (system prompt/tools/model/thinking-level resolution) out of
-    `assemble_agent_session` so `assemble_agent_harness_session` +
-    `create_agent_harness_session` (both NEW) can reuse it instead of
-    duplicating ~100 lines — the harness path is otherwise identical
-    plumbing into `AgentHarnessOptions` instead of `AgentOptions`.
-  - Two real bugs found and fixed via LIVE binary runs against the user's
-    running `ggml-org/Qwen3.5-0.8B-GGUF` llama-server (unit tests alone did
-    not exercise the actual stdin/stdout/process-exit lifecycle where these
-    live): (1) the first `run_rpc_mode` draft used bare `tokio::spawn` per
-    line with no tracking, so `main.rs`'s `std::process::exit` could kill the
-    process mid-write for whichever command hadn't finished — fixed with the
-    `JoinSet` drain-on-EOF described above; (2) even after that fix, a
-    `prompt` command's full turn (agent_start/turn_start/message_*/agent_end/
-    agent_settled) still went missing on shutdown, because `mode.rs`'s
-    `Prompt` handler did its OWN inner `tokio::spawn` (from Wave 2) to ack
-    immediately — invisible to the outer `JoinSet`, so the outer per-line task
-    completed almost instantly with real work still detached and untracked.
-    Fixed by removing the inner spawn entirely: the outer per-line task (each
-    stdin line already runs on its own task) now awaits the turn inline,
-    which keeps different commands concurrent with each other while making
-    the outer task's lifetime honestly represent "is this command done yet".
-  - Verify: live run of `set_thinking_level` + `prompt` piped into the real
-    `pirust.exe --mode rpc` binary (stdin held open, bounded by an outer
-    `timeout`) against the user's local llama-server — full expected event
-    stream appeared (agent_start, turn_start, message_start/update/end ×2,
-    turn_end, agent_end, agent_settled) followed by clean exit 0, no stderr.
-    `cargo test -p pirust-coding-agent --test rpc_dispatch`: 10/10 still pass
-    unchanged (the Prompt-arm fix didn't regress Wave 2's direct-dispatch
-    tests). Gate: `cargo fmt` clean, `cargo clippy -p pirust-coding-agent -p
-    pirust-agent-core --all-targets --no-deps -D warnings` clean, `cargo test
-    --workspace`: 820 passed / 2 ignored, 0 failed.
-  - Deferred / named, not silent: no automated `#[test]` spawns the real
-    `pirust` binary end-to-end (Wave 3's live verification above was manual,
-    via a shell pipeline — codifying it as a repo test is future work, not
-    attempted this wave); `SIGTERM`/`SIGHUP` exit codes (143/129) are
-    unverified in this session (dev environment is Windows; the code path is
-    `#[cfg(unix)]`-only); no live differential against real Pi's own
-    `--mode rpc` binary was run this wave (Wave 1's oracle/live-oracle tapes
-    already cover protocol/event-shape fidelity; a second live comparison at
-    the full-binary level would be substantial additional scope, not
-    attempted here); `killTrackedDetachedChildren()` on signal still not
-    ported (no detached-bash-child registry exists); RPC sessions remain
-    in-memory only (no on-disk v4 session file), and RPC-mode/print-mode
-    still use two unreconciled internal session representations.
-- [x] Wave 4 — RpcClient port + black-box tests (DONE 2026-08-23)
-  - New `crates/pirust-coding-agent/src/rpc/client.rs` (port of `rpc-client.ts`,
-    601 lines): `RpcClient` over `tokio::process`, typed methods for all 28
-    commands, `subscribe()` (a `broadcast::Receiver<Arc<AgentSessionEvent>>`
-    replacing TS's closure-based `onEvent`), `wait_for_idle`/`collect_events`/
-    `prompt_and_wait` built on a shared `drain_until_settled` helper.
-    `types.rs` gained `Serialize` on `RpcCommand`/`ThinkingLevel`/`QueueMode`/
-    `StreamingBehavior` plus `skip_serializing_if` on every `Option` command
-    field (the client sends commands too now, so JS's `undefined`-key-omission
-    must round-trip both ways) and `Deserialize` on `RpcCommandSource`/
-    `RpcSlashCommand`/`SourceInfoSerde` (`get_commands` needed a client-side
-    decode path).
-  - Divergences named in the module doc (not silent): `program` is spawned
-    directly (no `node`+`cliPath` wrapper — `pirust` is a compiled binary);
-    `stop()`'s SIGTERM shells out to `kill -TERM <pid>` on Unix (same
-    `#![forbid(unsafe_code)]` constraint as `pirust_tools::bash::kill_process_tree`,
-    no `libc`/`nix` dep); a `type:"response"` line with no matching pending id
-    is dropped rather than mis-forwarded as an event; `cycle_model`/`get_tree`
-    are typed to match what our OWN host actually emits this wave (bare
-    `Model`, flat `Entry` list) rather than Pi's richer/nested TS shapes.
-  - Black-box tests (`tests/rpc_client_test.rs`) mirror Pi's
-    `rpc-client-clone.test.ts` and `rpc-client-process-exit.test.ts`, but spawn
-    a REAL child process — a new tiny test-only binary,
-    `src/bin/rpc_test_fixture.rs` (`FIXTURE_MODE=echo_clone` /
-    `exit_after_line`) — instead of mocking `send`/`getData` (Rust has no
-    method-mocking) or requiring Node. This closes Wave 3's "no automated
-    `#[test]` spawns a real binary end-to-end" gap, just for the client's own
-    process lifecycle rather than the full `pirust --mode rpc` server (that
-    would additionally need a resolvable model/models.json — out of scope for
-    a client-lifecycle test).
-  - 5 new fast unit tests in `client.rs` (command-serialization shape, `null`
-    JS-template-literal formatting, `get_data` success/error decoding) + 2
-    black-box integration tests: 820 -> 827. Gate: `cargo fmt --check` clean,
-    `cargo test --workspace`: 827 passed / 2 ignored, 0 failed, clippy clean
-    except the same pre-existing unrelated `pirust-tui/latex.rs` error Wave 3
-    already documented.
-  - REMAINING (feat-012 fully closed otherwise): none — all 4 planned waves
-    are done. feat-009 (the orchestrator) can now start; it depends on this.
+## Notes for whoever resumes
+
+- Reuse opportunity already confirmed: `SessionPhase` in the wire schema
+  (`idle|turn|compaction|branch_summary|retry`) is documented in Pi's own
+  source as matching `AgentHarnessPhase` - check `pirust-agent-core`'s v4
+  harness for an existing enum with this exact vocabulary before defining a
+  new one in `schemas.rs`.
+- `pirust-coding-agent`'s feat-012 `RpcClient`/RPC types are **not** reused
+  here - the new protocol has a different, smaller command set and a
+  different (binary CBOR, not JSONL) wire format. Do not try to unify them.
+- No new workspace crate: everything lives inside `crates/pirust-orchestrator`
+  (already scaffolded, stub `main.rs`). New dep needed later: `interprocess`
+  (Wave 5 transport) and possibly `sha2` (owned-bind-path hashing, Wave 5).
+  No new dep needed for Waves 1-4.
