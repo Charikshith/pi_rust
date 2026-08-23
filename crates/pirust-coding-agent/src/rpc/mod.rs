@@ -16,7 +16,12 @@
 //! Wave 3 adds the process loop that drives Wave 2 over real stdin/stdout:
 //! - [`run`] — [`run::run_rpc_mode`], the stdin-JSONL / stdout-JSONL loop,
 //!   event streaming, and shutdown semantics
+//!
+//! Wave 4 adds the embedding client (port of `rpc-client.ts`):
+//! - [`client`] — [`client::RpcClient`], spawning `--mode rpc` over
+//!   `tokio::process` and driving it with a typed API
 
+pub mod client;
 pub mod host;
 pub mod jsonl;
 pub mod mode;

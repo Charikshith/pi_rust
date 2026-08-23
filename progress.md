@@ -1902,3 +1902,48 @@ Verification: fmt clean, clippy `-D warnings` clean, all 5 black-box tests
   both oracle --checks green.
 - DEFERRED (named): openai-codex-responses (websocket+zstd), google-generative-ai,
   google-vertex, bedrock-converse-stream (SigV4), mistral-conversations, pi-messages, OAuth.
+
+## feat-012 Wave 4 — RpcClient port + black-box tests (DONE 2026-08-23) — feat-012 fully closed
+- New `crates/pirust-coding-agent/src/rpc/client.rs`: 1:1 port of `rpc-client.ts`
+  (601 lines). `RpcClient` over `tokio::process` with typed async methods for all
+  28 commands; `subscribe()` returns a `broadcast::Receiver<Arc<AgentSessionEvent>>`
+  in place of TS's closure-based `onEvent` (idiomatic Rust multi-consumer channel
+  instead of a listener array); `wait_for_idle`/`collect_events`/`prompt_and_wait`
+  share a `drain_until_settled` helper.
+- `rpc/types.rs`: added `Serialize` to `RpcCommand`/`ThinkingLevel`/`QueueMode`/
+  `StreamingBehavior` and `skip_serializing_if` on every `Option` command field
+  (the client now SENDS commands, so JS's undefined-key-omission must round-trip
+  outbound too, not just inbound); added `Deserialize` to `RpcCommandSource`/
+  `RpcSlashCommand`/`SourceInfoSerde` for `get_commands`' client-side decode.
+- Divergences named in the module doc, not silent: `program` is spawned directly
+  (no `node`+`cliPath` wrapper — `pirust` is a compiled binary); `stop()`'s
+  SIGTERM shells out to `kill -TERM <pid>` on Unix (same `#![forbid(unsafe_code)]`
+  constraint as `pirust_tools::bash::kill_process_tree`, no `libc`/`nix` dep),
+  straight to force-kill on Windows (no SIGTERM there, same gap `rpc::run`
+  already documents server-side); a `type:"response"` line with no matching
+  pending id is dropped rather than mis-forwarded as an event; `cycle_model`/
+  `get_tree` are typed to match what OUR OWN host emits this wave (bare `Model`,
+  the same flat `Entry` list `get_entries` uses) rather than Pi's richer/nested
+  shapes neither side has built yet.
+- TESTED two ways: (a) 5 fast unit tests in `client.rs` (command-serialization
+  shape incl. `skip_serializing_if` actually firing, JS `null`-template-literal
+  error formatting, `get_data` success/error decoding); (b) 2 black-box
+  integration tests (`tests/rpc_client_test.rs`) mirroring Pi's real
+  `rpc-client-clone.test.ts` and `rpc-client-process-exit.test.ts`, but against a
+  REAL spawned child process — new test-only binary
+  `src/bin/rpc_test_fixture.rs` (`FIXTURE_MODE=echo_clone`/`exit_after_line`) —
+  instead of mocking `send`/`getData` (no method-mocking in Rust) or requiring
+  Node. Closes Wave 3's "no automated `#[test]` spawns a real binary end-to-end"
+  gap for the client's own process lifecycle, though not the full
+  `pirust --mode rpc` server (needs a resolvable model/models.json, out of scope
+  for a client-lifecycle test).
+- Gate: `cargo fmt --check` clean, `cargo test --workspace` 827 passed / 2
+  ignored / 0 failed (820 -> 827, exactly the 7 new tests), `clippy --all-targets
+  -D warnings` clean except the same pre-existing unrelated
+  `pirust-tui/latex.rs` error prior waves already documented as untouched.
+- feat-012 (RPC mode) is now DONE — all 4 planned waves complete. feat-009 (the
+  orchestrator over `--mode rpc` workers) can start next; it depends on this.
+- REMAINING (named, feat-012-wide, not this wave's to close): no live
+  differential against real Pi's own `--mode rpc` binary; `killTrackedDetachedChildren()`
+  on signal; RPC sessions remain in-memory only (no on-disk v4 session file);
+  SIGTERM/SIGHUP exit codes unverified on this Windows dev machine.

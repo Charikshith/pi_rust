@@ -242,4 +242,41 @@ doesn't have yet. main.rs wiring stays Wave 3 (unchanged stub).
     ported (no detached-bash-child registry exists); RPC sessions remain
     in-memory only (no on-disk v4 session file), and RPC-mode/print-mode
     still use two unreconciled internal session representations.
-- [ ] Wave 4 — RpcClient port + black-box tests
+- [x] Wave 4 — RpcClient port + black-box tests (DONE 2026-08-23)
+  - New `crates/pirust-coding-agent/src/rpc/client.rs` (port of `rpc-client.ts`,
+    601 lines): `RpcClient` over `tokio::process`, typed methods for all 28
+    commands, `subscribe()` (a `broadcast::Receiver<Arc<AgentSessionEvent>>`
+    replacing TS's closure-based `onEvent`), `wait_for_idle`/`collect_events`/
+    `prompt_and_wait` built on a shared `drain_until_settled` helper.
+    `types.rs` gained `Serialize` on `RpcCommand`/`ThinkingLevel`/`QueueMode`/
+    `StreamingBehavior` plus `skip_serializing_if` on every `Option` command
+    field (the client sends commands too now, so JS's `undefined`-key-omission
+    must round-trip both ways) and `Deserialize` on `RpcCommandSource`/
+    `RpcSlashCommand`/`SourceInfoSerde` (`get_commands` needed a client-side
+    decode path).
+  - Divergences named in the module doc (not silent): `program` is spawned
+    directly (no `node`+`cliPath` wrapper — `pirust` is a compiled binary);
+    `stop()`'s SIGTERM shells out to `kill -TERM <pid>` on Unix (same
+    `#![forbid(unsafe_code)]` constraint as `pirust_tools::bash::kill_process_tree`,
+    no `libc`/`nix` dep); a `type:"response"` line with no matching pending id
+    is dropped rather than mis-forwarded as an event; `cycle_model`/`get_tree`
+    are typed to match what our OWN host actually emits this wave (bare
+    `Model`, flat `Entry` list) rather than Pi's richer/nested TS shapes.
+  - Black-box tests (`tests/rpc_client_test.rs`) mirror Pi's
+    `rpc-client-clone.test.ts` and `rpc-client-process-exit.test.ts`, but spawn
+    a REAL child process — a new tiny test-only binary,
+    `src/bin/rpc_test_fixture.rs` (`FIXTURE_MODE=echo_clone` /
+    `exit_after_line`) — instead of mocking `send`/`getData` (Rust has no
+    method-mocking) or requiring Node. This closes Wave 3's "no automated
+    `#[test]` spawns a real binary end-to-end" gap, just for the client's own
+    process lifecycle rather than the full `pirust --mode rpc` server (that
+    would additionally need a resolvable model/models.json — out of scope for
+    a client-lifecycle test).
+  - 5 new fast unit tests in `client.rs` (command-serialization shape, `null`
+    JS-template-literal formatting, `get_data` success/error decoding) + 2
+    black-box integration tests: 820 -> 827. Gate: `cargo fmt --check` clean,
+    `cargo test --workspace`: 827 passed / 2 ignored, 0 failed, clippy clean
+    except the same pre-existing unrelated `pirust-tui/latex.rs` error Wave 3
+    already documented.
+  - REMAINING (feat-012 fully closed otherwise): none — all 4 planned waves
+    are done. feat-009 (the orchestrator) can now start; it depends on this.

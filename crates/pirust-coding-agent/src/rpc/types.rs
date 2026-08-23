@@ -71,7 +71,7 @@ impl ParsedInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
     Off,
@@ -81,7 +81,9 @@ pub enum ThinkingLevel {
     High,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Also [`Serialize`] (Wave 4): [`crate::rpc::client::RpcClient`] sends these
+/// back out over the wire, so the same tagged shape must round-trip both ways.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -90,24 +92,24 @@ pub enum ThinkingLevel {
 pub enum RpcCommand {
     Prompt {
         message: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<serde_json::Value>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         streaming_behavior: Option<StreamingBehavior>,
     },
     Steer {
         message: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<serde_json::Value>,
     },
     FollowUp {
         message: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<serde_json::Value>,
     },
     Abort,
     NewSession {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_session: Option<String>,
     },
     GetState,
@@ -130,7 +132,7 @@ pub enum RpcCommand {
         mode: QueueMode,
     },
     Compact {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         custom_instructions: Option<String>,
     },
     SetAutoCompaction {
@@ -142,13 +144,13 @@ pub enum RpcCommand {
     AbortRetry,
     Bash {
         command: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         exclude_from_context: Option<bool>,
     },
     AbortBash,
     GetSessionStats,
     ExportHtml {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         output_path: Option<String>,
     },
     SwitchSession {
@@ -162,7 +164,7 @@ pub enum RpcCommand {
     Clone,
     GetForkMessages,
     GetEntries {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         since: Option<String>,
     },
     GetTree,
@@ -186,14 +188,14 @@ pub fn parse_command_id(value: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum QueueMode {
     All,
     OneAtATime,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum StreamingBehavior {
     Steer,
@@ -340,7 +342,9 @@ impl Serialize for RpcResponse {
 // Slash commands (rpc-types.ts:80-89)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+/// Also [`Deserialize`] (Wave 4): [`crate::rpc::client::RpcClient::get_commands`]
+/// parses these back out of a `get_commands` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcSlashCommand {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -349,7 +353,7 @@ pub struct RpcSlashCommand {
     pub source_info: SourceInfoSerde,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RpcCommandSource {
     Extension,
@@ -365,6 +369,12 @@ pub struct SourceInfoSerde(pub serde_json::Value);
 impl Serialize for SourceInfoSerde {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         self.0.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceInfoSerde {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(SourceInfoSerde(serde_json::Value::deserialize(d)?))
     }
 }
 
