@@ -8,7 +8,17 @@
 //! - [`jsonl`] — strict LF-only JSONL framing (`jsonl.ts`)
 //! - [`types`] — the wire types (`rpc-types.ts`) with JS-canonical field order
 //!
-//! The command dispatch loop itself is Wave 2 (`rpc_mode.rs`).
+//! Wave 2 adds the command dispatch loop itself:
+//! - [`host`] — [`host::RpcRuntimeHost`], an `AgentHarness` plus the RPC-only
+//!   state Pi tracks at the `AgentSession` level
+//! - [`mode`] — [`mode::handle_command`], the dispatch switch
+//!
+//! Wave 3 adds the process loop that drives Wave 2 over real stdin/stdout:
+//! - [`run`] — [`run::run_rpc_mode`], the stdin-JSONL / stdout-JSONL loop,
+//!   event streaming, and shutdown semantics
 
+pub mod host;
 pub mod jsonl;
+pub mod mode;
+pub mod run;
 pub mod types;

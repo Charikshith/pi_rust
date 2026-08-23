@@ -8,6 +8,109 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
+## 2026-08-23 — feat-012 WAVE 3: main.rs wiring + RPC process loop (live-verified against real binary)
+
+Continuation of the same session/user directive as Wave 2. User picked option
+"A" (continue to Wave 3) after Wave 2's report. Built and verified Wave 3 of
+feat-012 (see `plan.md`'s Wave 3 status entry for the full step-by-step and
+`feature_list.json`'s feat-012 evidence for the condensed summary — not
+duplicated here).
+
+Highlights not to lose:
+- New `crates/pirust-coding-agent/src/rpc/run.rs`: `run_rpc_mode`, the real
+  stdin-JSONL/stdout-JSONL process loop wiring Wave 2's `handle_command` to
+  the real world. `main.rs`'s `--mode rpc` "not supported" stub is gone.
+- Two real bugs, both found only via LIVE runs of the actual compiled binary
+  piped real stdin (unit tests calling `handle_command` directly never
+  exercise the process-exit lifecycle where these live):
+  1. First draft used a bare, untracked `tokio::spawn` per stdin line, so
+     `main.rs`'s `std::process::exit` could kill the process mid-write for
+     whatever command hadn't finished yet on stdin-EOF. Fixed: per-line tasks
+     now tracked in a `tokio::task::JoinSet`, drained fully before returning
+     exit code 0 on EOF.
+  2. Even after that fix, a `prompt` command's entire turn (all its
+     `agent_start`/`message_*`/`agent_end`/`agent_settled` events) still went
+     missing on shutdown. Root cause: `mode.rs`'s `Prompt` handler (written in
+     Wave 2) had its OWN inner `tokio::spawn` to ack immediately — invisible
+     to the outer `JoinSet`, so the tracked outer task finished almost
+     instantly while the real work kept running detached and untracked. Fixed
+     by deleting the inner spawn; the outer per-line task now awaits the turn
+     directly, which still keeps different commands concurrent with each
+     other (each stdin line already gets its own task) while making the
+     tracked task's lifetime honestly mean "this command's work is done."
+- `SIGTERM`→143 / `SIGHUP`→129 wired on `#[cfg(unix)]` only — Windows (the
+  current dev machine) has no equivalent, so this specific piece is
+  UNVERIFIED this session, same documented gap as `print_mode::NoSignals`.
+- Live verification: piped `set_thinking_level` + `prompt` into the real
+  compiled `pirust.exe --mode rpc`, stdin held open ~25s via a trailing
+  `sleep` in the pipe source (so the loop wasn't torn down mid-turn), bounded
+  by an outer `timeout`, against the user's real running llama-server. Full
+  expected event stream appeared in order, the model's assistant turn this
+  time actually reached visible text (`"text":"PONG"` — unlike Wave 2's live
+  test where this same small model never got past its `thinking` block for a
+  trivial prompt; that appears to have been request/context-dependent rather
+  than a hard limitation), and the process exited 0 cleanly with empty
+  stderr.
+- Gate: `cargo fmt` (auto-fixed 3 pure-spacing diffs, no logic changes),
+  `cargo clippy -p pirust-coding-agent -p pirust-agent-core --all-targets
+  --no-deps -D warnings` clean, `cargo test -p pirust-coding-agent --test
+  rpc_dispatch` 10/10 still pass unchanged, `cargo test --workspace` 820
+  passed / 2 ignored / 0 failed.
+- Deferred/named, not silent: no automated `#[test]` spawns the real
+  `pirust` binary end-to-end yet (this wave's verification was a manual shell
+  pipeline); no live differential run against real Pi's own `--mode rpc`
+  binary specifically (Wave 1's oracle + live-oracle tapes already pin
+  protocol/event-shape fidelity structurally); `killTrackedDetachedChildren()`
+  on signal still not ported; RPC sessions remain in-memory only, no on-disk
+  v4 session file yet.
+- Resume point: Wave 4 (RpcClient port + black-box tests).
+
+## 2026-08-23 — feat-012 WAVE 2: RPC dispatch loop over an RpcRuntimeHost (oracle-informed + live-verified)
+
+User directive: "build the feature first to test it later," with the user's own
+local llama-server (`ggml-org/Qwen3.5-0.8B-GGUF` at `127.0.0.1:8080`) running for
+testing. Built and verified Wave 2 of feat-012 (see `plan.md`'s Wave 2 section
+for the full step-by-step and `feature_list.json`'s feat-012 evidence for the
+condensed summary — not duplicated here).
+
+Highlights not to lose:
+- Real bug found and fixed while writing this wave: Pi's `success(id, cmd,
+  null)` (used by `cycle_model`/`cycle_thinking_level` when there's nothing to
+  cycle to) emits an explicit `"data":null` key, not an omitted one — JS
+  `null !== undefined`. `RpcResponse::success_with(id, cmd, Value::Null)` is
+  now used for those two cases specifically; easy to have missed since
+  `RpcResponse::success()` (no data arg) omits the key entirely.
+- The live test against the user's real server caught a real test bug (forgot
+  to set `api_key` on the test's own stream fn — llama-server ignores it, but
+  pirust's own client correctly refuses an unauthenticated call, matching
+  Pi's real credential-resolution behavior) and surfaced a genuine, verified
+  (via manual `curl`, not assumed) model characteristic: this particular 0.8B
+  reasoning model burns its entire token budget on a `thinking` block for a
+  trivial prompt and never reaches visible text, even at 8192 max_tokens/60s,
+  and ignores an explicit `thinking:{type:"disabled"}` request param. The live
+  test's assertion was scoped to what actually happened (a real persisted
+  assistant message from a real HTTP round trip) rather than specific text
+  content, to avoid a flaky or dishonest test.
+- `AgentHarness` (pirust-agent-core) gained runtime-mutable model/thinking
+  level (`Mutex`-backed) plus `abort()`/`messages()`/`entries()`/
+  `pending_message_count()` — no external callers of the old signatures
+  existed, so this was a safe, low-risk internal change, not a breaking one.
+- Scope explicitly excludes `main.rs` wiring (`--mode rpc` itself, still Wave
+  3) and every command needing an `AgentSession`-equivalent capability this
+  port doesn't have yet (`fork`/`clone`/`switch_session`/`new_session`/
+  `export_html`/`bash`/`abort_bash`/`get_fork_messages`) — these return a real
+  named error, never a fabricated "Unknown command:".
+- Gate: fmt clean, clippy `-D warnings` clean on the touched crates (confirmed
+  the one clippy error surfaced by `--all-targets` without `--no-deps` is a
+  pre-existing, unrelated `pirust-tui/src/latex.rs` issue reproducing on a
+  clean stash — not touched this wave), `cargo test --workspace`: 820 passed /
+  2 ignored / 0 failed.
+- Deferred (named in `plan.md`'s own step 5): a byte-level oracle replay of
+  `tests/fixtures/pi/rpc/commands.corpus.jsonl` through this dispatch loop —
+  that tape was captured against Pi's own stub `AgentSessionRuntime`/session
+  state, which this harness doesn't reproduce; belongs with Wave 3's live
+  differential instead.
+- Resume point: Wave 3 (main.rs wiring, signals/shutdown, live differential).
 
 ## 2026-08-22 — feat-012 WAVE 1: RPC protocol foundation + oracle (offline + LIVE)
 
@@ -223,9 +326,10 @@ wave delivered the `buildParams` port + the two promised refactors, all green.
 
 ## Current State
 
-**Last Updated:** 2026-08-22
-**Active Feature:** feat-012 — RPC mode (JSON-RPC over stdio) (NOT STARTED — next up;
-feat-008 closed with remaining providers + OAuth SKIPPED BY AUTHOR, see 2026-08-22 entry).
+**Last Updated:** 2026-08-23
+**Active Feature:** feat-012 — RPC mode (JSON-RPC over stdio) (Waves 1-3 DONE,
+Wave 4 next — RpcClient port; feat-008 closed with remaining providers + OAuth
+SKIPPED BY AUTHOR, see 2026-08-22 entry).
 feat-007 DONE (Waves 1-7, commits b71f4f7..3540ec7).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
 **Next feature:** feat-012 (RPC mode); feat-009 (orchestrator) depends on it.

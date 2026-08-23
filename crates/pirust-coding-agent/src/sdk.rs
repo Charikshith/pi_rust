@@ -376,14 +376,25 @@ pub fn create_agent_session(
     assemble_agent_session(options, stream_fn)
 }
 
-/// The pure core of [`create_agent_session`], with the provider [`StreamFn`] injected
-/// rather than built from `auth.json`/settings — this is what
-/// `tests/sdk_canned_turn.rs` drives with a [`pirust_ai::providers::faux::Faux`] stream
-/// function, proving 4a-4e wire together without a real network call.
-pub fn assemble_agent_session(
-    options: CreateAgentSessionOptions<'_>,
-    stream_fn: pirust_agent_core::agent_loop::StreamFn,
-) -> Result<CreateAgentSessionResult, String> {
+/// Tools/system-prompt/model resolution shared by every assembly path — the
+/// `Agent`-based print/interactive path ([`assemble_agent_session`]) and the
+/// `AgentHarness`-based RPC path (feat-012 Wave 3,
+/// [`assemble_agent_harness_session`]) both need identical resolution; only
+/// the final object they build from it differs.
+pub struct ResolvedAgentIngredients {
+    pub system_prompt: String,
+    pub tools: Vec<Arc<dyn AgentTool>>,
+    pub tool_registry: ToolRecord,
+    pub model: Model,
+    pub thinking_level: ThinkingLevel,
+}
+
+/// `sdk.ts:240-289` up to (not including) the final `Agent`/`AgentSession`
+/// assembly: tools (`_rebuildSystemPrompt` :1009-1023), system prompt, and
+/// the initial model + thinking level (`:187-238`).
+fn resolve_agent_ingredients(
+    options: &CreateAgentSessionOptions<'_>,
+) -> Result<ResolvedAgentIngredients, String> {
     let cwd = options.cwd;
 
     // --- tools (sdk.ts:240-246, then AgentSession's _rebuildSystemPrompt :1009-1023) ---
@@ -427,7 +438,6 @@ pub fn assemble_agent_session(
         cwd,
         context_files: None,
     });
-    let result_system_prompt = system_prompt.clone();
 
     // --- model (sdk.ts:187-238) ---
     let resolved = find_initial_model(
@@ -443,27 +453,42 @@ pub fn assemble_agent_session(
         options.model_source,
     )?;
 
-    let model = resolved.model;
-    let model_fallback_message = if model.is_none() {
-        Some(format_no_models_available_message())
-    } else {
-        None
+    let Some(model) = resolved.model else {
+        return Err(format_no_models_available_message());
     };
-    let thinking_level = match &model {
-        None => ThinkingLevel::Off,
-        Some(m) => clamp_thinking_level(m, resolved.thinking_level),
-    };
-    let Some(model) = model else {
-        return Err(model_fallback_message.unwrap_or_default());
-    };
-    let result_model = model.clone();
+    let thinking_level = clamp_thinking_level(&model, resolved.thinking_level);
+
+    Ok(ResolvedAgentIngredients {
+        system_prompt,
+        tools,
+        tool_registry: impls,
+        model,
+        thinking_level,
+    })
+}
+
+/// The pure core of [`create_agent_session`], with the provider [`StreamFn`] injected
+/// rather than built from `auth.json`/settings — this is what
+/// `tests/sdk_canned_turn.rs` drives with a [`pirust_ai::providers::faux::Faux`] stream
+/// function, proving 4a-4e wire together without a real network call.
+pub fn assemble_agent_session(
+    options: CreateAgentSessionOptions<'_>,
+    stream_fn: pirust_agent_core::agent_loop::StreamFn,
+) -> Result<CreateAgentSessionResult, String> {
+    let ResolvedAgentIngredients {
+        system_prompt,
+        tools,
+        tool_registry,
+        model,
+        thinking_level,
+    } = resolve_agent_ingredients(&options)?;
 
     // --- assemble (sdk.ts:289-355) ---
     let settings = options.settings;
 
     let agent_options = AgentOptions {
-        system_prompt,
-        model,
+        system_prompt: system_prompt.clone(),
+        model: model.clone(),
         thinking_level,
         tools,
         messages: Vec::new(),
@@ -483,10 +508,83 @@ pub fn assemble_agent_session(
 
     Ok(CreateAgentSessionResult {
         agent: Agent::new(agent_options),
-        tool_registry: impls,
-        model_fallback_message,
-        model: result_model,
+        tool_registry,
+        model_fallback_message: None,
+        model,
         thinking_level,
-        system_prompt: result_system_prompt,
+        system_prompt,
     })
+}
+
+/// feat-012 Wave 3 — the `AgentHarness`-based counterpart to
+/// [`assemble_agent_session`], for `--mode rpc`. Shares the same ingredient
+/// resolution; builds an [`pirust_agent_core::harness::AgentHarness`] over the
+/// caller-supplied [`pirust_agent_core::harness::session::v4::session::Session`]
+/// instead of an [`Agent`] over a [`crate::session::SessionManager`].
+///
+/// **Named residual**: this session is not yet persisted to a real on-disk
+/// v4 session file — `main.rs` passes an in-memory store this wave. RPC-mode
+/// sessions and print/interactive-mode sessions consequently use two
+/// different internal representations (`AgentHarness`/v4 vs `Agent`/v3) with
+/// no on-disk RPC session file yet; unifying them (or giving RPC a real file)
+/// is future work, not silently assumed done.
+pub fn assemble_agent_harness_session<St>(
+    options: CreateAgentSessionOptions<'_>,
+    stream_fn: pirust_agent_core::agent_loop::StreamFn,
+    session: pirust_agent_core::harness::session::v4::session::Session<St>,
+) -> Result<
+    (
+        pirust_agent_core::harness::AgentHarness<St>,
+        ToolRecord,
+        Model,
+        ThinkingLevel,
+    ),
+    String,
+>
+where
+    St: pirust_agent_core::harness::session::v4::types::SessionStorage + Send + Sync + 'static,
+{
+    let ResolvedAgentIngredients {
+        system_prompt,
+        tools,
+        tool_registry,
+        model,
+        thinking_level,
+    } = resolve_agent_ingredients(&options)?;
+
+    let mut harness_options =
+        pirust_agent_core::harness::AgentHarnessOptions::new(stream_fn, model.clone(), session);
+    harness_options.tools = tools;
+    harness_options.system_prompt = system_prompt;
+    harness_options.thinking_level = thinking_level;
+
+    let harness = pirust_agent_core::harness::AgentHarness::new(harness_options);
+    Ok((harness, tool_registry, model, thinking_level))
+}
+
+/// `create_agent_session`'s counterpart for the RPC path: builds the real
+/// `auth.json`/settings-backed [`pirust_agent_core::agent_loop::StreamFn`]
+/// then delegates to [`assemble_agent_harness_session`].
+pub fn create_agent_harness_session<St>(
+    options: CreateAgentSessionOptions<'_>,
+    session: pirust_agent_core::harness::session::v4::session::Session<St>,
+) -> Result<
+    (
+        pirust_agent_core::harness::AgentHarness<St>,
+        ToolRecord,
+        Model,
+        ThinkingLevel,
+    ),
+    String,
+>
+where
+    St: pirust_agent_core::harness::session::v4::types::SessionStorage + Send + Sync + 'static,
+{
+    let stream_fn = build_stream_fn(
+        options.auth_path.clone(),
+        options.settings.clone(),
+        options.session_id.clone(),
+        options.runtime_api_key.clone(),
+    );
+    assemble_agent_harness_session(options, stream_fn, session)
 }

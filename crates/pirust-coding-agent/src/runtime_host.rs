@@ -545,7 +545,7 @@ impl TuiRuntimeInfo for SingleTurnSession {
 /// union), losslessly re-serialized through `Value` — the same seam `print_mode.rs`
 /// already assumes (see its module docs on why `AgentSessionEvent` cannot reuse
 /// `AgentEvent` directly).
-fn to_session_event(event: AgentEvent) -> crate::print_mode::AgentSessionEvent {
+pub(crate) fn to_session_event(event: AgentEvent) -> crate::print_mode::AgentSessionEvent {
     use crate::print_mode::AgentSessionEvent as Out;
     let value = |m: &AgentMessage| serde_json::to_value(m).unwrap_or(Value::Null);
     match event {

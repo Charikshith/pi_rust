@@ -168,18 +168,20 @@ async fn run(parsed: args::Args) -> i32 {
     }
     let mut console = GuardConsole(Arc::clone(&guard));
 
-    // Step 10 (`main.ts:546-549`): rpc mode is feat-012, not ported.
-    if app_mode == AppMode::Rpc {
-        guard.error("Error: --mode rpc is not supported");
-        return 1;
-    }
-
     // Step 11 (`main.ts:551-552`).
     if let Err(exit) = session::validate_fork_flags(&parsed, &mut console) {
         return exit.code;
     }
     if let Err(exit) = session::validate_session_id_flags(&parsed, &mut console) {
         return exit.code;
+    }
+
+    // feat-012: `@file` args are not supported in RPC mode (feature_list.json's own scope
+    // line for this guard) — RPC's initial content comes entirely from `prompt` commands
+    // over the wire, never from CLI-supplied file arguments.
+    if app_mode == AppMode::Rpc && !parsed.file_args.is_empty() {
+        guard.error("Error: @file args are not supported in RPC mode");
+        return 1;
     }
 
     let cwd = pirust_tools::path_utils::cwd();
@@ -218,53 +220,69 @@ async fn run(parsed: args::Args) -> i32 {
     // > settings. Both CLI and env forms go through the same tilde-expansion helper this
     // wave (a documented narrowing from Pi's two distinct path-normalisation functions —
     // see `plan.md`'s Wave 5 recon).
-    let session_dir = match resolve_session_dir(&config_env, &parsed, &settings_manager) {
-        Ok(dir) => dir,
-        Err(error) => {
-            guard.error(&format!("Error: {error}"));
+    //
+    // Steps 15-17 (session-dir resolution, the v3 `SessionManager`, the missing-cwd check,
+    // `--name`) are SKIPPED for `--mode rpc` (feat-012 Wave 3): RPC sessions are built on
+    // `AgentHarness`'s v4 session tree, not the v3 `SessionManager` every other mode uses —
+    // see `sdk::assemble_agent_harness_session`'s module docs for why the two don't share a
+    // session file this wave. `session_manager` is therefore `None` for RPC and `Some` (and
+    // only ever unwrapped) for every other mode.
+    let mut session_manager = if app_mode == AppMode::Rpc {
+        None
+    } else {
+        let session_dir = match resolve_session_dir(&config_env, &parsed, &settings_manager) {
+            Ok(dir) => dir,
+            Err(error) => {
+                guard.error(&format!("Error: {error}"));
+                return 1;
+            }
+        };
+
+        let session_env = SessionEnv::new(config_env.clone(), cwd.clone());
+        let mut session_prompts = HeadlessPrompts;
+        let session_manager = {
+            let mut io = SessionIo {
+                console: &mut console,
+                prompts: &mut session_prompts,
+            };
+            match session::create_session_manager(
+                &session_env,
+                &parsed,
+                &cwd,
+                session_dir.as_deref(),
+                &mut io,
+            ) {
+                Ok(manager) => manager,
+                Err(exit) => return exit.code,
+            }
+        };
+
+        // Step 16 (`main.ts:579-590`): non-interactive always reports and exits 1 — this
+        // wave never reaches the interactive prompt branch at all.
+        if let Some(issue) = missing_session_cwd_issue(&session_manager, &cwd) {
+            guard.error(&format!(
+                "Error: {}",
+                format_missing_session_cwd_error(&issue)
+            ));
             return 1;
         }
+
+        Some(session_manager)
     };
 
-    let session_env = SessionEnv::new(config_env.clone(), cwd.clone());
-    let mut session_prompts = HeadlessPrompts;
-    let mut session_manager = {
-        let mut io = SessionIo {
-            console: &mut console,
-            prompts: &mut session_prompts,
-        };
-        match session::create_session_manager(
-            &session_env,
-            &parsed,
-            &cwd,
-            session_dir.as_deref(),
-            &mut io,
-        ) {
-            Ok(manager) => manager,
-            Err(exit) => return exit.code,
-        }
-    };
-
-    // Step 16 (`main.ts:579-590`): non-interactive always reports and exits 1 — this wave
-    // never reaches the interactive prompt branch at all.
-    if let Some(issue) = missing_session_cwd_issue(&session_manager, &cwd) {
-        guard.error(&format!(
-            "Error: {}",
-            format_missing_session_cwd_error(&issue)
-        ));
-        return 1;
-    }
-
-    // Step 17 (`main.ts:592-599`).
+    // Step 17 (`main.ts:592-599`). The empty-value check applies to every mode; the actual
+    // append is a no-op for `--mode rpc` (no `session_manager` this wave, see above).
     if let Some(name) = &parsed.name {
         let trimmed = name.trim();
         if trimmed.is_empty() {
             guard.error("Error: --name requires a non-empty value");
             return 1;
         }
-        if let Err(error) = session_manager.append_session_info(trimmed) {
-            guard.error(&format!("Error: {error}"));
-            return 1;
+        if let Some(session_manager) = session_manager.as_mut() {
+            if let Err(error) = session_manager.append_session_info(trimmed) {
+                guard.error(&format!("Error: {error}"));
+                return 1;
+            }
         }
     }
 
@@ -355,6 +373,64 @@ async fn run(parsed: args::Args) -> i32 {
     let runtime_api_key = parsed.api_key.clone();
 
     let settings_manager = Arc::new(settings_manager);
+
+    // feat-012 Wave 3: `--mode rpc` builds an `AgentHarness` over an in-memory v4 session
+    // (no on-disk RPC session file yet — see `sdk::assemble_agent_harness_session`'s module
+    // docs) and hands off to the RPC command loop instead of print/interactive mode.
+    if app_mode == AppMode::Rpc {
+        let rpc_session_id = pirust_agent_core::harness::session::uuid::create_session_id();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let storage = Arc::new(
+            pirust_agent_core::harness::session::v4::memory::InMemorySessionStorage::new(
+                pirust_agent_core::harness::session::v4::types::SessionMetadata {
+                    id: rpc_session_id.clone(),
+                    created_at,
+                    parent_session_id: None,
+                },
+            ),
+        );
+        let v4_session = pirust_agent_core::harness::session::v4::session::Session::new(storage);
+
+        let harness_result = sdk::create_agent_harness_session(
+            CreateAgentSessionOptions {
+                cwd: &cwd,
+                model_source: &model_runtime,
+                auth_path,
+                settings: Arc::clone(&settings_manager),
+                cli_provider: parsed.provider.as_deref(),
+                cli_model: parsed.model.as_deref(),
+                tools: parsed.tools.as_deref(),
+                no_tools: parsed.no_tools == Some(true),
+                exclude_tools: parsed.exclude_tools.as_deref(),
+                session_id: Some(rpc_session_id),
+                runtime_api_key,
+            },
+            v4_session,
+        );
+        let (harness, _tool_registry, _model, _thinking_level) = match harness_result {
+            Ok(result) => result,
+            Err(message) => {
+                guard.error(&message);
+                return 1;
+            }
+        };
+
+        let model_source: Arc<dyn pirust_coding_agent::models::ModelSource + Send + Sync> =
+            Arc::new(model_runtime);
+        let host = Arc::new(pirust_coding_agent::rpc::host::RpcRuntimeHost::new(
+            Arc::new(harness),
+            model_source,
+        ));
+        let exit_code = pirust_coding_agent::rpc::run::run_rpc_mode(host, Arc::clone(&guard)).await;
+        guard.restore_stdout();
+        return exit_code;
+    }
+
+    let mut session_manager =
+        session_manager.expect("session_manager is Some for every non-rpc mode");
     let session_id = session_manager.get_session_id().to_string();
     let create_result = sdk::create_agent_session(CreateAgentSessionOptions {
         cwd: &cwd,

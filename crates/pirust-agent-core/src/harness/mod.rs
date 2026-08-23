@@ -198,6 +198,9 @@ struct HarnessShared<St: V4SessionStorage + Send + Sync + 'static> {
     follow_up_queue: Mutex<Vec<AgentMessage>>,
     /// Next-turn queue count reported in `settled` (agent-harness.ts:511).
     next_turn_count: Mutex<usize>,
+    /// The in-flight turn's cancellation token, set for the duration of
+    /// `execute_turn` — `abort()` cancels it (feat-012 RPC `abort` command).
+    active_token: Mutex<Option<CancellationToken>>,
 }
 
 impl<St: V4SessionStorage + Send + Sync + 'static> HarnessShared<St> {
@@ -375,8 +378,10 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarnessOptions<St> {
 pub struct AgentHarness<St: V4SessionStorage + Send + Sync + 'static> {
     shared: Arc<HarnessShared<St>>,
     provider: StreamFn,
-    model: Model,
-    thinking_level: ThinkingLevel,
+    /// Interior-mutable so `set_model`/`set_thinking_level` (feat-012 RPC) can
+    /// mutate through `&self` — matches `Agent`'s own `Mutex<AgentState>` pattern.
+    model: Mutex<Model>,
+    thinking_level: Mutex<ThinkingLevel>,
     system_prompt: String,
     tools: Vec<Arc<dyn AgentTool>>,
     active_tool_names: Vec<String>,
@@ -397,12 +402,13 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
             steer_queue: Mutex::new(Vec::new()),
             follow_up_queue: Mutex::new(Vec::new()),
             next_turn_count: Mutex::new(0),
+            active_token: Mutex::new(None),
         });
         Self {
             shared,
             provider: options.provider,
-            model: options.model,
-            thinking_level: options.thinking_level,
+            model: Mutex::new(options.model),
+            thinking_level: Mutex::new(options.thinking_level),
             system_prompt: options.system_prompt,
             tools: options.tools,
             active_tool_names,
@@ -425,8 +431,53 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     }
 
     /// The active model.
-    pub fn model(&self) -> &Model {
-        &self.model
+    pub fn model(&self) -> Model {
+        self.model.lock().unwrap().clone()
+    }
+
+    /// Replace the active model (feat-012 RPC `set_model`/`cycle_model`).
+    /// Applies to the next turn — matches `Agent::set_model`'s copy-on-assign.
+    pub fn set_model(&self, model: Model) {
+        *self.model.lock().unwrap() = model;
+    }
+
+    /// The current reasoning level.
+    pub fn thinking_level(&self) -> ThinkingLevel {
+        *self.thinking_level.lock().unwrap()
+    }
+
+    /// Replace the reasoning level (feat-012 RPC `set_thinking_level`).
+    pub fn set_thinking_level(&self, level: ThinkingLevel) {
+        *self.thinking_level.lock().unwrap() = level;
+    }
+
+    /// Queued steer + follow-up message count (feat-012 RPC `get_state`'s
+    /// `pendingMessageCount`).
+    pub fn pending_message_count(&self) -> usize {
+        self.shared.steer_queue.lock().unwrap().len()
+            + self.shared.follow_up_queue.lock().unwrap().len()
+    }
+
+    /// The current branch's context messages (feat-012 RPC `get_messages` /
+    /// `get_state.messageCount` / `get_last_assistant_text`).
+    pub fn messages(&self) -> Vec<AgentMessage> {
+        build_v4_context_messages(&self.shared.session).unwrap_or_default()
+    }
+
+    /// The current branch's entries, root-first (feat-012 RPC `get_entries`).
+    pub fn entries(&self) -> Result<Vec<Entry>, AgentHarnessError> {
+        v4_branch_entries(&self.shared.session)
+            .map_err(|e| AgentHarnessError::new(AgentHarnessErrorCode::Session, e.message.clone()))
+    }
+
+    /// Cancel the in-flight turn, if any (feat-012 RPC `abort`). Best-effort:
+    /// this port has no distinct aborted-vs-settled terminal event yet, so
+    /// cancellation surfaces through the loop's own early-stop behavior —
+    /// named here, not silently assumed identical to Pi's `session.abort()`.
+    pub fn abort(&self) {
+        if let Some(token) = self.shared.active_token.lock().unwrap().as_ref() {
+            token.cancel();
+        }
     }
 
     /// The tools currently selected as active (`activeToolNames` order).
@@ -465,10 +516,10 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
     /// session; the steering / follow-up drains pull from the internal queues.
     fn create_loop_config(&self) -> AgentLoopConfig {
         let shared = Arc::clone(&self.shared);
-        let model = self.model.clone();
+        let model = self.model();
         let system_prompt = self.system_prompt.clone();
         let active_tools = self.active_tools();
-        let thinking_level = self.thinking_level;
+        let thinking_level = self.thinking_level();
 
         let prepare_next_turn = {
             let shared = Arc::clone(&shared);
@@ -568,6 +619,7 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
         let stream_fn = self.create_stream_fn();
         let mut sink = self.event_sink();
         let token = CancellationToken::new();
+        *self.shared.active_token.lock().unwrap() = Some(token.clone());
 
         let new_messages = run_agent_loop(
             prompts,
@@ -578,6 +630,7 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
             Some(stream_fn),
         )
         .await;
+        *self.shared.active_token.lock().unwrap() = None;
 
         for message in new_messages.iter().rev() {
             if let AgentMessage::Llm(Message::Assistant(assistant)) = message {
@@ -723,8 +776,10 @@ pub struct CompactionOutcome {
     pub retained_tail: Vec<AgentMessage>,
 }
 
-/// Build a `user` prompt message (agent-harness.ts:37-41).
-fn user_message(text: &str) -> AgentMessage {
+/// Build a `user` prompt message (agent-harness.ts:37-41). `pub` so callers
+/// (feat-012 RPC `steer`/`follow_up`) can build the same shape the harness
+/// itself uses for `prompt`.
+pub fn user_message(text: &str) -> AgentMessage {
     AgentMessage::Llm(Message::User(UserMessage {
         role: UserRole::User,
         content: UserMessageContent::Blocks(vec![UserContent::Text(TextContent::new(text))]),
