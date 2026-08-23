@@ -395,6 +395,22 @@ fn thinking_level_supported(field: Option<&Option<String>>, is_off: bool) -> boo
     }
 }
 
+/// Port of real Pi's `nonNegativeNumber` (`packages/server/src/protocol.ts`):
+/// `toProtocolModelMetadata` clamps every cost field through this before it
+/// reaches the wire, since the builtin catalog carries real Pi's own
+/// unknown-pricing sentinel (`-1_000_000`, e.g. `openrouter/auto`) which
+/// would otherwise fail `ModelCostSchema`'s `minimum: 0` on the wire. This
+/// crate's own `model_metadata` below skipped that clamp until a real
+/// `pirust-orchestrator` binary was driven through a real handshake against
+/// the real builtin catalog and hit it live.
+fn non_negative_number(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
 pub fn model_metadata(model: &Model, authenticated: bool) -> ModelMetadata {
     let map = model.thinking_level_map.as_ref();
     let mut supported = Vec::new();
@@ -431,13 +447,17 @@ pub fn model_metadata(model: &Model, authenticated: bool) -> ModelMetadata {
                 pirust_ai::types::Modality::Image => ModelInputKind::Image,
             })
             .collect(),
-        context_window: model.context_window as i64,
-        max_tokens: model.max_tokens as i64,
+        // Real Pi: `Math.max(1, Math.floor(model.contextWindow))` /
+        // `...maxTokens`. `model.context_window`/`max_tokens` are already
+        // integer `u64`s here (no `Math.floor` equivalent needed), so only
+        // the "at least 1" floor is ported.
+        context_window: (model.context_window as i64).max(1),
+        max_tokens: (model.max_tokens as i64).max(1),
         cost: ModelCost {
-            input: model.cost.rates.input,
-            output: model.cost.rates.output,
-            cache_read: model.cost.rates.cache_read,
-            cache_write: model.cost.rates.cache_write,
+            input: non_negative_number(model.cost.rates.input),
+            output: non_negative_number(model.cost.rates.output),
+            cache_read: non_negative_number(model.cost.rates.cache_read),
+            cache_write: non_negative_number(model.cost.rates.cache_write),
         },
         supported_thinking_levels: supported,
         authenticated,

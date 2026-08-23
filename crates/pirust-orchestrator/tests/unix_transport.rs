@@ -4,9 +4,12 @@
 //! send/close ordering. `#[cfg(unix)]`-only — see `crates/pirust-orchestrator
 //! /src/transports/unix/mod.rs`'s module doc. This file compiles and
 //! clippy-lints clean cross-compiled to `x86_64-unknown-linux-gnu` from this
-//! Windows dev machine; its actual pass/fail when RUN is unverified here
-//! (named, not silent) since a cross-compiled Linux test binary cannot
-//! execute on Windows. Runs wherever this crate is built on Linux/macOS/CI.
+//! Windows dev machine. **Update 2026-08-23:** its actual pass/fail when RUN
+//! is no longer unverified — this Windows dev machine has Podman (WSL2-
+//! backed) installed, so `podman run --rm -v <repo>:/workspace -w /workspace
+//! docker.io/library/rust:1 cargo test -p pirust-orchestrator` runs this
+//! suite for real against a real `AF_UNIX` socket on real Linux: 6/6 passed.
+//! Also runs wherever this crate is built on Linux/macOS/CI.
 
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::sync::Arc;

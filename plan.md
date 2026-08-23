@@ -130,8 +130,15 @@ but its evidence must say so plainly, the same way `sdk.rs`'s
    (`#[cfg(unix)]`, ported from `unix.test.ts`/`unix-connection.test.ts`)
    type-checks and clippy-lints clean cross-compiled to
    `x86_64-unknown-linux-gnu` (which caught and this wave fixed two real
-   `Send`-future bugs) but has not been RUN on this dev machine, named not
-   silent.
+   `Send`-future bugs). **Update 2026-08-23 (later session):** the "has not
+   been RUN on this dev machine" gap is now closed — run for real inside a
+   `rust:1` Linux container (Podman, WSL2 backend, already present on this
+   Windows machine) via `podman run --rm -v <repo>:/workspace -w /workspace
+   docker.io/library/rust:1 cargo test -p pirust-orchestrator --test
+   unix_transport`: 6/6 passed against a real `AF_UNIX` socket, not just
+   type-checked. No new async runtime or transport crate needed — tokio
+   stays; this only needed a real Linux execution environment on the dev
+   machine.
 
 6. **Wave 6 - pirust-side addition (named as such, not Pi-verified): a real
    `PiServerService` over `AgentHarness` + a runnable `pirust-orchestrator`
@@ -159,6 +166,28 @@ but its evidence must say so plainly, the same way `sdk.rs`'s
    `agent_service` code and `main.rs`'s trivial `#[cfg(unix)]` split were
    therefore verified by native Windows fmt/clippy/test only, not also
    cross-compiled like Wave 5's `transports/unix` code was.
+
+   **Update 2026-08-23 (later session):** the "run the actual binary against
+   a real Unix socket" gap is now closed the same way as Wave 5's - native
+   build inside a `rust:1` Linux container (Podman/WSL2, already on this
+   machine) sidesteps the `ring` cross-compiler problem entirely since it is
+   a native build, not a cross-compile. New `tests/real_binary_unix_socket.rs`
+   spawns the real compiled `pirust-orchestrator` binary and drives a real
+   client through a real handshake over a real `AF_UNIX` socket. First run
+   found a REAL bug: the real builtin catalog's `openrouter/auto` /
+   `openrouter/auto-beta` entries carry real Pi's own unknown-pricing
+   sentinel (`cost.input = -1_000_000`), and `agent_service::conversions::
+   model_metadata` was missing the `nonNegativeNumber`/`Math.max(1, ...)`
+   clamps real Pi's own `toProtocolModelMetadata`
+   (`packages/server/src/protocol.ts`) applies before putting cost/context/
+   max-token fields on the wire - so the real binary panicked building its
+   own `ServerHello` snapshot. Fixed by porting that clamp exactly (a
+   `non_negative_number` helper + a `.max(1)` floor on context_window/
+   max_tokens). Re-verified in the same container: `cargo test -p
+   pirust-orchestrator` 41 passed/10 suites/0 failed, `clippy --all-targets
+   --no-deps -D warnings` clean, `fmt --check` clean. Only remaining named
+   residual: real end-to-end verification against a live model provider
+   (not the `Faux` double).
 
 ## Notes for whoever resumes
 
