@@ -109,28 +109,56 @@ but its evidence must say so plainly, the same way `sdk.rs`'s
      `testing/service.rs` double directly. Real oracle-replay parity against
      those two TS test files remains open for a future wave.
 
-5. **Wave 5 - Unix transport**
-   - Resolve the Windows question named in analysis doc §8 FIRST (try a
-     real cross-platform local-socket crate - `interprocess` - before
-     assuming named pipes are needed; this is the dev machine's own OS, so
-     it can be verified directly, not just reasoned about).
-   - `transports/unix.rs`: port `listener.ts`'s bind-then-link scheme,
-     platform-conditional path-length check (107 Linux / 103 elsewhere),
-     stale-socket probe-and-cleanup, backpressure (`max_pending_bytes`),
-     graceful-close-with-deadline.
-   - Oracle: `test/unix.test.ts` + `test/unix-connection.test.ts` scenarios
-     (fragmented hello, version/hello-ordering enforcement, oversized-frame
-     handling, stale-socket recovery) replayed against the Rust listener
-     using a Rust `ProtocolTestClient` equivalent (`testing/client.rs`).
-   - Verify: `cargo test -p pirust-orchestrator` full conformance battery
-     green, clippy/fmt clean, `./init.sh` green.
+5. **Wave 5 - Unix transport — DONE 2026-08-23** (see `feature_list.json`'s
+   feat-009 evidence for the full writeup). Windows question (analysis doc
+   §8) resolved, not silently: `interprocess` was evaluated and NOT adopted
+   (its Windows backend is a named pipe, not a real `AF_UNIX` filesystem
+   socket — no inode identity, no `lstat`/`link`/`chmod` semantics; adopting
+   it would not have let this dev machine verify `listener.ts`'s actual
+   behavior any better than not using it). Shipped instead: `transports/
+   unix/options.rs` (pure, cross-platform — path validation, option
+   resolution, owned-bind-path SHA-256 hash); `transports/unix/listener.rs`
+   (`#[cfg(unix)]`, real 1:1 port of `UnixListener`/`UnixByteConnection`
+   against `tokio::net::UnixListener`/`UnixStream` — bind-then-link,
+   stale-socket cleanup, backpressure, graceful close); `testing/client.rs`
+   (`ProtocolTestClient`, cross-platform over a `WireChannel` trait, port of
+   `testing/client.ts`); `testing/duplex.rs` (a NEW, non-Pi in-memory
+   transport double so the transport-agnostic conformance battery runs over
+   real async byte I/O on this Windows dev machine). Verification split
+   honestly: `tests/conformance.rs` (11 tests, cross-platform via the duplex
+   double) actually RUNS and passes here; `tests/unix_transport.rs`
+   (`#[cfg(unix)]`, ported from `unix.test.ts`/`unix-connection.test.ts`)
+   type-checks and clippy-lints clean cross-compiled to
+   `x86_64-unknown-linux-gnu` (which caught and this wave fixed two real
+   `Send`-future bugs) but has not been RUN on this dev machine, named not
+   silent.
 
 6. **Wave 6 - pirust-side addition (named as such, not Pi-verified): a real
    `PiServerService` over `AgentHarness` + a runnable `pirust-orchestrator`
-   binary.** Only start this after Waves 1-5 are gated green. Scope and
-   test strategy (scripted `Faux` provider through a real `AgentHarness`,
-   NOT an oracle replay - there is nothing in Pi to replay against) to be
-   planned concretely once Wave 5 lands.
+   binary — DONE 2026-08-23** (see `feature_list.json`'s feat-009 evidence
+   for the full writeup). New `crates/pirust-orchestrator/src/agent_service/
+   {mod,conversions,runtime,service}.rs`: `AgentPiSessionRuntime`
+   (`PiSessionRuntime` over one real `AgentHarness` per session — one
+   instance per session, permanent single harness-subscription, since
+   `AgentHarness::subscribe` has no unsubscribe) and `AgentServerService`
+   (`PiServerService`, builds harnesses via `pirust-coding-agent`'s existing
+   `sdk::create_agent_harness_session` rather than reimplementing model/
+   tool/session wiring). `main.rs` replaced with a real `--socket <path>`
+   binary reusing `pirust-coding-agent`'s settings/auth/model-runtime
+   bootstrap directly (not a CLI-parity clone — model/thinking choices move
+   per-session over the wire instead of CLI flags, named not silent).
+   Tested per the stated strategy: `tests/agent_service_e2e.rs` drives a
+   real `AgentServerService`/`AgentHarness` (scripted `Faux` provider, no
+   live network) through the actual wire protocol (hello/create/attach/
+   prompt over `DuplexTransport`), asserting a real assistant transcript
+   item comes back — not an oracle replay, since none exists for this
+   addition. Verification note (named, not silent): adding `pirust-ai` as a
+   dependency pulls in `reqwest`/`ring` transitively, which broke Wave 5's
+   free `x86_64-unknown-linux-gnu` cross-check trick for this crate (`ring`
+   needs a C cross-compiler this Windows dev machine doesn't have) — the new
+   `agent_service` code and `main.rs`'s trivial `#[cfg(unix)]` split were
+   therefore verified by native Windows fmt/clippy/test only, not also
+   cross-compiled like Wave 5's `transports/unix` code was.
 
 ## Notes for whoever resumes
 

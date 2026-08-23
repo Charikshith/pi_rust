@@ -33,3 +33,19 @@ futures = { workspace = true }      # Promise.all-equivalent concurrent awaits (
 # fresh, minimal dep, not a duplicate of uuid.rs's v7 generator). Already
 # resolved transitively at 1.24.0 (Cargo.lock) via other workspace members.
 uuid = { version = "1", features = ["v4"] }
+# Wave 5: transports/unix's owned-bind-path hashing (getOwnedBindPath).
+sha2 = { workspace = true }
+# Wave 6: the real AgentHarness-backed PiServerService + runnable binary —
+# a pirust-side addition, not a port (plan.md/feature_list.json both say
+# so). Reuses pirust-coding-agent's sdk.rs (harness assembly, model/auth
+# resolution) rather than reimplementing it.
+pirust-agent-core = { workspace = true }
+pirust-ai = { workspace = true }
+pirust-coding-agent = { workspace = true }
+tokio-util = { workspace = true } # CancellationToken, matching agent-core's own use
+
+[dev-dependencies]
+# Wave 5: tests/unix_transport.rs (`#[cfg(unix)]`) needs real scratch
+# directories for socket-file lifecycle scenarios, same as pirust-tools'
+# existing use for fixture rebuilding.
+tempfile = { workspace = true }

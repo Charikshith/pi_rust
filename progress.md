@@ -8,6 +8,153 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
+## 2026-08-23 — feat-009 WAVE 6 DONE — feat-009 CLOSED (all 6 waves)
+
+Built via a delegated fork (user directive: "do it using subagents"),
+independently re-verified afterward rather than trusted at face value —
+per this project's own recorded fork incidents, checked `git log`/`git
+status` FIRST, before reading anything else the fork reported.
+
+- New `crates/pirust-orchestrator/src/agent_service/{mod,conversions,
+  runtime,service}.rs`: `AgentPiSessionRuntime` (`PiSessionRuntime` over one
+  real `AgentHarness` per session — one instance created at
+  `create_session` and reused on every later `open_session`, not a fresh
+  wrapper per acquire, specifically because `AgentHarness::subscribe` has
+  no unsubscribe and a fresh-wrapper design would leak one permanent
+  subscription per attach cycle) and `AgentServerService` (`PiServerService`,
+  builds each session's harness via `pirust-coding-agent`'s existing
+  `sdk::create_agent_harness_session` — the same machinery `--mode rpc`
+  already uses — rather than reimplementing model/tool/session wiring).
+  `conversions.rs` bridges agent-core/pi-ai runtime types onto the wire
+  schema (`SessionPhase`↔`AgentHarnessPhase`, `HarnessEvent::Loop(AgentEvent)`
+  →`TranscriptProgress`, `Entry` list→`TranscriptItem` list) — all named,
+  not silently invented, since there's no Pi construction site to check any
+  of it against (this whole module is a pirust-side addition, its own
+  module doc says so plainly).
+- `main.rs` replaced with a real `--socket <path>` binary: runs
+  `pirust-coding-agent`'s own migrations/`SettingsManager`/`AuthStorage`/
+  `ModelRuntime` bootstrap unmodified, builds a real `AgentServerService`,
+  wires it into `PiServer` + Wave 5's `transports::unix::create_unix_listener`
+  (`#[cfg(unix)]`, clean runtime error elsewhere), blocks on ctrl-c, closes
+  gracefully. **Named scope, not silent:** not a CLI-parity clone of
+  `pirust-coding-agent`'s own `main.rs` — model/thinking choices move
+  per-session over the wire instead of CLI flags, since one process serves
+  many concurrent sessions here.
+- **Tested per plan.md's own stated strategy** (scripted `Faux` provider
+  through a real `AgentHarness`, NOT an oracle replay — none exists): new
+  `tests/agent_service_e2e.rs` drives a real `AgentServerService`/
+  `AgentHarness` through the ACTUAL wire protocol (hello→create→attach→
+  prompt over Wave 5's `DuplexTransport`, real CBOR/framing codec, not
+  direct method calls) and asserts the `Prompt` response's
+  `SessionSnapshot.transcript` contains a real `Complete` assistant item
+  carrying the Faux's exact canned text — proves the full chain (wire →
+  service → harness turn → runtime → conversions → wire) actually works,
+  not just that the harness alone works.
+- **Independent re-verification this session** (not just the fork's own
+  report): `git log`/`git status` confirmed HEAD unchanged and no
+  divergence from `origin/master` — no commits or pushes happened. Two
+  stray 0-byte debris files (shell artifacts, unrelated to the fork's own
+  file list) found and removed. Re-ran `cargo fmt --check`, `cargo clippy
+  -p pirust-orchestrator --all-targets --no-deps -D warnings` (clean),
+  `cargo build -p pirust-orchestrator --bin pirust-orchestrator` (builds),
+  `cargo test -p pirust-orchestrator` (40 passed/9 suites), `cargo test
+  --workspace` (867 passed/2 ignored/0 failed) — all matched the fork's
+  reported numbers.
+- **Verification limitation found this session (named, not silent):**
+  Wave 5 could cross-compile-verify its `#[cfg(unix)]` code for free via
+  `cargo check/clippy --target x86_64-unknown-linux-gnu`. That trick no
+  longer works for this crate as of Wave 6 — adding `pirust-ai` pulls in
+  `reqwest`'s rustls-tls stack including `ring`, whose build script needs a
+  C cross-compiler (`x86_64-linux-gnu-gcc`) this Windows dev machine
+  doesn't have. The new `agent_service` code has no `#[cfg(unix)]` surface
+  of its own; `main.rs`'s only split is a two-line wrapper calling Wave 5's
+  already-cross-verified `create_unix_listener` — so the residual risk is
+  small, but this wave's Windows-only-verified surface is real and named,
+  not silently presented as equally verified to Wave 5's.
+- **feat-009 is now DONE — all 6 planned waves shipped.** Named residuals,
+  not blockers (consistent with feat-005/012's own precedent of naming a
+  live/cross-platform gap rather than claiming full parity): no live
+  end-to-end run against a real provider (only the Faux double); the
+  binary has never been run against a real Unix socket on Linux/macOS/CI.
+- **Resume point:** feat-010 (dynamic WASM extensions) is the only
+  remaining not-started feature.
+
+## 2026-08-23 — feat-009 WAVE 5 DONE (Unix transport, split verification)
+
+Builds the Unix-domain-socket transport on top of Wave 4b's live `PiServer`
+state machine: `transports/unix/{mod,options,listener}.rs`, `testing/
+client.rs` (`ProtocolTestClient`), and `testing/duplex.rs` (a new,
+non-Pi in-memory transport double).
+
+- **Windows question (analysis doc §8) resolved first, not silently:**
+  evaluated `interprocess` (the plan's own suggested first try) and did NOT
+  adopt it — its Windows backend is a named pipe, not a real `AF_UNIX`
+  filesystem socket, so it has no inode identity, no `lstat`/`link`/`chmod`
+  semantics, and no filesystem path collision behavior. Adopting it would
+  not have let this dev machine verify `listener.ts`'s actual bind-then-link
+  behavior any better than skipping it, while adding a second,
+  non-matching transport and a new dependency for no verification benefit.
+- New `crates/pirust-orchestrator/src/transports/unix/options.rs`
+  (unconditionally compiled — pure path validation, option resolution,
+  SHA-256 owned-bind-path hashing, none of it touches an OS socket) +
+  `listener.rs` (`#[cfg(unix)]`, the real 1:1 port of `UnixListener`/
+  `UnixByteConnection` against `tokio::net::UnixListener`/`UnixStream`:
+  bind-then-hardlink-into-place, `lstat`/`rename`-based stale-socket
+  probe-and-cleanup with dev+ino identity, platform path-length limit via a
+  `cfg!` check, `max_pending_bytes` backpressure, graceful-close-with-
+  deadline via a `tokio::sync::OnceCell` whose close routine shares the
+  same `tokio::sync::Mutex` as `send()` around the write half — this is
+  what makes "a close blocks behind an in-flight write" true structurally).
+- New `testing/client.rs`: `ProtocolTestClient`, a faithful port of
+  `testing/client.ts`, made cross-platform by being generic over a
+  `WireChannel` trait — a `watch::Sender<u64>` generation counter replaces
+  TS's `Set<MessageWaiter>` registry (named, not silent: `watch::Receiver
+  ::changed()` compares version numbers, so it cannot miss an update that
+  lands between a waiter's check and its await, unlike a naive `Notify`).
+- New `testing/duplex.rs`: **NOT a Pi port** (named in its own module doc)
+  — an in-memory `tokio::io::duplex`-backed `PiServerListener`/
+  `ByteConnection` pair invented this wave specifically so the
+  transport-agnostic half of `conformance.test.ts`'s battery could run over
+  a REAL async byte stream, cross-platform, on this Windows dev machine.
+- **Verification split honestly (named, not silent — the wave's central
+  scope decision):** `tests/conformance.rs` (11 tests: hello/version
+  negotiation + rejection, request-before-hello/duplicate-hello
+  `invalid_request` enforcement, handshake timeout, malformed-frame,
+  out-of-order response delivery, `session_progress` event delivery,
+  disconnect-on-terminal-runtime-error, graceful close disposing an
+  attached session, multi-listener composition from `listener.test.ts`) —
+  built on `testing::duplex`, **actually runs and passes** on this Windows
+  dev machine. `tests/unix_transport.rs` (`#![cfg(unix)]`, ported from
+  `unix.test.ts`'s five filesystem-lifecycle scenarios + a real-socket
+  variant of `unix-connection.test.ts`'s send/close ordering) does **not**
+  run here (excluded entirely by `#[cfg(unix)]`) — instead verified by
+  cross-compilation: added the `x86_64-unknown-linux-gnu` target via
+  `rustup`, then `cargo check`/`cargo clippy --target x86_64-unknown-linux
+  -gnu -D warnings` both pass clean, a real compiler/lint pass, not visual
+  review. **This cross-check caught and this wave fixed two genuine bugs**
+  the native Windows build structurally could not surface (module excluded
+  there): a `std::sync::MutexGuard` held across an `.await` inside
+  `close_server_and_cleanup` and `close` (Send-future violations), fixed by
+  extracting the guarded `.take()` onto its own statement before the
+  `.await` in both places. **Remaining, named not silent:** `unix_transport
+  .rs`'s actual pass/fail when RUN is unverified on this dev machine (a
+  cross-compiled Linux test binary cannot execute on Windows) — will run
+  wherever this crate is next built on real Linux/macOS/CI.
+- Gate: `cargo fmt --check` clean (workspace-wide); `cargo clippy -p
+  pirust-orchestrator --all-targets --no-deps -D warnings` clean on both
+  the native Windows target and the cross-compiled Linux target; `cargo
+  test -p pirust-orchestrator` 39 passed/8 suites/0 failed (up from 20, +19:
+  7 new `options.rs` unit tests + 11 new `conformance.rs` tests + 1
+  rebalance); `cargo test --workspace` 866 passed/2 ignored/0 failed (up
+  from 847); workspace-wide clippy shows only the same pre-existing
+  unrelated `pirust-tui/latex.rs` finding prior waves already documented.
+- **Resume point:** Wave 6 (a pirust-side `PiServerService` over
+  `AgentHarness` + a runnable `pirust-orchestrator` binary — named as a
+  pirust-side addition with no Pi oracle to check it against, per
+  `plan.md`); confirm on a real Unix/CI run that `unix_transport.rs`
+  actually passes, not just compiles, before treating Wave 5 as fully
+  closed.
+
 ## 2026-08-23 — feat-009 WAVE 4b DONE (the live PiServer state machine: sessions/snapshots/server)
 
 Builds the live state machine on top of Wave 4a's real types: `sessions.rs`
@@ -722,17 +869,28 @@ wave delivered the `buildParams` port + the two promised refactors, all green.
 `pirust-orchestrator`) — SCOPE CORRECTED, Wave 1 (CBOR + framing codec)
 DONE, Wave 2 (schemas + codec validation, envelope scope) DONE, Wave 3
 (errors + connection + listener traits) DONE, Wave 4a (deep schema typing:
-Command/CommandResult/ServerEvent/SessionSnapshot/TranscriptItem) DONE.
+Command/CommandResult/ServerEvent/SessionSnapshot/TranscriptItem) DONE,
+Wave 4b (live PiServer state machine) DONE, Wave 5 (Unix transport, split
+verification — real Unix code cross-compile-verified only, not run, on
+this Windows dev machine; conformance battery run+passing via an in-memory
+duplex double) DONE, Wave 6 (real `AgentHarness`-backed `PiServerService` +
+runnable binary, a pirust-side addition — no Pi oracle for it) DONE.
+**feat-009 is CLOSED — all 6 waves shipped.**
 See the 2026-08-23 progress entries above and `plan.md` for the full
 6-wave breakdown. feat-012 (RPC mode) DONE (all 4 waves, see "feat-012
 CLOSED" entry below). feat-008 closed earlier with remaining providers +
 OAuth SKIPPED BY AUTHOR (2026-08-22 entry). feat-007 DONE (Waves 1-7,
 commits b71f4f7..3540ec7).
 Cadence: checkpoint per phase — one wave, verify, report, pause.
-**Next feature:** continue feat-009 Wave 4b (`sessions.rs`/`snapshots.rs`/
-`server.rs` — the live `PiServer` state machine, now built against Wave
-4a's real types) — see `plan.md`. feat-010 (dynamic WASM extensions) is
-the other remaining not-started feature (depends on feat-008, done).
+**Next feature:** none — feat-010 (dynamic WASM extensions) was SKIPPED BY
+AUTHOR 2026-08-23 (user decision, no work started; see `feature_list.json`).
+Every planned feature in `feature_list.json` is now either `done` or
+`skipped`; there is no active feature. Named residuals to keep in mind if
+this project resumes: confirm on a real Unix/CI run that `tests/
+unix_transport.rs` (feat-009 Wave 5) and the Wave-6 binary actually work
+end to end (both are cross-compile/native-only verified on this Windows
+dev machine, never executed on real Unix); no live run against a real
+model provider yet for feat-009 (only a scripted `Faux` double).
 **Session resume:** read feature_list.json + progress.md +
   `docs/analysis/04-orchestrator.md` (rewritten 2026-08-23 — do not use any
   memory of the old orchestrator/Radius design, it no longer matches Pi)

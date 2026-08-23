@@ -29,6 +29,11 @@ pirust-agent-core = { path = "crates/pirust-agent-core" }
 pirust-tui = { path = "crates/pirust-tui" }
 pirust-tools = { path = "crates/pirust-tools" }
 pirust-extension-api = { path = "crates/pirust-extension-api" }
+# feat-009 Wave 6: pirust-orchestrator reuses pirust-coding-agent's model/
+# settings/auth/harness-assembly machinery (sdk.rs) as a library rather than
+# reimplementing it — the lib target already exists for exactly this kind of
+# reuse (see its own Cargo.toml doc comment).
+pirust-coding-agent = { path = "crates/pirust-coding-agent" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -69,3 +74,6 @@ unicode-properties = "0.1"
 # (docs/analysis/05-tui.md §8's verdict — NOT crossterm's Event/KeyEvent parser;
 # this crate has its own keys.rs/stdin_buffer.rs, Waves 1-2, for that).
 crossterm = "0.28"
+# feat-009 Wave 5 transports/unix.rs: owned-bind-path hashing
+# (getOwnedBindPath's `createHash("sha256")`, listener.ts).
+sha2 = "0.10"
