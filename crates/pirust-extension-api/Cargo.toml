@@ -12,5 +12,18 @@ fancy-regex = { workspace = true }  # plan-mode utils: DESTRUCTIVE_PATTERNS/SAFE
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+wasmtime = { version = "41.0.4", optional = true }
 
 [dev-dependencies]
+
+[features]
+# feat-010 Wave 1: sandboxed Rust->WASM extension loader. Off by default so a
+# plain build never pulls in wasmtime (cranelift/component-model/etc.) at all.
+wasm-extensions = ["dep:wasmtime"]
+
+# Builds the wasm-hello fixture on demand (see build_example() in the test);
+# only runs at all when the wasm-extensions feature is also enabled.
+[[test]]
+name = "wasm_extension_test"
+path = "tests/wasm_extension_test.rs"
+required-features = ["wasm-extensions"]

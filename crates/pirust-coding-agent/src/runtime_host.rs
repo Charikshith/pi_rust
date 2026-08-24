@@ -46,9 +46,60 @@ use pirust_agent_core::types::{
 };
 use pirust_extension_api::events::ExtensionEvent;
 use pirust_extension_api::loader::built_in_extensions;
+#[cfg(feature = "wasm-extensions")]
+use pirust_extension_api::registration::Extension;
 use pirust_extension_api::runner::ExtensionRunner;
 use pirust_extension_api::runtime::ExtensionRuntime;
 use serde_json::Value;
+
+/// feat-010 Wave 4: discover and load real `.wasm` extensions from
+/// `<agent_dir>/extensions/*.wasm`, additive to the compile-time built-ins
+/// `bind_extension_runner` already builds. Two resilience rules, both load-
+/// bearing: a missing (or unreadable) extensions directory is not an error —
+/// zero extensions found, startup proceeds silently, exactly like a user who
+/// never created the folder; and a single bad `.wasm` file is logged (not
+/// panicked on) and skipped, so one broken third-party extension can never
+/// take the whole session down for everyone else's extensions.
+///
+/// Takes a `&ConfigEnv` rather than snapshotting the process environment
+/// itself, matching this module's own established test convention (see
+/// `config.rs`'s module doc: tests build a `ConfigEnv` literal instead of
+/// calling `std::env::set_var`, which is process-global and races under
+/// `cargo test`'s parallel threads) — this keeps the function itself
+/// injectable/testable the same way.
+#[cfg(feature = "wasm-extensions")]
+fn discover_wasm_extensions(
+    runtime: &Arc<ExtensionRuntime>,
+    config: &crate::config::ConfigEnv,
+) -> Vec<Extension> {
+    use pirust_extension_api::wasm::WasmExtensionLoader;
+
+    let Ok(agent_dir) = config.agent_dir() else {
+        return Vec::new();
+    };
+    let extensions_dir = std::path::Path::new(&agent_dir).join("extensions");
+    let Ok(entries) = std::fs::read_dir(&extensions_dir) else {
+        return Vec::new(); // no extensions directory yet — not an error
+    };
+
+    let mut loaded = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("wasm") {
+            continue;
+        }
+        match WasmExtensionLoader::load(&path, Arc::clone(runtime)) {
+            Ok(extension) => loaded.push(extension),
+            Err(error) => {
+                eprintln!(
+                    "Warning: failed to load wasm extension {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    loaded
+}
 
 use crate::print_mode::{
     AgentSessionRuntimeHost, Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession,
@@ -194,12 +245,18 @@ impl SingleTurnSession {
         // at factory time reference the slots `bind_runtime` mutates (Pi: the
         // runner's single `runtime` object).
         let runtime_arc: Arc<ExtensionRuntime> = Arc::new(ExtensionRuntime::noop());
-        let builtins = built_in_extensions()
+        #[allow(unused_mut)] // only mutated when the wasm-extensions feature is on
+        let mut builtins = built_in_extensions()
             .iter()
             .map(|factory| {
                 pirust_extension_api::loader::load_with_runtime(factory, &cwd, &runtime_arc)
             })
             .collect::<Vec<_>>();
+        #[cfg(feature = "wasm-extensions")]
+        builtins.extend(discover_wasm_extensions(
+            &runtime_arc,
+            &crate::config::ConfigEnv::from_process_env(),
+        ));
         let mut runner = ExtensionRunner::new_with_runtime(builtins, cwd, mode, runtime_arc);
 
         // Build the real runtime actions (`bindCore`, agent-session.ts:2458-2520).
@@ -767,4 +824,139 @@ pub fn missing_session_cwd_issue(
         session_cwd: session_cwd.to_string(),
         fallback_cwd: fallback_cwd.to_string(),
     })
+}
+
+/// feat-010 Wave 4: real, black-box tests for [`discover_wasm_extensions`].
+/// In-module (not `tests/`) so a `ConfigEnv` literal can be built directly —
+/// matching `config.rs`'s own established convention of never calling
+/// `std::env::set_var` in tests (process-global, races under parallel test
+/// threads) — without needing to make an internal helper `pub`.
+#[cfg(all(test, feature = "wasm-extensions"))]
+mod wasm_extension_discovery_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    /// Builds the real `pirust-extension-api`'s `wasm-hello` fixture for
+    /// `wasm32-unknown-unknown` (same fixture, same build invocation
+    /// `pirust-extension-api/tests/wasm_extension_test.rs` already uses) and
+    /// returns the compiled `.wasm` path.
+    fn build_wasm_hello() -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/ parent should exist")
+            .join("pirust-extension-api")
+            .join("examples")
+            .join("wasm-hello");
+        let manifest = dir.join("Cargo.toml");
+
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--manifest-path",
+                manifest
+                    .to_str()
+                    .expect("manifest path should be valid UTF-8"),
+                "--target",
+                "wasm32-unknown-unknown",
+                "--release",
+            ])
+            .status()
+            .expect("failed to spawn cargo to build the wasm-hello fixture");
+        assert!(status.success(), "building the wasm-hello fixture failed");
+
+        dir.join("target")
+            .join("wasm32-unknown-unknown")
+            .join("release")
+            .join("wasm_hello.wasm")
+    }
+
+    fn config_with_agent_dir(agent_dir: &std::path::Path) -> crate::config::ConfigEnv {
+        crate::config::ConfigEnv {
+            identity: crate::config::PIRUST,
+            platform: crate::config::Platform::current(),
+            home_dir: None,
+            agent_dir_override: Some(agent_dir.display().to_string()),
+        }
+    }
+
+    #[test]
+    fn missing_extensions_directory_is_not_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // <tmp>/extensions does not exist at all.
+        let config = config_with_agent_dir(tmp.path());
+        let runtime = Arc::new(ExtensionRuntime::noop());
+        assert!(discover_wasm_extensions(&runtime, &config).is_empty());
+    }
+
+    #[test]
+    fn loads_a_real_wasm_extension_from_the_extensions_directory() {
+        let wasm_hello = build_wasm_hello();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let extensions_dir = tmp.path().join("extensions");
+        std::fs::create_dir_all(&extensions_dir).expect("create extensions dir");
+        std::fs::copy(&wasm_hello, extensions_dir.join("wasm-hello.wasm"))
+            .expect("copy wasm-hello fixture into place");
+
+        let config = config_with_agent_dir(tmp.path());
+        let runtime = Arc::new(ExtensionRuntime::noop());
+        let loaded = discover_wasm_extensions(&runtime, &config);
+
+        assert_eq!(loaded.len(), 1, "exactly one .wasm file was placed");
+        let extension = &loaded[0];
+        assert!(
+            extension.tools.contains_key("echo"),
+            "the real wasm-hello fixture registers an 'echo' tool"
+        );
+
+        // Prove it is genuinely callable, not just present in the map.
+        let echo = &extension.tools["echo"];
+        let ctx = pirust_extension_api::ExtensionContext {
+            mode: pirust_extension_api::ExtensionMode::Print,
+            has_ui: false,
+            cwd: ".".to_string(),
+            is_idle: Box::new(|| true),
+            signal: None,
+            abort: Box::new(|| {}),
+            has_pending_messages: Box::new(|| false),
+            shutdown: Box::new(|| {}),
+            get_context_usage: Box::new(|| None),
+            get_system_prompt: Box::new(String::new),
+        };
+        let params = serde_json::json!({"ping": "pong"});
+        let result = (echo.definition.execute)(pirust_extension_api::ToolCallParams {
+            tool_call_id: "t1",
+            params: &params,
+            ctx: &ctx,
+        })
+        .expect("echo tool should round-trip its input");
+        assert_eq!(result, params);
+    }
+
+    #[test]
+    fn a_bad_wasm_file_does_not_block_a_good_one_in_the_same_directory() {
+        let wasm_hello = build_wasm_hello();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let extensions_dir = tmp.path().join("extensions");
+        std::fs::create_dir_all(&extensions_dir).expect("create extensions dir");
+        std::fs::copy(&wasm_hello, extensions_dir.join("good.wasm"))
+            .expect("copy wasm-hello fixture into place");
+        // Not valid wasm at all — must be skipped, not fatal.
+        std::fs::write(
+            extensions_dir.join("broken.wasm"),
+            b"not a real wasm module",
+        )
+        .expect("write broken fixture");
+
+        let config = config_with_agent_dir(tmp.path());
+        let runtime = Arc::new(ExtensionRuntime::noop());
+        let loaded = discover_wasm_extensions(&runtime, &config);
+
+        assert_eq!(
+            loaded.len(),
+            1,
+            "the broken file must be skipped, the good one must still load"
+        );
+        assert!(loaded[0].tools.contains_key("echo"));
+    }
 }

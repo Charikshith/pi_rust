@@ -21,6 +21,8 @@ pub mod plan_mode_extension;
 pub mod registration;
 pub mod runner;
 pub mod runtime;
+#[cfg(feature = "wasm-extensions")]
+pub mod wasm;
 
 pub use context::*;
 pub use events::*;

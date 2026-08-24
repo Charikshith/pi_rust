@@ -36,3 +36,9 @@ url = { workspace = true }                 # provider_attribution's matchesHost 
 
 [dev-dependencies]
 tempfile = { workspace = true }            # migrations + session-dir golden fixtures
+
+[features]
+# feat-010 Wave 4: discover real .wasm extensions from <agent_dir>/extensions
+# at startup. Forwards to pirust-extension-api's own feature so a plain build
+# never links wasmtime — confirm with `cargo tree -p pirust-coding-agent`.
+wasm-extensions = ["pirust-extension-api/wasm-extensions"]

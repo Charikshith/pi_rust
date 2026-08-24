@@ -1,205 +1,295 @@
-# feat-009 - PiServer session-multiplex library (pirust-orchestrator)
+# feat-010 - Dynamic WASM extensions (Rust-authored, sandboxed) — REVIVED 2026-08-23
 
-**Success criterion:** `pirust-orchestrator` speaks Pi's exact binary wire
-protocol (length-prefixed CBOR frames, TypeBox-schema-shaped messages) and
-reproduces `PiServer`'s connection/session lifecycle behavior, verified
-against real Pi's own conformance test suite as the oracle - same pattern as
-every prior wave. See `docs/analysis/04-orchestrator.md` (rewritten
-2026-08-23) for the full analysis; this plan assumes that document as read.
+**User decision (2026-08-23):** feat-010 was previously SKIPPED (see
+`feature_list.json` history). Revived with a narrower, deliberately-chosen
+scope after discussion:
 
-**Scope correction (2026-08-23):** the original feat-009 description (spawn
-`pirust --mode rpc` workers, Radius remote presence, JSONL-over-socket) was
-based on a version of Pi that no longer exists. Real Pi renamed
-`packages/orchestrator` to `packages/server` and redesigned it into a
-generic, transport-neutral session-multiplexing library with **no
-process-spawning and no Radius**. This plan builds the current thing.
+- Extensions are authored in **Rust only**, compiled to `.wasm`, loaded at
+  runtime. This is explicitly **not** an attempt to run Pi's real npm/TS
+  extension ecosystem (that would require embedding a JS engine — evaluated
+  and rejected by the user in favor of speed/memory and a pure-Rust
+  toolchain). Named divergence, not an oversight: existing Pi extensions
+  (the ones on `pi.dev/packages`) will NOT run under this system.
+- Sandbox is mandatory, not optional. Wasmtime's own design gives this for
+  free (a wasm module has zero ambient authority — no filesystem, no
+  network, no process spawn — until the host wires an explicit import
+  function for it). The design goal is a **small, fixed set of "doors"**
+  (host-callable functions) mirroring exactly the six actions
+  `pirust-extension-api`'s `ExtensionRuntime` already exposes to compile-time
+  Rust extensions today (`crates/pirust-extension-api/src/runtime.rs`) — not
+  a broad WASI filesystem/env surface.
+- **Target: `wasm32-unknown-unknown`, not `wasm32-wasip1`.** WASI's `wasip1`
+  target bundles ambient filesystem/env/clock imports that we would then
+  have to explicitly lock back down to match the "only doors we built"
+  model; `wasm32-unknown-unknown` starts with zero imports, which matches
+  the sandbox goal directly. Confirmed already installed on this dev machine
+  (`rustup target list --installed`).
+- **Key existing-code insight:** `pirust-extension-api`'s `ExtensionHandler`
+  is already `Fn(&ExtensionEvent, &ExtensionContext) -> Result<Value, String>`
+  — JSON-shaped in, JSON-shaped out, at the exact boundary a WASM ABI needs.
+  The WASM host is therefore a **new implementation of that same closure
+  type**, not a new extension architecture. `ExtensionRunner` (`runner.rs`)
+  does not change at all.
 
-**Named, not silent:** no package in `pi_space/pi` (including
-`packages/coding-agent`) implements `PiServerService` yet. So Waves 1-5
-below port real, oracle-verifiable Pi library code. Wave 6 (an
-`AgentHarness`-backed `PiServerService` + a runnable binary) is a
-**pirust-side addition** with no Pi oracle to check it against - build it,
-but its evidence must say so plainly, the same way `sdk.rs`'s
-`SingleTurnSession` bridge was labeled in feat-005.
+**Success criterion:** a Rust crate, compiled with
+`cargo build --target wasm32-unknown-unknown`, loads into a running pirust
+session, registers at least one tool via `pi_activate`, and that tool's
+`execute` round-trips through the wasm guest via `pi_handle` when the LLM
+calls it — with a runaway/malicious guest unable to exceed configured
+CPU/memory limits or reach anything the host didn't explicitly expose via
+`pi_host_call`.
+
+## Guest ABI (the whole contract an extension author needs)
+
+Three exports, one import — deliberately minimal:
+
+- `pi_alloc(len: i32) -> i32` — guest allocates `len` bytes in its own linear
+  memory, returns the pointer. Lets the host write a JSON request into guest
+  memory before calling into it.
+- `pi_activate() -> i64` — called once at load. Return value is a packed
+  `(ptr << 32) | len` pointing at a UTF-8 JSON registration payload:
+  `{ "tools": [...], "commands": [...], "flags": [...] }` (subset of
+  `Extension`'s fields the guest can populate; `handlers`/event subscriptions
+  come back the same shape under an `"events": [...]` key).
+- `pi_handle(op_ptr, op_len, payload_ptr, payload_len) -> i64` — the single
+  generic dispatch entrypoint. `op` is a small string tag: `"event:<type>"`,
+  `"tool:<name>"`, or `"command:<name>"`. `payload` is the JSON-serialized
+  `ExtensionEvent` / tool params / command args. Return is packed `(ptr<<32)|len`
+  pointing at `{"ok": true, "value": ...}` or `{"ok": false, "error": "..."}`
+  — maps directly onto `ExtensionHandler`'s `Result<Value, String>`.
+- Import `pi_host_call(op_ptr, op_len, payload_ptr, payload_len) -> i64` — the
+  guest's only way to reach the host. `op` names one of the six
+  `ExtensionRuntime` actions (`send_message`, `send_user_message`,
+  `append_entry`, `get_active_tools`, `get_all_tools`, `set_active_tools`)
+  or a context accessor (`is_idle`, `has_pending_messages`, `get_system_prompt`,
+  `abort`, `shutdown`). One import, dispatched by string host-side — not one
+  import per action — keeps the guest's declared import surface small and
+  auditable at load time (`register_host_imports`-style allow-list, same
+  spirit as the neighbor project's `pi_wasm.rs` fail-closed unknown-import
+  behavior, reviewed this session for reference, not reused directly).
 
 ## Waves
 
-1. **Wave 1 - CBOR + framing (pure codec, no I/O)**
-   - `scripts/gen-orchestrator-oracle.mjs`: import `packages/protocol/src/
-     cbor/{encoder,decoder}.ts` and `framing.ts` directly (both are
-     self-contained, no cross-package imports) and drive them with (a) the
-     known hex vectors already in `cbor.test.ts`/`framing.test.ts`, (b) a
-     wider generated battery (nested containers, boundary integers, UTF-8
-     edge cases, every documented rejection case) -> `tests/fixtures/pi/
-     orchestrator/{cbor,framing}.cases.jsonl`.
-   - `crates/pirust-orchestrator/src/protocol/{cbor,framing}.rs`: hand-rolled
-     port (not a generic CBOR crate - see analysis doc §6 for why), matching
-     the exact restricted RFC 8949 subset and the 4-byte-BE frame format.
-   - `tests/cbor_golden.rs` + `tests/framing_golden.rs`: replay every
-     captured case, byte-identical encode and equivalent decode, matching
-     every rejection case's error class.
-   - Verify: `cargo test -p pirust-orchestrator`, clippy/fmt clean, oracle
-     `--check` idempotent.
+1. **Wave 1 - guest ABI + host loader skeleton — DONE 2026-08-23** (no
+   sandbox limits yet). Shipped: `wasm-extensions` Cargo feature on
+   `pirust-extension-api` (`dep:wasmtime`, optional, off by default —
+   confirmed via `cargo tree -p pirust-extension-api` showing zero wasmtime
+   in the default dependency graph); `crates/pirust-extension-api/src/wasm/
+   {mod,memory,loader}.rs` (`WasmExtensionLoader::load(path, runtime) ->
+   Result<Extension, String>`, `pi_alloc`/`pi_activate`/`pi_handle` guest
+   exports + one `pi_host_call` import, `(ptr<<32)|len` packing); a real
+   compiled example, `crates/pirust-extension-api/examples/wasm-hello/`
+   (its own standalone `[workspace]`, built on demand via `cargo build
+   --target wasm32-unknown-unknown --release` from
+   `tests/wasm_extension_test.rs`, not by the parent workspace). Gate: 60/60
+   feature tests, `cargo test --workspace` unaffected (867/2), fmt/clippy
+   clean, default build confirmed wasmtime-free.
 
-2. **Wave 2 - schemas + codec (validation layer) — DONE 2026-08-23, scope
-   narrowed to the envelope layer** (see `feature_list.json`'s feat-009
-   evidence for the full writeup). Implemented: `ClientMessage`
-   (`hello`/`request`), `ServerMessage` (`hello`/`hello_error`/`response`/
-   `event`), `ProtocolError`/`ProtocolErrorCode`, and the codec composition
-   (`encode_client_message`/`encode_server_message`/`ClientMessageDecoder`/
-   `ServerMessageDecoder`/`is_supported_protocol_version`) — all hand-written
-   validators (not serde derive; `ResponseEnvelope`'s boolean `ok`-
-   discriminated split doesn't map cleanly onto serde's tag mechanism).
-   `request`/`result`/`event`/`snapshot` payload bodies are generic
-   `ProtocolJson` (the `JsonValueSchema` domain) this wave, NOT the real
-   `Command`/`CommandResult`/`ServerEvent`/`SessionSnapshot` unions — that
-   deep shape typing moved to Wave 4 below (folded in, not skipped), since
-   it makes more sense to build those types against real session-lifecycle
-   behavior than in isolation. `scripts/gen-orchestrator-oracle.mjs`
-   captured the full `protocol.test.ts` battery either way (31 cases; 4
-   tagged `"scope":"deferred"` for Wave 4 reuse).
+2. **Wave 2 - the six action doors + event dispatch — DONE 2026-08-23.**
+   Shipped: all four remaining `ExtensionRuntime` actions (`send_message`/
+   `send_user_message`/`append_entry`/`set_active_tools`) wired into
+   `host_call` alongside Wave 1's `get_active_tools`/`get_all_tools`; a
+   shared `call_guest` helper (factored out of Wave 1's `make_tool_executor`
+   so the alloc-write-call-read round trip isn't duplicated) reused by both
+   tool executors and the new `make_event_handler`; `ActivateResponse`
+   extended with an `events: Vec<String>` list that `WasmExtensionLoader::
+   load` turns into real `Extension.handlers` entries — `ExtensionRunner`
+   dispatches them exactly like compile-time extensions, `runner.rs`
+   untouched.
 
-3. **Wave 3 - errors + connection + listener traits — DONE 2026-08-23**
-   (see `feature_list.json`'s feat-009 evidence for the full writeup).
-   `errors.rs`: one `PiServerError` struct + convenience constructors
-   (not TS's subclass hierarchy — no inheritance/`.name` in Rust) +
-   `InternalServerError`. `connection.rs`: `ByteConnection`/
-   `ByteConnectionHandler` traits (`async_trait`), `ConnectionStage`,
-   `is_terminal_connection`; `ConnectionState` scoped down to the fields
-   that don't need a concrete async-runtime shape yet (`connection`/
-   `handshake`/`handshakeTimeout` deferred to Wave 4/5). `listener.rs`:
-   `PiServerListener` trait. No oracle needed (pure type/trait definitions,
-   same proportionality precedent as `auth_guidance.rs`) — unit-tested
-   only, 14/14 green.
+   **Design refinement vs. this plan's original wording (named, not
+   silent):** the original text above said the `ExtensionContext`
+   accessors should go through `pi_host_call` like the `ExtensionRuntime`
+   actions. That doesn't hold up: `ExtensionRuntime`'s six actions are
+   stable `Arc<Mutex<Box<dyn Fn>>>` slots set once at `HostState`
+   construction; `ExtensionContext`'s closures, by contrast, are freshly
+   built by `ExtensionRunner::create_context()` on every single dispatch,
+   are not `Arc`-shared, and carry no `Send` bound. Routing them through a
+   live `pi_host_call` mid-execution would need a scoped "current context"
+   slot in `HostState`, set immediately before each call and cleared after
+   — a real re-entrancy design of its own. Implemented instead: the HOST
+   snapshots the three read-only accessors (`is_idle`/
+   `has_pending_messages`/`get_system_prompt`) into a plain
+   `{"is_idle","has_pending_messages","system_prompt"}` JSON object,
+   computed in ordinary Rust (no wasm involved) and included alongside the
+   event payload on every `pi_handle` call. **`abort()`/`shutdown()` remain
+   explicitly deferred past Wave 2** — they are control-flow actions, not
+   read-only queries, and need the same scoped-slot mechanism to do
+   properly; no shortcut version was attempted.
 
-4. **Wave 4 - sessions + snapshots + PiServer (the state machine), split into
-   two sub-waves once the real size became clear:**
+   Proven end-to-end in `crates/pirust-extension-api/examples/wasm-hello/`
+   (a third guest tool, `exercise_doors`, calls all four new doors and
+   reports which succeeded; the guest also subscribes to `agent_start` and
+   calls `append_entry` from INSIDE that event handler, proving a host-call
+   door works there too, not just inside a tool). New tests in
+   `tests/wasm_extension_test.rs`: one drives a real `ExtensionRunner::emit`
+   and asserts on what a test-double `append_entry` closure actually
+   captured (not just the handler's return value); another asserts all
+   four new doors individually via their own captured test doubles. Gate:
+   62/62 feature tests (60 -> 62, +2), `cargo test --workspace` unaffected
+   (867/2), fmt/clippy clean (one `clippy::type_complexity` finding in the
+   new tests fixed via named type aliases), default build still wasmtime-free.
 
-   **Wave 4a - deep schema typing — DONE 2026-08-23** (see
-   `feature_list.json`'s feat-009 evidence for the full writeup). Replaced
-   Wave 2's generic `ProtocolJson` payload bodies with the real typed
-   unions: `ThinkingLevel`/`SessionPhase`/`ModelRef`/`ModelMetadata`,
-   content types, `Usage`, `TranscriptItem`/`TranscriptProgress` (role→
-   status two-level dispatch + cross-field consistency enforced by
-   construction), `SessionMetadata`/`SessionSnapshot`/`ServerSnapshot`,
-   `Command`/`CommandResult`/`ServerEvent`. `RequestEnvelope`/
-   `ResponseEnvelope`/`EventEnvelope`/`ServerHello` now carry these real
-   types instead of opaque JSON. Field order cross-checked against REAL
-   `protocol.ts`/`sessions.ts` construction sites, not just schema
-   declaration order (caught a genuinely non-obvious detail: `Usage
-   .reasoning` sits between `cacheWrite` and `totalTokens` when present,
-   not at the end). Oracle extended with `protocol.test.ts`'s full
-   remaining battery (assistant/tool status consistency, nonterminal
-   items, nested tool details) — 51 codec cases total, the 4 Wave-2
-   `"scope":"deferred"` records now asserted normally.
+3. **Wave 3 - sandbox limits (the part that makes this safe to load
+   someone else's `.wasm`) — DONE 2026-08-24.**
+   - New `WasmExtensionLimits { fuel: u64, max_memory_bytes: usize }`
+     (`wasm/mod.rs`), `Default` = `fuel: 200_000_000`,
+     `max_memory_bytes: 16 * 1024 * 1024` (16 MiB) — checked empirically
+     against `wasm-hello`'s own well-behaved tools (comfortable headroom)
+     and its deliberately-broken ones (trap in well under a second).
+     `WasmExtensionLoader::load` stays as an ergonomic wrapper over a new
+     `load_with_limits(path, runtime, limits)`, so Wave 1/2's call sites and
+     tests needed no changes.
+   - CPU cap: `Config::consume_fuel(true)` on a per-load `Engine` (Wave 1/2
+     used `Engine::default()`; Wave 3 builds one explicitly) +
+     `Store::set_fuel(limits.fuel)` once, right after `Store::new`, before
+     `linker.instantiate`. **Confirmed (via `wasmtime-41.0.4`'s own source,
+     `src/runtime/store.rs`) this is a per-instance LIFETIME budget, not a
+     per-call one** — it is never refilled between calls. Documented as a
+     deliberate simplicity-over-generosity tradeoff in `wasm/mod.rs`'s doc
+     comment: a legitimate long-lived, high-call-volume extension could
+     eventually exhaust its lifetime budget under normal use and need a
+     fresh `load`; a per-call refill policy is a named future option, not
+     implemented.
+   - Memory cap: `wasmtime::StoreLimitsBuilder::new().memory_size(limits.max_memory_bytes).trap_on_grow_failure(true).build()`
+     stored on `HostState`, wired via `Store::limiter(|state| &mut state.limits)`
+     before instantiation. `trap_on_grow_failure(true)` was a deliberate
+     choice over the default `false`: it forces ANY denied growth (host- or
+     guest-triggered) to hard-trap the call immediately, rather than making
+     `memory.grow` return `-1` to the guest — so a guest that never checks
+     `memory.grow`'s return value (plausible for a naive/malicious guest)
+     still can't limp along on a failed allocation.
+   - **Real bug found and fixed while building the test fixtures (not a
+     limiter bug — worth naming for whoever writes the next
+     deliberately-broken guest fixture):** the first `grow_memory` guest
+     tool (`vec![0u8; 160 * 1024 * 1024]`, then only `.len()` read back) was
+     silently optimized away in the `--release` fixture build — LLVM proved
+     the huge zero-filled allocation was unobservable (only its
+     compile-time-known length was ever used) and deleted it entirely, so
+     no real `memory.grow` ever happened and the "malicious" tool always
+     trivially "succeeded", regardless of the limiter. Confirmed via a
+     throwaway instrumented `ResourceLimiter` that logged every
+     `memory_growing` call against the real compiled fixture: only two
+     small, well-under-the-ceiling growth calls ever fired (the module's
+     own ~1.06 MiB initial memory, then a single +1-page growth) — nothing
+     near 160 MiB. Fixed by wrapping the allocation in
+     `std::hint::black_box`, matching the pattern `burn_fuel`'s infinite
+     loop already used for the same reason. The limiter mechanism itself
+     was verified correct throughout via two isolated sanity checks before
+     this fix was found: (a) `wasmtime`'s own documented `Memory::new`
+     host-triggered-denial example, and (b) a minimal hand-written WAT
+     module whose exported function directly executes `memory.grow` from
+     guest bytecode with fuel simultaneously enabled — both denied
+     correctly, isolating the bug to the fixture's dead-code elimination,
+     not the sandboxing mechanism.
+   - Tests (`tests/wasm_extension_test.rs`, both use `wasm-hello`'s new
+     `burn_fuel`/`grow_memory` guest tools): `runaway_guest_traps_on_fuel_exhaustion_without_wedging_the_host`
+     (a genuine infinite loop, run under a small custom fuel budget so the
+     test itself stays fast — not the production default — traps as a
+     normal `Result::Err`; a completely FRESH `load` afterward still works,
+     proving the shared loader/`Engine` machinery isn't wedged by one
+     exhausted instance) and `runaway_guest_traps_on_memory_ceiling_without_wedging_the_host`
+     (same fresh-load-afterward proof, for the memory ceiling instead of
+     fuel).
+   - Gate: 64/64 feature tests (62 -> 64, +2), `cargo test --workspace`
+     unaffected (867/2), fmt clean (one auto-fix pass, whitespace-only),
+     clippy clean on both the feature-gated crate and the full workspace
+     (only the same pre-existing, already-documented
+     `pirust-tui/src/latex.rs` finding every prior wave has carried),
+     default (non-feature) build still confirmed wasmtime-free via
+     `cargo tree`.
 
-   **Wave 4b - the live state machine — DONE 2026-08-23** (see
-   `feature_list.json`'s feat-009 evidence for the full writeup): `sessions.rs`
-   (`LiveSessionManager`, the five-condition `maybe_dispose` gate —
-   analysis doc §7 gotcha 6 — implemented exactly as specified),
-   `snapshots.rs` (`ServerSnapshotPublisher`, serialized broadcast queue),
-   `server.rs` (`PiServer` connection/handshake state machine, hello-once
-   enforcement, version check, `fail_protocol`) — built against Wave
-   4a's real types instead of opaque JSON. `testing/service.rs` ported as
-   the reference double (`TestServerService`/`TestSessionRuntime`).
-   - Oracle scope decision (named, not silent): adapting `test/
-     sessions.test.ts`/`test/server.test.ts` into `gen-orchestrator-oracle.mjs`
-     was deferred rather than attempted this wave — the gate and full command
-     lifecycle are instead covered by plain Rust unit tests against the ported
-     `testing/service.rs` double directly. Real oracle-replay parity against
-     those two TS test files remains open for a future wave.
+4. **Wave 4 - real loading path + author docs — DONE 2026-08-24.**
+   New Cargo feature `wasm-extensions` on `pirust-coding-agent`
+   (`["pirust-extension-api/wasm-extensions"]`, off by default, confirmed
+   wasmtime-free on a plain build via `cargo tree`). New
+   `discover_wasm_extensions` in `crates/pirust-coding-agent/src/
+   runtime_host.rs`, called from `bind_extension_runner` right after
+   `builtins` is built from `built_in_extensions()` and before
+   `ExtensionRunner::new_with_runtime` — additive, `runner.rs` untouched.
+   Discovers `*.wasm` files (non-recursive) in `<agent_dir>/extensions/`
+   (resolved via `ConfigEnv::agent_dir()`, respecting the existing
+   `PIRUST_CODING_AGENT_DIR` override — the same accessor every other
+   pirust subsystem already uses, not a new path-resolution scheme) and
+   loads each through `WasmExtensionLoader::load`. Two resilience rules,
+   both tested: a missing extensions directory is not an error (zero found,
+   silent); a single bad `.wasm` file is caught, printed as a warning
+   (`eprintln!`, matching this file's own existing convention — no `tracing`
+   dependency added), and skipped, without blocking any other file in the
+   same directory from loading.
+   - **Design note (named, not silent):** `discover_wasm_extensions` takes a
+     `&ConfigEnv` parameter rather than reading `std::env::var` /
+     `ConfigEnv::from_process_env()` internally, specifically so tests can
+     inject a `ConfigEnv` literal with `agent_dir_override` set — matching
+     `config.rs`'s own documented convention of never calling
+     `std::env::set_var` in tests (process-global, races under `cargo
+     test`'s parallel threads). Tests live inside `runtime_host.rs` itself
+     (`#[cfg(all(test, feature = "wasm-extensions"))] mod
+     wasm_extension_discovery_tests`) rather than a separate `tests/` file,
+     since `discover_wasm_extensions` is intentionally private — making it
+     `pub` purely so an external integration test could reach it would leak
+     an implementation detail for no real benefit.
+   - Real, compiled-`.wasm`-driven tests (3): missing directory → empty,
+     not an error; a real `wasm-hello` fixture copied into a temp
+     `<agent_dir>/extensions/` loads and its `echo` tool is genuinely
+     callable (not just present in the map); a garbage non-wasm file
+     alongside a real one is skipped without blocking the real one.
+   - New `docs/wasm-extensions.md`: a complete authoring guide for someone
+     who has never touched wasmtime — crate setup, the full guest ABI, the
+     six host-call doors, the event/context-snapshot shape, the two sandbox
+     limits (with Wave 3's actual numbers), failure behavior, and every
+     residual below, written for an external reader rather than a resumer.
+   - Gate: `cargo fmt --check` clean (workspace-wide); `cargo clippy -p
+     pirust-extension-api -p pirust-coding-agent --all-targets
+     --features wasm-extensions --no-deps -D warnings` clean; `cargo build
+     -p pirust-coding-agent` (no features) clean, `cargo tree` confirms zero
+     wasmtime; `cargo test -p pirust-extension-api --features
+     wasm-extensions` 64/64 (unchanged — this crate wasn't touched this
+     wave); `cargo test -p pirust-coding-agent --features wasm-extensions`
+     232/232 (229 pre-existing + 3 new); `cargo test --workspace` 867
+     passed / 2 ignored / 0 failed — identical to every prior wave's
+     baseline, confirming zero regressions from a feature that is off by
+     default.
 
-5. **Wave 5 - Unix transport — DONE 2026-08-23** (see `feature_list.json`'s
-   feat-009 evidence for the full writeup). Windows question (analysis doc
-   §8) resolved, not silently: `interprocess` was evaluated and NOT adopted
-   (its Windows backend is a named pipe, not a real `AF_UNIX` filesystem
-   socket — no inode identity, no `lstat`/`link`/`chmod` semantics; adopting
-   it would not have let this dev machine verify `listener.ts`'s actual
-   behavior any better than not using it). Shipped instead: `transports/
-   unix/options.rs` (pure, cross-platform — path validation, option
-   resolution, owned-bind-path SHA-256 hash); `transports/unix/listener.rs`
-   (`#[cfg(unix)]`, real 1:1 port of `UnixListener`/`UnixByteConnection`
-   against `tokio::net::UnixListener`/`UnixStream` — bind-then-link,
-   stale-socket cleanup, backpressure, graceful close); `testing/client.rs`
-   (`ProtocolTestClient`, cross-platform over a `WireChannel` trait, port of
-   `testing/client.ts`); `testing/duplex.rs` (a NEW, non-Pi in-memory
-   transport double so the transport-agnostic conformance battery runs over
-   real async byte I/O on this Windows dev machine). Verification split
-   honestly: `tests/conformance.rs` (11 tests, cross-platform via the duplex
-   double) actually RUNS and passes here; `tests/unix_transport.rs`
-   (`#[cfg(unix)]`, ported from `unix.test.ts`/`unix-connection.test.ts`)
-   type-checks and clippy-lints clean cross-compiled to
-   `x86_64-unknown-linux-gnu` (which caught and this wave fixed two real
-   `Send`-future bugs). **Update 2026-08-23 (later session):** the "has not
-   been RUN on this dev machine" gap is now closed — run for real inside a
-   `rust:1` Linux container (Podman, WSL2 backend, already present on this
-   Windows machine) via `podman run --rm -v <repo>:/workspace -w /workspace
-   docker.io/library/rust:1 cargo test -p pirust-orchestrator --test
-   unix_transport`: 6/6 passed against a real `AF_UNIX` socket, not just
-   type-checked. No new async runtime or transport crate needed — tokio
-   stays; this only needed a real Linux execution environment on the dev
-   machine.
+**feat-010 is now feature-complete across all 4 planned waves.** Real, named
+residuals (not blockers, matching this project's own convention of stating
+a gap rather than a false "fully done"):
 
-6. **Wave 6 - pirust-side addition (named as such, not Pi-verified): a real
-   `PiServerService` over `AgentHarness` + a runnable `pirust-orchestrator`
-   binary — DONE 2026-08-23** (see `feature_list.json`'s feat-009 evidence
-   for the full writeup). New `crates/pirust-orchestrator/src/agent_service/
-   {mod,conversions,runtime,service}.rs`: `AgentPiSessionRuntime`
-   (`PiSessionRuntime` over one real `AgentHarness` per session — one
-   instance per session, permanent single harness-subscription, since
-   `AgentHarness::subscribe` has no unsubscribe) and `AgentServerService`
-   (`PiServerService`, builds harnesses via `pirust-coding-agent`'s existing
-   `sdk::create_agent_harness_session` rather than reimplementing model/
-   tool/session wiring). `main.rs` replaced with a real `--socket <path>`
-   binary reusing `pirust-coding-agent`'s settings/auth/model-runtime
-   bootstrap directly (not a CLI-parity clone — model/thinking choices move
-   per-session over the wire instead of CLI flags, named not silent).
-   Tested per the stated strategy: `tests/agent_service_e2e.rs` drives a
-   real `AgentServerService`/`AgentHarness` (scripted `Faux` provider, no
-   live network) through the actual wire protocol (hello/create/attach/
-   prompt over `DuplexTransport`), asserting a real assistant transcript
-   item comes back — not an oracle replay, since none exists for this
-   addition. Verification note (named, not silent): adding `pirust-ai` as a
-   dependency pulls in `reqwest`/`ring` transitively, which broke Wave 5's
-   free `x86_64-unknown-linux-gnu` cross-check trick for this crate (`ring`
-   needs a C cross-compiler this Windows dev machine doesn't have) — the new
-   `agent_service` code and `main.rs`'s trivial `#[cfg(unix)]` split were
-   therefore verified by native Windows fmt/clippy/test only, not also
-   cross-compiled like Wave 5's `transports/unix` code was.
-
-   **Update 2026-08-23 (later session):** the "run the actual binary against
-   a real Unix socket" gap is now closed the same way as Wave 5's - native
-   build inside a `rust:1` Linux container (Podman/WSL2, already on this
-   machine) sidesteps the `ring` cross-compiler problem entirely since it is
-   a native build, not a cross-compile. New `tests/real_binary_unix_socket.rs`
-   spawns the real compiled `pirust-orchestrator` binary and drives a real
-   client through a real handshake over a real `AF_UNIX` socket. First run
-   found a REAL bug: the real builtin catalog's `openrouter/auto` /
-   `openrouter/auto-beta` entries carry real Pi's own unknown-pricing
-   sentinel (`cost.input = -1_000_000`), and `agent_service::conversions::
-   model_metadata` was missing the `nonNegativeNumber`/`Math.max(1, ...)`
-   clamps real Pi's own `toProtocolModelMetadata`
-   (`packages/server/src/protocol.ts`) applies before putting cost/context/
-   max-token fields on the wire - so the real binary panicked building its
-   own `ServerHello` snapshot. Fixed by porting that clamp exactly (a
-   `non_negative_number` helper + a `.max(1)` floor on context_window/
-   max_tokens). Re-verified in the same container: `cargo test -p
-   pirust-orchestrator` 41 passed/10 suites/0 failed, `clippy --all-targets
-   --no-deps -D warnings` clean, `fmt --check` clean. Only remaining named
-   residual: real end-to-end verification against a live model provider
-   (not the `Faux` double).
+- `abort`/`shutdown` host-call doors were never implemented (deferred since
+  Wave 2 — they need a scoped "current context" slot in `HostState`, a real
+  design of their own, not attempted as a shortcut).
+- `commands`/`flags` declared in `pi_activate`'s JSON are parsed into
+  `ActivateResponse` but never wired into the loaded `Extension` — an author
+  can declare them, nothing happens with them yet.
+- No hot-reload: a `.wasm` file added or changed after startup is not
+  discovered until the next restart (`discover_wasm_extensions` only runs
+  once, at `bind_extension_runner` time).
+- No per-extension configurable sandbox limits in the real loading path:
+  `WasmExtensionLimits` as a type supports different fuel/memory values per
+  load (`load_with_limits`), but `discover_wasm_extensions` always calls the
+  plain `load` (i.e. `WasmExtensionLimits::default()`) for every file — a
+  future wave could read a per-extension manifest/config to override this.
+- No live differential or fuzzing of the guest ABI itself (malformed
+  `pi_activate`/`pi_handle` JSON is handled defensively via `serde`'s
+  `#[serde(default)]`/`Result` plumbing and exercised by the "garbage file"
+  test, but not adversarially fuzzed).
 
 ## Notes for whoever resumes
 
-- Reuse opportunity already confirmed: `SessionPhase` in the wire schema
-  (`idle|turn|compaction|branch_summary|retry`) is documented in Pi's own
-  source as matching `AgentHarnessPhase` - check `pirust-agent-core`'s v4
-  harness for an existing enum with this exact vocabulary before defining a
-  new one in `schemas.rs`.
-- `pirust-coding-agent`'s feat-012 `RpcClient`/RPC types are **not** reused
-  here - the new protocol has a different, smaller command set and a
-  different (binary CBOR, not JSONL) wire format. Do not try to unify them.
-- No new workspace crate: everything lives inside `crates/pirust-orchestrator`
-  (already scaffolded, stub `main.rs`). New dep needed later: `interprocess`
-  (Wave 5 transport) and possibly `sha2` (owned-bind-path hashing, Wave 5).
-  No new dep needed for Waves 1-4.
+- **Do not** reach for `wasmtime::component` (the Component Model / WIT
+  interface) — evaluated and rejected this session. The neighbor project
+  `pi_agent_rust` uses it (`src/extensions/wasm_host.rs`,
+  `docs/wit/extension.wit`) for a much richer, multi-language extension
+  surface; pirust's own extension protocol is already a single
+  JSON-in/JSON-out shape end-to-end, so a typed WIT layer buys nothing here
+  and costs real toolchain complexity. Plain `wasmtime::{Engine, Linker,
+  Store}` core-module API is the right level.
+- No Pi oracle exists for any of this (named, not silent, same precedent as
+  feat-009 Wave 6's `agent_service` addition) — it is a pirust-only feature
+  with no TypeScript equivalent to byte-verify against. Verification is
+  black-box: real compiled `.wasm` fixtures driven through the real host.
+- `crates/pirust-extension-api/src/runtime.rs`'s six `ExtensionRuntime`
+  action slots are the complete list of host capabilities to expose in Wave
+  2 — do not invent additional doors (file/network/exec) speculatively; add
+  one only when a real wasm extension needs it, matching this project's
+  YAGNI convention elsewhere (e.g. feat-004's tool scope decisions).

@@ -8,6 +8,344 @@ tags: [state, progress, continuity, session, tracking, verification-plan]
 
 # Session Progress Log
 
+## 2026-08-24 — feat-010 WAVE 4 DONE — feat-010 FEATURE-COMPLETE (all 4 waves)
+
+Continuation of the same feat-010 effort (Waves 1-3 below). Built and
+gate-verified Wave 4 per `plan.md`'s own Wave 4 section (now marked done
+there with the full writeup, plus a closing residuals list since this was
+the last planned wave) — the real `<agent_dir>/extensions/*.wasm` discovery
+path, wired into actual pirust startup for the first time (Waves 1-3 only
+ever loaded extensions from inside test code).
+
+- New Cargo feature `wasm-extensions` on `pirust-coding-agent`
+  (forwards to `pirust-extension-api/wasm-extensions`, off by default —
+  confirmed via `cargo tree -p pirust-coding-agent` showing zero wasmtime on
+  a plain build). New `discover_wasm_extensions` in
+  `crates/pirust-coding-agent/src/runtime_host.rs`, called from the existing
+  `bind_extension_runner` right after `builtins` is built from
+  `built_in_extensions()` and before `ExtensionRunner::new_with_runtime` is
+  constructed — purely additive; `runner.rs`/`ExtensionRunner` itself was
+  not touched, matching every prior wave's own claim that this feature
+  needs no changes to the extension-dispatch core.
+- **Path resolution reused, not reinvented:** `<agent_dir>` comes from the
+  real `ConfigEnv::agent_dir()` accessor (`config.rs`) that every other
+  pirust subsystem (settings, auth, models, sessions, bin dir) already uses
+  — so `PIRUST_CODING_AGENT_DIR` overrides the extensions directory exactly
+  the same way it overrides everything else, for free.
+- **Two resilience rules, both real and both tested:** a missing extensions
+  directory is not an error (zero extensions found, silent, matching "a
+  user who never made the folder shouldn't see a warning"); a single
+  corrupt/invalid `.wasm` file is caught, printed as a warning via
+  `eprintln!` (this file's own existing convention for non-fatal issues —
+  no new logging dependency added), and skipped without blocking any other
+  valid file in the same directory.
+- **Design decision worth keeping (named, not silent):**
+  `discover_wasm_extensions` takes a `&ConfigEnv` parameter instead of
+  reading the process environment internally, specifically so it stays
+  testable the way `config.rs`'s own module doc already mandates for this
+  codebase: build a `ConfigEnv` literal with `agent_dir_override` set,
+  never call `std::env::set_var` in a test (process-global, races under
+  `cargo test`'s parallel threads). The 3 new tests live inside
+  `runtime_host.rs` itself (`#[cfg(all(test, feature = "wasm-extensions"))]
+  mod wasm_extension_discovery_tests`), not a separate `tests/` file — the
+  function is intentionally private, and making it `pub` just to reach it
+  from an external integration-test crate would have leaked an
+  implementation detail for no real benefit. All three tests build and load
+  the REAL compiled `wasm-hello` fixture (same one Waves 1-3 already built),
+  not a mock: missing-directory → empty; a real file copied into a temp
+  `<agent_dir>/extensions/` loads and its `echo` tool is proven genuinely
+  callable (round-trips real JSON through the real wasm guest), not merely
+  present in a map; a garbage non-wasm file alongside a real one is skipped
+  without blocking the real one.
+- New `docs/wasm-extensions.md`: a complete, self-contained authoring guide
+  aimed at someone who has never touched wasmtime — crate setup
+  (`cargo new --lib`, `crate-type = ["cdylib"]`, the `wasm32-unknown-unknown`
+  build step), the full `pi_alloc`/`pi_activate`/`pi_handle` guest ABI, all
+  six `pi_host_call` doors with their exact payload shapes, the
+  event/context-snapshot shape from Wave 2, Wave 3's actual fuel/memory
+  numbers and what happens when they're hit, the two startup resilience
+  rules, and every residual below — pointed at `examples/wasm-hello/src/
+  lib.rs` as the real reference implementation rather than duplicating its
+  code inline.
+- Gate (real numbers): `cargo fmt --check` clean (workspace-wide, one
+  auto-fix pass for import ordering caught and re-verified); `cargo clippy
+  -p pirust-extension-api -p pirust-coding-agent --all-targets --features
+  wasm-extensions --no-deps -D warnings` clean; `cargo build -p
+  pirust-coding-agent` (no features) clean, `cargo tree` confirms zero
+  wasmtime; `cargo test -p pirust-extension-api --features wasm-extensions`
+  64/64 (unchanged, that crate wasn't touched this wave); `cargo test -p
+  pirust-coding-agent --features wasm-extensions` 232/232 (229 pre-existing
+  + 3 new); `cargo test --workspace` 867 passed / 2 ignored / 0 failed —
+  byte-identical to every prior wave's baseline, confirming an off-by-default
+  feature really does add zero cost to the default build.
+
+**feat-010 is now feature-complete across all 4 planned waves.** Real,
+named residuals (not silently claimed as done, matching this project's own
+convention): `abort`/`shutdown` host-call doors still not implemented
+(deferred since Wave 2 — need a scoped context slot, a real design of their
+own); `commands`/`flags` from `pi_activate` are parsed but never wired to
+anything; no hot-reload (a dropped-in `.wasm` file isn't picked up until
+restart); no per-extension configurable sandbox limits in the real loading
+path (`discover_wasm_extensions` always uses `WasmExtensionLimits::default()`
+— the type supports per-load overrides, nothing surfaces them yet); no
+adversarial fuzzing of the guest ABI's JSON parsing.
+
+- **Resume point:** feat-010 is done. Check `feature_list.json` for the
+  next not-yet-started or in-progress feature; as of this session's own
+  earlier survey, feat-010 (now closed) was the last remaining item besides
+  fully-shipped/skipped ones — confirm current state in `feature_list.json`
+  directly rather than trusting this line if time has passed.
+
+## 2026-08-24 — feat-010 WAVE 3 DONE (sandbox limits — the part that makes this actually "sandboxed")
+
+Continuation of the same feat-010 effort (Waves 1-2 below). Built and
+independently gate-verified Wave 3 per `plan.md`'s own Wave 3 section (now
+marked done there with the full writeup) — the wasmtime fuel budget and
+memory ceiling that stop a runaway or memory-hungry `.wasm` extension from
+hurting the host process.
+
+- New `WasmExtensionLimits { fuel, max_memory_bytes }` (`wasm/mod.rs`),
+  default `fuel: 200_000_000` / `max_memory_bytes: 16 MiB`, chosen and
+  checked empirically against `wasm-hello`'s own fixtures. `WasmExtensionLoader::load`
+  stays as a thin wrapper over a new `load_with_limits`, so no Wave 1/2 call
+  site needed to change.
+- CPU cap: `Config::consume_fuel(true)` + `Store::set_fuel` — confirmed via
+  `wasmtime-41.0.4`'s own vendored source that this is a **per-instance
+  lifetime budget, not per-call** (never refilled between calls); named as
+  a deliberate simplicity tradeoff, not a bug, since Wave 3's own tests
+  explicitly rely on it (a fresh `load` is required after one instance
+  exhausts its budget).
+- Memory cap: `StoreLimitsBuilder` + `Store::limiter`, with
+  `trap_on_grow_failure(true)` chosen deliberately so a guest that never
+  checks `memory.grow`'s return value still can't limp along on a failed
+  allocation — any denied growth hard-traps the call immediately.
+- **Real bug found and fixed, worth remembering for future WASM fixture
+  work:** the first `grow_memory` test guest (`vec![0u8; 160MB]`, only
+  `.len()` read back) got silently deleted by LLVM in the `--release`
+  fixture build — the allocation was provably unobservable, so no real
+  `memory.grow` ever happened and the "malicious" tool always trivially
+  succeeded, independent of whether the limiter worked at all. Caught by
+  writing a throwaway instrumented `ResourceLimiter` that logged every real
+  `memory_growing` call against the actual compiled fixture — only two
+  tiny, well-under-the-ceiling grows ever fired, nothing near 160 MiB. Two
+  earlier isolated sanity checks (wasmtime's own documented `Memory::new`
+  example; a hand-written WAT module doing a direct guest-side
+  `memory.grow` with fuel simultaneously enabled) had already confirmed the
+  limiter mechanism itself was correct, which is what pointed the search at
+  the fixture rather than the sandbox code. Fixed with `std::hint::black_box`,
+  matching the pattern `burn_fuel`'s infinite loop already used for the
+  same reason. All debug/scratch code from this investigation was removed
+  before finishing — none of it shipped.
+- Two new tests (`tests/wasm_extension_test.rs`): a genuine infinite-loop
+  guest traps on fuel exhaustion as a normal `Result::Err`, and a
+  160 MiB-growth-attempt guest traps on the memory ceiling — both then load
+  a completely FRESH instance afterward and confirm it still works
+  normally, proving one bad extension instance doesn't wedge the shared
+  loader/`Engine` machinery for anything that comes after it.
+- Gate (real numbers): `cargo test -p pirust-extension-api --features
+  wasm-extensions` 64/64 (62 -> 64, +2); `cargo test --workspace` 867
+  passed / 2 ignored / 0 failed (unchanged from the Wave 1/2 baseline);
+  `cargo fmt --check` clean (one auto-fix pass, whitespace-only, no logic
+  changes); `cargo clippy -p pirust-extension-api --all-targets --features
+  wasm-extensions --no-deps -D warnings` clean; `cargo clippy --workspace
+  --all-targets --no-deps -D warnings` clean except the same pre-existing,
+  already-documented `pirust-tui/src/latex.rs` finding every prior wave has
+  carried (not touched, not introduced here); default (non-`wasm-extensions`)
+  build of `pirust-extension-api` still succeeds with zero `wasmtime` in
+  its dependency tree, confirmed via `cargo tree`.
+- No git commits or pushes made this wave (working tree left as plain file
+  changes, per directive).
+- **Resume point:** Wave 4 (the real `~/.pirust/agent/extensions/*.wasm`
+  discovery path, wired in alongside the existing compile-time
+  `built_in_extensions()` list, plus a short author-facing doc) — the last
+  planned wave for feat-010 per `plan.md`.
+
+## 2026-08-23 — feat-010 WAVE 2 DONE (the six action doors + event dispatch)
+
+Continuation of the same session that revived feat-010 and shipped Wave 1
+(see the entry directly below). Built and independently gate-verified Wave
+2 per `plan.md`'s own Wave 2 section (now marked done there with the full
+design writeup — condensed here, not duplicated).
+
+- `loader.rs`'s `host_call` gained the four remaining `ExtensionRuntime`
+  actions (`send_message`/`send_user_message`/`append_entry`/
+  `set_active_tools`), matching `runtime.rs`'s real closure signatures
+  exactly (e.g. `append_entry`'s JSON `null`/absent `data` maps to Rust
+  `None`, not `Some(Value::Null)`). Wave 1's alloc-write-call-read plumbing
+  (previously inlined in `make_tool_executor`) was factored out into a
+  shared `call_guest` helper, now reused by both tool executors and the new
+  `make_event_handler` — avoids the copy-paste this codebase avoids
+  elsewhere.
+- Event dispatch wired: `ActivateResponse` gained an `events: Vec<String>`
+  list; `WasmExtensionLoader::load` turns each entry into a real
+  `Extension.handlers` entry whose closure serializes the `&ExtensionEvent`
+  (via its existing `Serialize` impl), calls into the guest with
+  `op = "event:<type>"`, and returns `Result<Value, String>` exactly like
+  `ExtensionHandler`'s signature demands. `ExtensionRunner`/`runner.rs` were
+  not touched — a loaded wasm extension's handlers dispatch through the
+  exact same `emit()` path as compile-time extensions.
+- **Design refinement caught while implementing, not before (named, not
+  silent — full reasoning now in `plan.md`'s Wave 2 section):** the
+  original Wave 2 plan wording said `ExtensionContext`'s three read-only
+  accessors should travel through `pi_host_call` like `ExtensionRuntime`'s
+  six actions. That does not hold up structurally: `ExtensionRuntime`'s
+  slots are stable and `Arc`-shared; `ExtensionContext`'s closures are
+  freshly built per-dispatch by `create_context()`, not `Arc`-shared, and
+  not `Send`. Doing this live would need a scoped "current context" slot in
+  `HostState`, set/cleared around each call — a real design of its own, not
+  a one-line addition. Shipped instead: the host snapshots
+  `is_idle`/`has_pending_messages`/`get_system_prompt` into a plain JSON
+  object computed in ordinary Rust, included alongside every event payload.
+  `abort()`/`shutdown()` are explicitly deferred past Wave 2 for the same
+  structural reason (control-flow actions need the same scoped-slot
+  mechanism to do safely) — not attempted as a shortcut.
+- `examples/wasm-hello/` extended: a third tool, `exercise_doors`, calls all
+  four new host-call doors and reports which succeeded; the guest now also
+  subscribes to `agent_start` and calls `append_entry` from INSIDE that
+  event handler specifically to prove a host-call door works there too, not
+  only inside a tool call.
+- New tests in `tests/wasm_extension_test.rs`:
+  `guest_can_reach_all_four_new_host_call_doors` binds test-double
+  `ExtensionRuntime` closures that capture their call arguments and asserts
+  on the captures directly (not just the guest's own summary return value);
+  `guest_event_handler_fires_through_a_real_extension_runner` builds a real
+  `ExtensionRunner::new_with_runtime`, calls `runner.emit(&ExtensionEvent::
+  AgentStart)`, and asserts a test-double `append_entry` actually fired
+  with the expected `system_prompt` snapshot (empty string — confirmed
+  correct, not a bug: `ExtensionRunner::create_context()`'s
+  `get_system_prompt` is itself still a Wave-6-style no-op stub in this
+  crate, unrelated to feat-010; the test asserts the wiring faithfully
+  passes through whatever the host computes, not a specific non-empty
+  value).
+- One clippy finding fixed during the gate run (not shipped broken): two
+  `clippy::type_complexity` errors on inline `Arc<Mutex<Vec<(String,
+  Option<Value>)>>>`-shaped test locals, fixed with four named type aliases
+  (`CapturedMessages`/`CapturedUserMessages`/`CapturedEntries`/
+  `CapturedToolSets`) at the top of the test file.
+- Gate (all re-run and confirmed directly, not just assumed from a first
+  pass): `cargo test -p pirust-extension-api --features wasm-extensions`
+  62/62 passed (60 -> 62, +2 new), `cargo clippy -p pirust-extension-api
+  --all-targets --features wasm-extensions --no-deps -D warnings` clean,
+  `cargo fmt --check` clean (workspace-wide, after one auto-fix pass,
+  formatting-only — verified the diff was whitespace/wrapping only, no
+  logic changes), `cargo build -p pirust-extension-api` (no features) still
+  succeeds with zero wasmtime in the dependency graph, `cargo test
+  --workspace` 867 passed / 2 ignored / 0 failed — identical to the Wave 1
+  baseline, zero regressions. Workspace-wide clippy shows only the same
+  pre-existing, already-documented `pirust-tui/src/latex.rs`
+  `question_mark` finding every prior wave has also seen and left
+  untouched.
+- **Resume point:** Wave 3 (sandbox limits — wasmtime fuel for a CPU cap,
+  `ResourceLimiter` for a memory cap; a deliberately-malicious/broken
+  fixture guest that the host must detect and kill within budget) per
+  `plan.md`.
+
+## 2026-08-23 — feat-010 REVIVED + WAVE 1 DONE (sandboxed Rust->WASM extension loader, skeleton)
+
+feat-010 was skipped earlier this session (see the closed feat-009 entry
+below). Revived same-day after a design discussion landed on a narrower,
+deliberately-scoped plan: Rust-authored extensions only, compiled to
+`wasm32-unknown-unknown` (not `wasip1` — avoids inheriting WASI's ambient
+filesystem/env import surface, keeps the sandbox's "only doors we built"
+property honest from the start), loaded via plain `wasmtime::{Engine,
+Linker, Store}` (not the Component Model — evaluated and rejected, see
+`plan.md`'s "Notes for whoever resumes": the neighbor project `pi_agent_rust`
+uses Component Model/WIT for a much richer multi-language surface, but
+pirust's own extension protocol is already one JSON-in/JSON-out shape
+end-to-end, so a typed WIT layer buys nothing here). `plan.md` rewritten
+end-to-end for this feature (4-wave breakdown + full guest ABI spec);
+`feature_list.json`'s feat-010 entry updated from `skipped` to `in-progress`.
+
+**WAVE 1 DONE (guest ABI + host loader skeleton, no sandbox limits yet):**
+
+- New Cargo feature `wasm-extensions` on `pirust-extension-api`
+  (`dep:wasmtime`, optional, off by default) — confirmed via `cargo tree -p
+  pirust-extension-api -e normal` that a plain build pulls in zero wasmtime
+  crates, and `cargo build -p pirust-extension-api` (no features) still
+  succeeds unchanged.
+- New `crates/pirust-extension-api/src/wasm/{mod,memory,loader}.rs`
+  (all `#[cfg(feature = "wasm-extensions")]`): `memory.rs` — guest linear
+  memory read/write helpers + the `(ptr << 32) | len` packing convention
+  used by every ABI call. `loader.rs` — `WasmExtensionLoader::load(path,
+  runtime: Arc<ExtensionRuntime>) -> Result<Extension, String>`: creates an
+  `Engine`/`Linker<HostState>` with exactly one imported host function
+  (`env.pi_host_call`), instantiates the module, calls `pi_activate` and
+  parses its JSON registration payload into a real `Extension` (Wave 1:
+  `tools` only — `commands`/`flags`/`handlers` stay empty, Wave 2's job).
+  Each registered tool's `ToolDefinition.execute` closure shares one
+  `Arc<Mutex<Store<HostState>>>` + `Instance` and re-enters the guest via
+  `pi_handle` with `op = "tool:<name>"`. The `pi_host_call` import itself
+  dispatches only `get_active_tools`/`get_all_tools` this wave (enough to
+  prove the door works end to end, not the full six-action
+  `ExtensionRuntime` list — that's Wave 2) and writes its JSON response back
+  into the SAME running guest instance's memory via a reentrant call to that
+  instance's own `pi_alloc` export (safe in wasmtime: a host import callback
+  may call back into other exports of the instance that invoked it).
+  `ExtensionRunner` (`runner.rs`) required zero changes — a loaded wasm
+  extension is just another `Extension` whose tool closures happen to call
+  into a wasm guest.
+- New standalone crate `crates/pirust-extension-api/examples/wasm-hello/`
+  (own `[workspace]` table — deliberately NOT a member of the root
+  workspace, since it targets `wasm32-unknown-unknown` and exists only to be
+  built on demand by the test below): registers two tools — `echo` (returns
+  its input params unchanged, proves the `pi_alloc`/`pi_activate`/
+  `pi_handle` round trip) and `list_active_tools` (calls back into the
+  host's `pi_host_call` door via an `extern "C" { fn pi_host_call(...); }`
+  import under `wasm_import_module = "env"`, proving the reentrant
+  guest->host->guest-memory-write path actually works, not just the
+  one-directional guest->host->guest-return path `echo` alone would prove).
+  Named, not silent: every guest-side allocation is leaked (`Box::into_raw`,
+  no `pi_dealloc` yet) — acceptable for a Wave-1 ABI proof, real hygiene
+  deferred alongside Wave 3's memory cap (which bounds the damage either
+  way).
+- New `crates/pirust-extension-api/tests/wasm_extension_test.rs`
+  (`required-features = ["wasm-extensions"]` in `Cargo.toml`, so a plain
+  `cargo test` never even compiles it): builds the real `wasm-hello` fixture
+  via `Command::new(env!("CARGO")) ... --target wasm32-unknown-unknown
+  --release` (no existing in-repo precedent for a cross-target test fixture
+  build was found to follow — `pirust-coding-agent`'s `rpc_test_fixture.rs`
+  precedent builds a same-target `[[bin]]` via Cargo's automatic
+  `CARGO_BIN_EXE_*` mechanism, which does not apply across targets — so this
+  is a new, explicitly-invoked-`cargo`-in-the-test pattern, documented as
+  such), loads it through `WasmExtensionLoader`, and drives both registered
+  tools through real calls: `loads_and_calls_a_registered_tool` (the `echo`
+  round trip) and `guest_can_call_back_into_the_host_active_tools_door` (a
+  test-supplied `ExtensionRuntime.get_active_tools` closure returning
+  `["read", "bash"]`, asserting the guest's `list_active_tools` tool
+  actually receives that exact list back through the host-call door, not a
+  hardcoded stub on either side).
+- One real bug caught and fixed during this wave (test-only, not
+  production): the first draft's `loads_and_calls_a_registered_tool` test
+  asserted `extension.tools.len() == 1`, written before the second
+  (`list_active_tools`) tool existed — caught immediately by the test
+  itself failing (`left: 2, right: 1`) on first run; fixed by updating the
+  assertion, not the code.
+- Gate: `cargo build -p pirust-extension-api --features wasm-extensions`
+  clean; `cargo clippy -p pirust-extension-api --all-targets
+  --features wasm-extensions --no-deps -D warnings` clean; `cargo fmt`
+  (4 pure-formatting diffs auto-fixed, no logic changes), `cargo fmt --check`
+  clean workspace-wide; `cargo test -p pirust-extension-api
+  --features wasm-extensions` 60/60 passed (5 suites, up from 58 pre-wave);
+  `cargo test --workspace` (default, no wasm feature) 867 passed / 2 ignored
+  / 0 failed — byte-identical to the pre-wave baseline, confirming the
+  feature gate genuinely isolates this wave's changes; `cargo clippy
+  --workspace --all-targets --no-deps -D warnings` shows only the same
+  pre-existing, previously-documented unrelated `pirust-tui/src/latex.rs`
+  finding — not touched, not introduced by this wave.
+- **Deferred, named not silent (all correctly out of Wave 1's own scope per
+  `plan.md`):** the remaining four `ExtensionRuntime` actions
+  (`send_message`/`send_user_message`/`append_entry`/`set_active_tools`) and
+  the `ExtensionContext` read-only accessors are not yet reachable via
+  `pi_host_call` — Wave 2. `commands`/`flags`/event-handler registration
+  from `pi_activate`'s payload are parsed but discarded — Wave 2. No fuel or
+  memory cap exists yet — a malicious/broken guest can still hang or
+  over-allocate this wave — Wave 3. No real `~/.pirust/agent/extensions/`
+  discovery path or author-facing docs exist yet — Wave 4. No `pi_dealloc`
+  — noted above, real hygiene work, not an ABI-proof blocker.
+- **Resume point:** Wave 2 (the remaining four `ExtensionRuntime` action
+  doors + `ExtensionContext` accessors + event-handler dispatch from
+  `pi_activate`'s `"events"` list) per `plan.md`.
+
 ## 2026-08-23 — feat-009 WAVE 6 DONE — feat-009 CLOSED (all 6 waves)
 
 Built via a delegated fork (user directive: "do it using subagents"),

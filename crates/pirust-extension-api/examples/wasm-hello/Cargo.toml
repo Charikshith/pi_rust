@@ -1,0 +1,19 @@
+[package]
+name = "wasm-hello"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Minimal proof-of-ABI extension for feat-010 Wave 1 (pirust-extension-api's WasmExtensionLoader). Not a real feature, a fixture."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+
+# Deliberately its own standalone workspace: this crate targets
+# wasm32-unknown-unknown and is not meant to be built by the parent
+# pirust workspace's ordinary `cargo build --workspace`/`cargo test
+# --workspace` (which build for the host target). It is built explicitly,
+# on demand, by pirust-extension-api's `tests/wasm_extension_test.rs`.
+[workspace]

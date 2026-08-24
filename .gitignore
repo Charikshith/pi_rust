@@ -1,4 +1,6 @@
 /target
+# standalone example crates (their own [workspace], e.g. wasm-hello) build here too
+**/target/
 **/*.rs.bk
 Cargo.lock
 .DS_Store
