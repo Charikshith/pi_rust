@@ -23,6 +23,8 @@ type AppendEntryFn = Box<dyn Fn(String, Option<Value>) + Send + Sync>;
 type GetActiveToolsFn = Box<dyn Fn() -> Vec<String> + Send + Sync>;
 type GetAllToolsFn = Box<dyn Fn() -> Vec<String> + Send + Sync>;
 type SetActiveToolsFn = Box<dyn Fn(Vec<String>) + Send + Sync>;
+type AbortFn = Box<dyn Fn() + Send + Sync>;
+type ShutdownFn = Box<dyn Fn() + Send + Sync>;
 
 /// The mode-provided action closures copied into the shared runtime
 /// (`ExtensionActions`, runner.ts:198-266). Every field is a mutable slot so
@@ -41,6 +43,14 @@ pub struct ExtensionRuntime {
     pub get_all_tools: Arc<Mutex<GetAllToolsFn>>,
     /// `pi.setActiveTools(toolNames)` — set the active tool list.
     pub set_active_tools: Arc<Mutex<SetActiveToolsFn>>,
+    /// `ctx.abort()` (Wave 5) — abort the current agent operation. Lives
+    /// here, not on a per-dispatch `ExtensionContext`, because this slot is
+    /// `Arc`-shared and rebindable exactly like the five actions above —
+    /// the same mechanism the wasm `pi_host_call` door needs (`HostState`
+    /// already holds this whole struct).
+    pub abort: Arc<Mutex<AbortFn>>,
+    /// `ctx.shutdown()` (Wave 5) — gracefully shut down and exit.
+    pub shutdown: Arc<Mutex<ShutdownFn>>,
 }
 
 impl ExtensionRuntime {
@@ -54,6 +64,8 @@ impl ExtensionRuntime {
             get_active_tools: Arc::new(Mutex::new(Box::new(Vec::new))),
             get_all_tools: Arc::new(Mutex::new(Box::new(Vec::new))),
             set_active_tools: Arc::new(Mutex::new(Box::new(|_| {}))),
+            abort: Arc::new(Mutex::new(Box::new(|| {}))),
+            shutdown: Arc::new(Mutex::new(Box::new(|| {}))),
         }
     }
 
@@ -85,5 +97,9 @@ impl ExtensionRuntime {
             &mut *actions.set_active_tools.lock().unwrap(),
             Box::new(|_| {}),
         );
+        *self.abort.lock().unwrap() =
+            std::mem::replace(&mut *actions.abort.lock().unwrap(), Box::new(|| {}));
+        *self.shutdown.lock().unwrap() =
+            std::mem::replace(&mut *actions.shutdown.lock().unwrap(), Box::new(|| {}));
     }
 }

@@ -1,11 +1,13 @@
-//! Wave 1-3 black-box tests: build the real `wasm-hello` example extension
-//! for `wasm32-unknown-unknown`, load it through `WasmExtensionLoader`, and
-//! drive its registered tools and event handler through real round trips.
-//! Wave 3's tests additionally load with deliberately-broken guest tools
-//! and tight sandbox limits, proving a runaway/memory-hungry guest fails
-//! cleanly and the host survives to load and run a fresh, well-behaved
-//! instance afterward. No Pi oracle exists for this (pirust-only addition,
-//! see repo root `plan.md`).
+//! Wave 1-3 + Wave 5 black-box tests: build the real `wasm-hello` example
+//! extension for `wasm32-unknown-unknown`, load it through
+//! `WasmExtensionLoader`, and drive its registered tools and event handler
+//! through real round trips. Wave 3's tests additionally load with
+//! deliberately-broken guest tools and tight sandbox limits, proving a
+//! runaway/memory-hungry guest fails cleanly and the host survives to load
+//! and run a fresh, well-behaved instance afterward. Wave 5 adds the
+//! `abort`/`shutdown` host-call doors and a `pi_dealloc` leak regression
+//! test. No Pi oracle exists for this (pirust-only addition, see repo root
+//! `plan.md`).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -137,20 +139,22 @@ fn guest_can_call_back_into_the_host_active_tools_door() {
     assert_eq!(result, serde_json::json!(["read", "bash"]));
 }
 
-/// Wave 2: proves all four of the newly-wired `ExtensionRuntime` action
+/// Wave 2 + Wave 5: proves all six of the wired `ExtensionRuntime` action
 /// doors (`send_message`/`send_user_message`/`append_entry`/
-/// `set_active_tools`) actually reach the real host closures, by binding
-/// test-double closures that capture what they were called with and
-/// asserting on the captures directly — not just on the guest's own summary
-/// return value.
+/// `set_active_tools`/`abort`/`shutdown`) actually reach the real host
+/// closures, by binding test-double closures that capture what they were
+/// called with and asserting on the captures directly — not just on the
+/// guest's own summary return value.
 #[test]
-fn guest_can_reach_all_four_new_host_call_doors() {
+fn guest_can_reach_all_six_host_call_doors() {
     let wasm_path = build_example();
 
     let sent_messages: CapturedMessages = Arc::new(Mutex::new(Vec::new()));
     let sent_user_messages: CapturedUserMessages = Arc::new(Mutex::new(Vec::new()));
     let appended_entries: CapturedEntries = Arc::new(Mutex::new(Vec::new()));
     let active_tools_sets: CapturedToolSets = Arc::new(Mutex::new(Vec::new()));
+    let abort_called = Arc::new(Mutex::new(0u32));
+    let shutdown_called = Arc::new(Mutex::new(0u32));
 
     let runtime = ExtensionRuntime::noop();
     {
@@ -158,6 +162,8 @@ fn guest_can_reach_all_four_new_host_call_doors() {
         let sent_user_messages = Arc::clone(&sent_user_messages);
         let appended_entries = Arc::clone(&appended_entries);
         let active_tools_sets = Arc::clone(&active_tools_sets);
+        let abort_called = Arc::clone(&abort_called);
+        let shutdown_called = Arc::clone(&shutdown_called);
         runtime.bind(ExtensionRuntime {
             send_message: Arc::new(Mutex::new(Box::new(move |message, options| {
                 sent_messages.lock().unwrap().push((message, options));
@@ -170,6 +176,12 @@ fn guest_can_reach_all_four_new_host_call_doors() {
             }))),
             set_active_tools: Arc::new(Mutex::new(Box::new(move |tools| {
                 active_tools_sets.lock().unwrap().push(tools);
+            }))),
+            abort: Arc::new(Mutex::new(Box::new(move || {
+                *abort_called.lock().unwrap() += 1;
+            }))),
+            shutdown: Arc::new(Mutex::new(Box::new(move || {
+                *shutdown_called.lock().unwrap() += 1;
             }))),
             ..ExtensionRuntime::noop()
         });
@@ -198,6 +210,8 @@ fn guest_can_reach_all_four_new_host_call_doors() {
             "send_user_message": true,
             "append_entry": true,
             "set_active_tools": true,
+            "abort": true,
+            "shutdown": true,
         })
     );
 
@@ -213,6 +227,16 @@ fn guest_can_reach_all_four_new_host_call_doors() {
     assert_eq!(
         *active_tools_sets.lock().unwrap(),
         vec![vec!["echo".to_string()]]
+    );
+    assert_eq!(
+        *abort_called.lock().unwrap(),
+        1,
+        "abort door should have reached the bound closure"
+    );
+    assert_eq!(
+        *shutdown_called.lock().unwrap(),
+        1,
+        "shutdown door should have reached the bound closure"
     );
 }
 
@@ -272,6 +296,44 @@ fn guest_event_handler_fires_through_a_real_extension_runner() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0, "wasm_agent_start");
     assert_eq!(entries[0].1, Some(serde_json::json!({"system_prompt": ""})));
+}
+
+/// Wave 5: proves `pi_dealloc` is actually being called, not just present
+/// in the code. Before Wave 5, every call leaked its op/payload/result
+/// buffers permanently; with a several-KB payload repeated thousands of
+/// times, that would overflow the default 16 MiB memory ceiling long
+/// before this loop finishes. Fuel is raised well above the production
+/// default (this test is about memory, not CPU) — the memory ceiling is
+/// left untouched, since that is exactly what a leak regression would blow
+/// through.
+#[test]
+fn many_tool_calls_do_not_exhaust_the_guest_memory_ceiling() {
+    let wasm_path = build_example();
+    let limits = WasmExtensionLimits {
+        fuel: 5_000_000_000,
+        ..WasmExtensionLimits::default()
+    };
+    let extension = WasmExtensionLoader::load_with_limits(
+        &wasm_path,
+        Arc::new(ExtensionRuntime::noop()),
+        limits,
+    )
+    .expect("wasm extension should load");
+    let echo = extension
+        .tools
+        .get("echo")
+        .expect("echo should be registered");
+
+    let ctx = test_context();
+    let payload = serde_json::json!({"data": "x".repeat(4000)});
+    for i in 0..5_000u32 {
+        (echo.definition.execute)(ToolCallParams {
+            tool_call_id: "leak-check",
+            params: &payload,
+            ctx: &ctx,
+        })
+        .unwrap_or_else(|e| panic!("echo call {i} failed — likely a memory-leak regression: {e}"));
+    }
 }
 
 /// Wave 3: a genuine infinite loop must trap on fuel exhaustion (a normal

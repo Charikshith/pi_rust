@@ -41,11 +41,23 @@ CPU/memory limits or reach anything the host didn't explicitly expose via
 
 ## Guest ABI (the whole contract an extension author needs)
 
-Three exports, one import — deliberately minimal:
+Four exports, one import — deliberately minimal:
 
 - `pi_alloc(len: i32) -> i32` — guest allocates `len` bytes in its own linear
   memory, returns the pointer. Lets the host write a JSON request into guest
   memory before calling into it.
+- `pi_dealloc(ptr: i32, len: i32)` (Wave 5) — frees a `(ptr, len)` buffer this
+  guest allocated via `pi_alloc`. Ownership rule: whoever reads a buffer LAST
+  frees it. The host frees anything it reads back from this guest
+  (`pi_activate`/`pi_handle` results, and the `op`/`payload` buffers it wrote
+  via `pi_alloc` once `pi_handle` returns — the guest already read them
+  synchronously by then). The one case only the GUEST can free is a
+  `pi_host_call` response: the host writes it into the guest's own memory and
+  hands back a pointer, but control returns to the guest afterward, so the
+  guest frees it itself once parsed. Optional but strongly recommended — a
+  guest without this export is tolerated (the host skips freeing, silently,
+  and that guest's allocations leak exactly as every guest's did before
+  Wave 5) rather than erroring.
 - `pi_activate() -> i64` — called once at load. Return value is a packed
   `(ptr << 32) | len` pointing at a UTF-8 JSON registration payload:
   `{ "tools": [...], "commands": [...], "flags": [...] }` (subset of
@@ -251,28 +263,72 @@ Three exports, one import — deliberately minimal:
      baseline, confirming zero regressions from a feature that is off by
      default.
 
-**feat-010 is now feature-complete across all 4 planned waves.** Real, named
-residuals (not blockers, matching this project's own convention of stating
-a gap rather than a false "fully done"):
+**feat-010 shipped all 4 planned waves, then closed 4 of its 5 named
+residuals in Wave 5.**
 
-- `abort`/`shutdown` host-call doors were never implemented (deferred since
-  Wave 2 — they need a scoped "current context" slot in `HostState`, a real
-  design of their own, not attempted as a shortcut).
-- `commands`/`flags` declared in `pi_activate`'s JSON are parsed into
-  `ActivateResponse` but never wired into the loaded `Extension` — an author
-  can declare them, nothing happens with them yet.
-- No hot-reload: a `.wasm` file added or changed after startup is not
-  discovered until the next restart (`discover_wasm_extensions` only runs
-  once, at `bind_extension_runner` time).
-- No per-extension configurable sandbox limits in the real loading path:
-  `WasmExtensionLimits` as a type supports different fuel/memory values per
-  load (`load_with_limits`), but `discover_wasm_extensions` always calls the
-  plain `load` (i.e. `WasmExtensionLimits::default()`) for every file — a
-  future wave could read a per-extension manifest/config to override this.
+5. **Wave 5 - close the memory leak, per-extension limits, abort/shutdown,
+   and hot-reload residuals — DONE 2026-08-24.**
+   - **`pi_dealloc`** (see Guest ABI above for the ownership rule): guest
+     export added to `wasm-hello`; host frees `pi_activate`/`pi_handle`
+     results and the `op`/`payload` input buffers via a new `dealloc_guest`
+     helper in `wasm/loader.rs` (best-effort — a guest without the export is
+     tolerated, not an error); the guest's own `call_host_raw` frees the one
+     buffer only it can free (a `pi_host_call` response). Proven by a new
+     `many_tool_calls_do_not_exhaust_the_guest_memory_ceiling` test: several
+     thousand calls with multi-KB payloads under the default 16 MiB ceiling
+     — this would have blown through the ceiling before the fix.
+   - **Per-extension sandbox limits**: a `<name>.wasm.limits.json` sidecar
+     next to `<name>.wasm` (either/both of `fuel`/`max_memory_bytes`,
+     `#[serde(default)]` per field); `discover_wasm_extensions` reads it and
+     calls `load_with_limits` instead of the always-default `load`.
+     Self-declared limits from `pi_activate` were deliberately rejected — an
+     untrusted guest declaring its own ceiling isn't a real sandbox control,
+     only an operator-owned file is. Proven by
+     `sidecar_limits_file_overrides_the_default_fuel_budget`.
+   - **`abort`/`shutdown` host-call doors**: the Wave 2 "scoped current
+     context slot" design was never actually needed — both route through
+     two new `ExtensionRuntime` fields (`Arc<Mutex<Box<dyn Fn + Send +
+     Sync>>>`, the exact same stable slot pattern the other six actions
+     already use), which `HostState` already holds. `ExtensionRunner::
+     create_context()`'s `abort`/`shutdown` closures now call through those
+     slots too — a free win: native (non-wasm) handlers get real abort/
+     shutdown, not just wasm ones. Bound in `pirust-coding-agent` to
+     `Agent::abort()` and `std::process::exit(0)` respectively. Proven by
+     `guest_can_reach_all_six_host_call_doors` (wasm) and
+     `native_handler_abort_and_shutdown_reach_bound_closures` (native).
+   - **Hot-reload**: deliberately narrowed to WASM-extension discovery only
+     — full `/reload` (skills/prompts/themes/context files) stays unwired,
+     a separate pre-existing gap. New `/reload-extensions` slash command
+     (`interactive_mode.rs`) calls `SingleTurnSession::reload_wasm_
+     extensions()`, which re-runs `discover_wasm_extensions` against the
+     same bound `ExtensionRuntime` Arc and appends only extensions whose
+     `resolved_path` isn't already loaded (the pure merge step,
+     `new_extensions_only`, is unit-tested directly —
+     `new_extensions_only_dedupes_by_resolved_path` — rather than through a
+     full `SingleTurnSession`, to avoid the env-var-agent_dir race
+     `config.rs`'s tests already document avoiding).
+   - Gate: `cargo fmt --check` clean; `cargo clippy -p pirust-extension-api
+     -p pirust-coding-agent --all-targets --features wasm-extensions
+     --no-deps -D warnings` clean; `cargo clippy --workspace --all-targets
+     --no-deps -D warnings` clean except the same pre-existing
+     `pirust-tui/src/latex.rs` finding every prior wave has carried; default
+     (no-feature) `cargo build -p pirust-coding-agent` clean, `cargo tree`
+     confirms zero wasmtime; `cargo test -p pirust-extension-api --features
+     wasm-extensions` 66/66 (64 -> 66, +2); `cargo test -p pirust-coding-agent
+     --features wasm-extensions` 234/234 (232 -> 234, +2); `cargo test
+     --workspace` 868 passed / 2 ignored / 0 failed (867 -> 868, +1 — the
+     native abort/shutdown test runs unconditionally, not behind the wasm
+     feature). No git commits/pushes during construction.
+
+Remaining named residual (not closed this wave, not a blocker):
+
 - No live differential or fuzzing of the guest ABI itself (malformed
   `pi_activate`/`pi_handle` JSON is handled defensively via `serde`'s
   `#[serde(default)]`/`Result` plumbing and exercised by the "garbage file"
-  test, but not adversarially fuzzed).
+  test, but not adversarially fuzzed). Also newly named this wave: `commands`/
+  `flags` declared in `pi_activate`'s JSON are still parsed but never wired
+  into the loaded `Extension` (unchanged from Wave 2 — out of Wave 5's
+  approved scope).
 
 ## Notes for whoever resumes
 

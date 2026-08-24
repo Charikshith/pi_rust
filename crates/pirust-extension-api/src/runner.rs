@@ -120,15 +120,25 @@ impl ExtensionRunner {
     }
 
     fn create_context(&self) -> ExtensionContext {
+        // `abort`/`shutdown` (Wave 5) call through the shared, `bind_runtime`-
+        // rebindable `ExtensionRuntime` slots — the same mechanism wasm's
+        // `pi_host_call` "abort"/"shutdown" ops read from (`HostState` holds
+        // this same `Arc`), so a native handler and a wasm guest reach the
+        // identical real closure. `is_idle`/`has_pending_messages`/
+        // `get_system_prompt` remain the Wave 2 constants — no runtime slot
+        // exists for those yet (out of this wave's scope).
+        let runtime = self.runtime();
+        let abort_runtime = Arc::clone(&runtime);
+        let shutdown_runtime = Arc::clone(&runtime);
         ExtensionContext {
             mode: self.mode,
             has_ui: matches!(self.mode, ExtensionMode::Tui | ExtensionMode::Rpc),
             cwd: self.cwd.clone(),
             is_idle: Box::new(|| true),
             signal: None,
-            abort: Box::new(|| {}),
+            abort: Box::new(move || (abort_runtime.abort.lock().unwrap())()),
             has_pending_messages: Box::new(|| false),
-            shutdown: Box::new(|| {}),
+            shutdown: Box::new(move || (shutdown_runtime.shutdown.lock().unwrap())()),
             get_context_usage: Box::new(|| None),
             get_system_prompt: Box::new(String::new),
         }
@@ -659,6 +669,42 @@ mod tests {
             target_session_file: None,
         });
         assert_eq!(result.unwrap()["cancel"], true);
+    }
+
+    /// Wave 5: `ctx.abort()`/`ctx.shutdown()` must reach a real closure bound
+    /// via `bind_runtime` — proving `create_context()` no longer hardcodes
+    /// them as no-ops, for a NATIVE handler (not just the wasm door, which
+    /// has its own test in `pirust-extension-api/tests/wasm_extension_test.rs`).
+    #[test]
+    fn native_handler_abort_and_shutdown_reach_bound_closures() {
+        let abort_called = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let shutdown_called = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let abort_flag = std::sync::Arc::clone(&abort_called);
+        let shutdown_flag = std::sync::Arc::clone(&shutdown_called);
+
+        let handler: ExtensionHandler = Box::new(move |_e, ctx| {
+            (ctx.abort)();
+            (ctx.shutdown)();
+            Ok(Value::Null)
+        });
+        let mut runner = runner_with(handler);
+        runner.bind_runtime(ExtensionRuntime {
+            abort: Arc::new(std::sync::Mutex::new(Box::new(move || {
+                abort_flag.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }))),
+            shutdown: Arc::new(std::sync::Mutex::new(Box::new(move || {
+                shutdown_flag.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }))),
+            ..ExtensionRuntime::noop()
+        });
+
+        runner.emit(&ExtensionEvent::AgentStart);
+
+        assert_eq!(abort_called.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            shutdown_called.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]

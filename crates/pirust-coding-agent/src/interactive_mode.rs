@@ -816,6 +816,7 @@ impl InteractiveMode {
                 "/restart is not available in this session — start a new `pirust` process",
             ),
             "refresh-model-list" => self.refresh_models(),
+            "reload-extensions" => self.reload_extensions(),
             "quit" => {
                 self.quit.store(true, Ordering::Relaxed);
             }
@@ -911,6 +912,16 @@ impl InteractiveMode {
     fn refresh_models(&mut self) {
         self.refresh_status();
         self.show_error("Model list refreshed");
+    }
+
+    /// `/reload-extensions` (Wave 5) — rescan `<agent_dir>/extensions/*.wasm`
+    /// for extensions not already loaded, without restarting `pirust`.
+    fn reload_extensions(&mut self) {
+        match self.session.reload_wasm_extensions() {
+            Ok(0) => self.show_error("No new extensions found"),
+            Ok(count) => self.show_error(format!("Loaded {count} new extension(s)")),
+            Err(error) => self.show_error(format!("Could not reload extensions: {error}")),
+        }
     }
 
     /// Start one turn as a task so input and streamed events remain responsive.
@@ -1497,6 +1508,11 @@ pub const BUILTIN_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
     (
         "reload",
         "Reload keybindings, extensions, skills, prompts, themes, and context files",
+        None,
+    ),
+    (
+        "reload-extensions",
+        "Rescan <agent_dir>/extensions/*.wasm for new or changed extensions (Wave 5, pirust-only — narrower than /reload)",
         None,
     ),
     ("quit", "Quit pi", None),

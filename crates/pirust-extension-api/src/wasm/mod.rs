@@ -39,16 +39,31 @@ pub use loader::WasmExtensionLoader;
 /// enough that the fixture's own deliberately-broken `burn_fuel` guest tool
 /// (a genuine infinite loop) traps in well under a second rather than
 /// hanging the test suite.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
 pub struct WasmExtensionLimits {
     /// Fuel units available to the `Store` for its entire loaded lifetime.
+    #[serde(default = "default_fuel")]
     pub fuel: u64,
     /// Maximum linear memory size, in bytes, any guest memory may grow to.
     /// Growing past this traps (`trap_on_grow_failure(true)`) rather than
     /// silently returning `-1` to the guest, so a guest that never checks
     /// `memory.grow`'s return value still can't limp along with a failed
     /// allocation — the call fails cleanly at the host boundary instead.
+    #[serde(default = "default_max_memory_bytes")]
     pub max_memory_bytes: usize,
+}
+
+/// Wave 5: per-extension overrides (`discover_wasm_extensions` in
+/// `pirust-coding-agent`) are read from a `<name>.wasm.limits.json` sidecar
+/// that may set only one field — `#[serde(default = ...)]` on each field
+/// (rather than on the whole struct) lets a partial sidecar fill the other
+/// field from the same defaults `Default::default()` uses.
+fn default_fuel() -> u64 {
+    WasmExtensionLimits::default().fuel
+}
+
+fn default_max_memory_bytes() -> usize {
+    WasmExtensionLimits::default().max_memory_bytes
 }
 
 impl Default for WasmExtensionLimits {
@@ -62,9 +77,10 @@ impl Default for WasmExtensionLimits {
 
 /// Wasmtime `Store` data — the one thing a loaded extension's `pi_host_call`
 /// door can reach into, plus the Wave 3 resource limiter. Wave 2 dispatches
-/// the full six `ExtensionRuntime` actions; `ExtensionContext`'s read-only
-/// accessors travel as a host-computed JSON snapshot instead of a live door
-/// (see `loader.rs`'s doc comment), and `abort`/`shutdown` remain deferred.
+/// the six `ExtensionRuntime` actions; Wave 5 adds `abort`/`shutdown` (same
+/// `ExtensionRuntime`, two more slots). `ExtensionContext`'s three read-only
+/// accessors still travel as a host-computed JSON snapshot instead of a live
+/// door (see `loader.rs`'s doc comment).
 pub(crate) struct HostState {
     runtime: std::sync::Arc<crate::runtime::ExtensionRuntime>,
     limits: wasmtime::StoreLimits,

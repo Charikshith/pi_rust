@@ -835,6 +835,17 @@ pub trait PrintModeSession: Send + Sync {
     /// default lets every tool run, matching Pi's default allow behaviour for
     /// the headless/trusted path; the TUI supplies the real decider.
     fn set_tool_approval_decider(&self, _decider: ToolApprovalDecider) {}
+
+    /// `/reload-extensions` (Wave 5, pirust-only — no Pi TS counterpart, and
+    /// distinct from `reload()` above, which is Pi's full skills/prompts/
+    /// themes/context-files reload and remains unwired). Rescans
+    /// `<agent_dir>/extensions/*.wasm` for files not already loaded and adds
+    /// them to the running extension runner. Returns how many were added.
+    /// The default covers a build without wasm-extensions support, or a
+    /// session on which extensions were never bound.
+    fn reload_wasm_extensions(&self) -> Result<usize, String> {
+        Err("wasm extensions are not supported in this build".to_string())
+    }
 }
 
 /// `session.prompt`'s options (`print-mode.ts:122`). The initial prompt passes

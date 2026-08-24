@@ -7,13 +7,15 @@
 //! deliberately-broken guest tools, proving the sandbox limits actually
 //! stop a runaway/memory-hungry guest rather than just existing on paper.
 //!
-//! Known Wave-1 simplification (named, not silent): every allocation here
-//! is leaked (`Box::into_raw` with no matching free). A real extension
-//! author's crate will want a `pi_dealloc` export eventually; out of scope
-//! for proving the ABI itself — and Wave 3's memory ceiling bounds the
-//! damage from this regardless, since a leak-happy extension will simply
-//! hit the ceiling and start failing cleanly instead of exhausting host
-//! memory.
+//! Wave 5: `pi_dealloc` closes the Wave-1 "every allocation leaks" gap.
+//! Ownership rule (see repo-root `plan.md`'s Guest ABI section): whoever
+//! reads a `(ptr, len)` buffer LAST frees it. The host frees anything it
+//! reads back from this guest (`pi_activate`/`pi_handle` results, and the
+//! `op`/`payload` buffers it wrote via `pi_alloc` once `pi_handle` returns)
+//! — no guest-side change needed for those. The one buffer only the GUEST
+//! can free is a `pi_host_call` response: the host writes it into this
+//! guest's own memory and hands back a pointer, but control returns to the
+//! guest afterward, so `call_host_raw` frees it itself once parsed.
 
 use serde_json::Value;
 
@@ -44,6 +46,27 @@ fn leak_response(value: &Value) -> i64 {
     pack(ptr, len)
 }
 
+/// The exact inverse of `leak_bytes`: reconstructs the original
+/// `Box<[u8]>` from its raw parts and drops it, freeing the allocation.
+/// Only valid on a `(ptr, len)` this instance produced itself via
+/// `leak_bytes`/`pi_alloc` — never on a pointer received FROM the host
+/// (that memory belongs to the host's own allocator).
+#[no_mangle]
+pub extern "C" fn pi_dealloc(ptr: i32, len: i32) {
+    if ptr == 0 || len <= 0 {
+        return;
+    }
+    // SAFETY: every live `ptr`/`len` pair this instance hands out was
+    // produced by `leak_bytes` from a `Box<[u8]>` of exactly this length,
+    // per the ABI's single-owner-frees-once contract; the caller (host or
+    // this module's own `call_host_raw`) is trusted not to double-free or
+    // use the pointer again afterward.
+    unsafe {
+        let slice = std::ptr::slice_from_raw_parts_mut(ptr as *mut u8, len as usize);
+        drop(Box::from_raw(slice));
+    }
+}
+
 /// Calls the one host-call door with `op` and the given raw payload range,
 /// returning the host's decoded JSON response.
 fn call_host_raw(op: &str, payload_ptr: i32, payload_len: i32) -> Value {
@@ -57,7 +80,11 @@ fn call_host_raw(op: &str, payload_ptr: i32, payload_len: i32) -> Value {
     // SAFETY: the host always returns a (ptr, len) pointing at bytes it just
     // wrote into this instance's own memory via a reentrant pi_alloc call.
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    let value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+    // The host has already returned control to us — we are the last (and
+    // only) reader of this buffer, so we free it ourselves.
+    pi_dealloc(ptr as i32, len as i32);
+    value
 }
 
 /// Calls a host-call op that takes no payload (e.g. `get_active_tools`).
@@ -102,7 +129,7 @@ pub extern "C" fn pi_activate() -> i64 {
             {
                 "name": "exercise_doors",
                 "label": "Exercise Doors",
-                "description": "Calls send_message, send_user_message, append_entry, and set_active_tools via pi_host_call and reports whether each succeeded. Proves the Wave 2 host-call doors."
+                "description": "Calls send_message, send_user_message, append_entry, set_active_tools, abort, and shutdown via pi_host_call and reports whether each succeeded. Proves the Wave 2 + Wave 5 host-call doors."
             },
             {
                 "name": "burn_fuel",
@@ -175,6 +202,8 @@ pub extern "C" fn pi_handle(op_ptr: i32, op_len: i32, payload_ptr: i32, payload_
                 "set_active_tools",
                 &serde_json::json!({"tools": ["echo"]}),
             );
+            let abort = call_host("abort");
+            let shutdown = call_host("shutdown");
 
             serde_json::json!({
                 "ok": true,
@@ -183,6 +212,8 @@ pub extern "C" fn pi_handle(op_ptr: i32, op_len: i32, payload_ptr: i32, payload_
                     "send_user_message": host_call_ok(&send_user_message),
                     "append_entry": host_call_ok(&append_entry),
                     "set_active_tools": host_call_ok(&set_active_tools),
+                    "abort": host_call_ok(&abort),
+                    "shutdown": host_call_ok(&shutdown),
                 }
             })
         }

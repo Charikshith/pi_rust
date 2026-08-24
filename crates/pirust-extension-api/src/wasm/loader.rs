@@ -4,17 +4,20 @@
 //! `plan.md`).
 //!
 //! Wave 2 note (named, not silent — see `plan.md`'s Wave 2 write-up for the
-//! full reasoning): only the three READ-ONLY `ExtensionContext` accessors
+//! full reasoning): the three READ-ONLY `ExtensionContext` accessors
 //! (`is_idle`/`has_pending_messages`/`get_system_prompt`) are exposed to a
-//! wasm guest, and only as a plain JSON snapshot taken by the HOST before
-//! calling into `pi_handle` — never as a live `pi_host_call` op. Those
-//! closures are freshly built by `ExtensionRunner::create_context()` on
-//! every single dispatch, are not `Arc`-shared, and are not `Send`; routing
-//! them through a live host-call door would need a scoped "current context"
-//! slot in `HostState` set/cleared around each call, which is real
-//! re-entrancy design of its own. `abort()`/`shutdown()` are control-flow
-//! actions, not read-only queries, and need that same scoped-slot mechanism
-//! to do right — both are explicitly deferred past Wave 2, not hacked in.
+//! wasm guest only as a plain JSON snapshot taken by the HOST before calling
+//! into `pi_handle` — never as a live `pi_host_call` op. Those closures are
+//! freshly built by `ExtensionRunner::create_context()` on every single
+//! dispatch and carry no `Send` bound, so routing THEM through a live
+//! host-call door would need a scoped "current context" slot in `HostState`
+//! — out of scope here.
+//!
+//! Wave 5: `abort()`/`shutdown()` turned out not to need that scoped-slot
+//! design at all — they route through `ExtensionRuntime`'s existing
+//! `Arc<Mutex<Box<dyn Fn + Send + Sync>>>` slots (the same stable, rebindable
+//! mechanism `send_message`/`get_active_tools`/etc. already use), which
+//! `HostState` already holds. See `host_call`'s `"abort"`/`"shutdown"` arms.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -192,8 +195,23 @@ fn call_activate(
         .get(ptr as usize..(ptr as usize + len as usize))
         .ok_or_else(|| "pi_activate returned an out-of-bounds pointer".to_string())?
         .to_vec();
+    dealloc_guest(store, instance, ptr, len);
 
     serde_json::from_slice(&bytes).map_err(|e| format!("pi_activate returned invalid JSON: {e}"))
+}
+
+/// Wave 5: free a `(ptr, len)` buffer via the guest's own `pi_dealloc`
+/// export, if it has one. Best-effort — a guest built before Wave 5 (no
+/// `pi_dealloc` export) is tolerated: the call is silently skipped and that
+/// guest's allocations simply keep leaking as they always did, bounded by
+/// the Wave 3 memory ceiling exactly as before.
+fn dealloc_guest(store: &mut Store<HostState>, instance: &Instance, ptr: u32, len: u32) {
+    if ptr == 0 || len == 0 {
+        return;
+    }
+    if let Ok(dealloc) = instance.get_typed_func::<(i32, i32), ()>(&mut *store, "pi_dealloc") {
+        let _ = dealloc.call(&mut *store, (ptr as i32, len as i32));
+    }
 }
 
 /// The shared alloc-write-call(`pi_handle`)-read round trip used by both
@@ -246,12 +264,30 @@ fn call_guest(shared: &Arc<WasmInstance>, op: &str, payload: &[u8]) -> Result<Va
             ),
         )
         .map_err(|e| format!("pi_handle trapped: {e}"))?;
+    // The guest has already read both input buffers synchronously inside
+    // `pi_handle` by the time this call returns — free them now (Wave 5's
+    // ownership rule: whoever allocated a buffer the guest is done reading
+    // frees it).
+    dealloc_guest(
+        &mut store,
+        &shared.instance,
+        op_ptr as u32,
+        op_bytes.len() as u32,
+    );
+    dealloc_guest(
+        &mut store,
+        &shared.instance,
+        payload_ptr as u32,
+        payload.len() as u32,
+    );
+
     let (result_ptr, result_len) = unpack(packed);
     let bytes = memory
         .data(&*store)
         .get(result_ptr as usize..(result_ptr as usize + result_len as usize))
         .ok_or_else(|| "pi_handle returned an out-of-bounds pointer".to_string())?
         .to_vec();
+    dealloc_guest(&mut store, &shared.instance, result_ptr, result_len);
     drop(store);
 
     let response: HandleResponse = serde_json::from_slice(&bytes)
@@ -300,10 +336,11 @@ fn make_event_handler(shared: Arc<WasmInstance>, event_type: String) -> Extensio
 }
 
 /// The one host-call door every wasm extension can knock on. Wave 2 wires
-/// the full six `ExtensionRuntime` actions; `ExtensionContext`'s three
-/// read-only accessors travel as a payload snapshot instead (see this
-/// module's doc comment), and `abort`/`shutdown` are deferred (same
-/// reasoning). Unknown ops still fail closed.
+/// the six `ExtensionRuntime` actions; Wave 5 adds `abort`/`shutdown` (also
+/// `ExtensionRuntime` slots, see this module's doc comment).
+/// `ExtensionContext`'s three read-only accessors still travel as a payload
+/// snapshot instead of a host-call op (see this module's doc comment).
+/// Unknown ops still fail closed.
 fn host_call(
     mut caller: Caller<'_, HostState>,
     op_ptr: i32,
@@ -365,6 +402,14 @@ fn host_call(
                 .to_string();
             let data = payload_value.get("data").cloned().filter(|v| !v.is_null());
             (caller.data().runtime.append_entry.lock().unwrap())(custom_type, data);
+            serde_json::json!({"ok": true, "value": Value::Null})
+        }
+        "abort" => {
+            (caller.data().runtime.abort.lock().unwrap())();
+            serde_json::json!({"ok": true, "value": Value::Null})
+        }
+        "shutdown" => {
+            (caller.data().runtime.shutdown.lock().unwrap())();
             serde_json::json!({"ok": true, "value": Value::Null})
         }
         "set_active_tools" => {

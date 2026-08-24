@@ -67,6 +67,33 @@ use serde_json::Value;
 /// calling `std::env::set_var`, which is process-global and races under
 /// `cargo test`'s parallel threads) — this keeps the function itself
 /// injectable/testable the same way.
+/// Wave 5: `<name>.wasm.limits.json` next to `<name>.wasm`, e.g.
+/// `{"fuel": 500000000, "max_memory_bytes": 33554432}`. Either field may be
+/// omitted (falls back to `WasmExtensionLimits::default()`'s value — see
+/// `wasm/mod.rs`). A sidecar's LIMITS come from the filesystem, not from the
+/// extension's own `pi_activate` payload — a self-declared ceiling from an
+/// untrusted guest is not a real sandbox control, only an operator-owned
+/// file is.
+#[cfg(feature = "wasm-extensions")]
+fn load_extension_limits(
+    wasm_path: &std::path::Path,
+) -> pirust_extension_api::wasm::WasmExtensionLimits {
+    let sidecar = wasm_path.with_extension("wasm.limits.json");
+    let Ok(contents) = std::fs::read_to_string(&sidecar) else {
+        return pirust_extension_api::wasm::WasmExtensionLimits::default();
+    };
+    match serde_json::from_str(&contents) {
+        Ok(limits) => limits,
+        Err(error) => {
+            eprintln!(
+                "Warning: ignoring malformed wasm extension limits sidecar {}: {error}",
+                sidecar.display()
+            );
+            pirust_extension_api::wasm::WasmExtensionLimits::default()
+        }
+    }
+}
+
 #[cfg(feature = "wasm-extensions")]
 fn discover_wasm_extensions(
     runtime: &Arc<ExtensionRuntime>,
@@ -88,7 +115,8 @@ fn discover_wasm_extensions(
         if path.extension().and_then(|ext| ext.to_str()) != Some("wasm") {
             continue;
         }
-        match WasmExtensionLoader::load(&path, Arc::clone(runtime)) {
+        let limits = load_extension_limits(&path);
+        match WasmExtensionLoader::load_with_limits(&path, Arc::clone(runtime), limits) {
             Ok(extension) => loaded.push(extension),
             Err(error) => {
                 eprintln!(
@@ -320,6 +348,18 @@ impl SingleTurnSession {
                     "Warning: extension sendUserMessage is not supported in single-turn mode"
                 );
             }))),
+            // `ctx.abort()` (Wave 5) — cancel the agent's current run, if any
+            // (`Agent::abort`, agent.rs:437; agent.ts:310-312).
+            abort: Arc::new(Mutex::new(Box::new({
+                let agent = agent.clone();
+                move || agent.abort()
+            }))),
+            // `ctx.shutdown()` (Wave 5) — this session's process IS the whole
+            // pirust run (headless or interactive single-turn), so a
+            // graceful shutdown request exits the process directly rather
+            // than needing a separate quit flag threaded back in from
+            // main.rs.
+            shutdown: Arc::new(Mutex::new(Box::new(|| std::process::exit(0)))),
         };
         runner.bind_runtime(runtime);
 
@@ -565,6 +605,45 @@ impl PrintModeSession for SingleTurnSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(decider);
     }
+
+    #[cfg(feature = "wasm-extensions")]
+    fn reload_wasm_extensions(&self) -> Result<usize, String> {
+        let guard = self
+            .extension_runner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(runner_arc) = guard.as_ref() else {
+            return Err("extensions have not been bound yet".to_string());
+        };
+        let mut runner = runner_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = runner.runtime();
+        let config = crate::config::ConfigEnv::from_process_env();
+        let discovered = discover_wasm_extensions(&runtime, &config);
+        let newly_added = new_extensions_only(&runner.extensions, discovered);
+        let count = newly_added.len();
+        runner.extensions.extend(newly_added);
+        Ok(count)
+    }
+}
+
+/// Wave 5: the pure merge step behind `reload_wasm_extensions` — which
+/// freshly `discover_wasm_extensions()`-ed extensions are actually new,
+/// keyed by `resolved_path` against what the runner already has loaded.
+/// Split out so this de-dup logic is unit-testable without spinning up a
+/// full `SingleTurnSession` (which would need a real `agent_dir` env var —
+/// this module's own established convention, see `config.rs`'s doc comment,
+/// avoids process-global env vars in tests to not race under `cargo test`'s
+/// parallel threads).
+#[cfg(feature = "wasm-extensions")]
+fn new_extensions_only(already_loaded: &[Extension], discovered: Vec<Extension>) -> Vec<Extension> {
+    let existing: std::collections::HashSet<&str> = already_loaded
+        .iter()
+        .map(|ext| ext.resolved_path.as_str())
+        .collect();
+    discovered
+        .into_iter()
+        .filter(|ext| !existing.contains(ext.resolved_path.as_str()))
+        .collect()
 }
 
 impl TuiRuntimeInfo for SingleTurnSession {
@@ -958,5 +1037,106 @@ mod wasm_extension_discovery_tests {
             "the broken file must be skipped, the good one must still load"
         );
         assert!(loaded[0].tools.contains_key("echo"));
+    }
+
+    /// Wave 5: a `<name>.wasm.limits.json` sidecar with a deliberately tiny
+    /// fuel budget must actually take effect — proven by a plain `echo` call
+    /// (which succeeds comfortably under the production default) now
+    /// trapping. Without the sidecar being read, this would always succeed.
+    #[test]
+    fn sidecar_limits_file_overrides_the_default_fuel_budget() {
+        let wasm_hello = build_wasm_hello();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let extensions_dir = tmp.path().join("extensions");
+        std::fs::create_dir_all(&extensions_dir).expect("create extensions dir");
+        let wasm_path = extensions_dir.join("wasm-hello.wasm");
+        std::fs::copy(&wasm_hello, &wasm_path).expect("copy wasm-hello fixture into place");
+        std::fs::write(
+            extensions_dir.join("wasm-hello.wasm.limits.json"),
+            br#"{"fuel": 2000000}"#,
+        )
+        .expect("write limits sidecar");
+
+        let config = config_with_agent_dir(tmp.path());
+        let runtime = Arc::new(ExtensionRuntime::noop());
+        let loaded = discover_wasm_extensions(&runtime, &config);
+        assert_eq!(
+            loaded.len(),
+            1,
+            "2,000,000 fuel must be enough for pi_activate itself to succeed"
+        );
+
+        let echo = &loaded[0].tools["echo"];
+        let ctx = pirust_extension_api::ExtensionContext {
+            mode: pirust_extension_api::ExtensionMode::Print,
+            has_ui: false,
+            cwd: ".".to_string(),
+            is_idle: Box::new(|| true),
+            signal: None,
+            abort: Box::new(|| {}),
+            has_pending_messages: Box::new(|| false),
+            shutdown: Box::new(|| {}),
+            get_context_usage: Box::new(|| None),
+            get_system_prompt: Box::new(String::new),
+        };
+        // The fuel budget is a per-instance LIFETIME budget (wasm/mod.rs's
+        // doc comment) — repeat the call enough times that 2,000,000 units
+        // must run out, where the production default (200,000,000) would
+        // handle this many calls comfortably (see the leak-regression test
+        // in pirust-extension-api's own test suite).
+        let mut trapped = false;
+        for _ in 0..2000 {
+            let result = (echo.definition.execute)(pirust_extension_api::ToolCallParams {
+                tool_call_id: "t2",
+                params: &serde_json::json!({"ping": "pong"}),
+                ctx: &ctx,
+            });
+            if result.is_err() {
+                trapped = true;
+                break;
+            }
+        }
+        assert!(
+            trapped,
+            "a 2,000,000-unit fuel override must exhaust before 2000 echo calls do"
+        );
+    }
+
+    /// Wave 5: `new_extensions_only` is the pure merge step behind
+    /// `SingleTurnSession::reload_wasm_extensions` — proves a freshly
+    /// discovered extension is treated as new against an empty "already
+    /// loaded" set, and as already-present (filtered out) once it IS in
+    /// that set, keyed by `resolved_path`.
+    #[test]
+    fn new_extensions_only_dedupes_by_resolved_path() {
+        let wasm_hello = build_wasm_hello();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let extensions_dir = tmp.path().join("extensions");
+        std::fs::create_dir_all(&extensions_dir).expect("create extensions dir");
+        std::fs::copy(&wasm_hello, extensions_dir.join("wasm-hello.wasm"))
+            .expect("copy wasm-hello fixture into place");
+        let config = config_with_agent_dir(tmp.path());
+        let runtime = Arc::new(ExtensionRuntime::noop());
+
+        let first_discovery = discover_wasm_extensions(&runtime, &config);
+        assert_eq!(first_discovery.len(), 1);
+
+        // `Extension` holds `Box<dyn Fn>` closures (not `Clone`), so re-use
+        // this discovery's own result as the "already loaded" set for the
+        // second check instead of cloning it.
+        let already_loaded = new_extensions_only(&[], first_discovery);
+        assert_eq!(
+            already_loaded.len(),
+            1,
+            "against an empty already-loaded set, the discovered extension is new"
+        );
+
+        let second_discovery = discover_wasm_extensions(&runtime, &config);
+        let added_against_loaded = new_extensions_only(&already_loaded, second_discovery);
+        assert_eq!(
+            added_against_loaded.len(),
+            0,
+            "the same path, already loaded, must not be added again"
+        );
     }
 }
