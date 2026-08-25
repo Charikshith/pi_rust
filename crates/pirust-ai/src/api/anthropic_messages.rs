@@ -877,6 +877,66 @@ fn build_request(
         body.insert("tool_choice".to_string(), value);
     }
 
+    // B3: `thinking` was never serialized at all — the model's reasoning
+    // level had no effect on the actual request. Gated on `model.reasoning`
+    // (`:1000-1029`); adaptive models get `{type:"adaptive"}` plus a
+    // top-level `output_config.effort` when `effort` is set, older models
+    // get `{type:"enabled"|"disabled"}`. `display` defaults to "summarized".
+    if model.reasoning {
+        let display = opts
+            .thinking_display
+            .clone()
+            .unwrap_or_else(|| "summarized".to_string());
+        if force_adaptive_thinking(model) {
+            let mut adaptive = Map::new();
+            adaptive.insert("type".to_string(), Value::String("adaptive".to_string()));
+            adaptive.insert("display".to_string(), Value::String(display));
+            body.insert("thinking".to_string(), Value::Object(adaptive));
+            if let Some(effort) = &opts.effort {
+                let mut output_config = Map::new();
+                output_config.insert("effort".to_string(), Value::String(effort.clone()));
+                body.insert("output_config".to_string(), Value::Object(output_config));
+            }
+        } else if opts.thinking_enabled == Some(true) {
+            let budget = opts.thinking_budget_tokens.unwrap_or(1024);
+            let mut enabled = Map::new();
+            enabled.insert("type".to_string(), Value::String("enabled".to_string()));
+            enabled.insert("budget_tokens".to_string(), Value::from(budget));
+            enabled.insert("display".to_string(), Value::String(display));
+            body.insert("thinking".to_string(), Value::Object(enabled));
+        } else {
+            // `thinkingLevelMap.off === null` (an explicit JSON null, not an
+            // absent field) means this model can't have thinking disabled —
+            // skip the block entirely rather than sending `{type:"disabled"}`.
+            let off_blocked = matches!(
+                model.thinking_level_map.as_ref().and_then(|m| m.off.as_ref()),
+                Some(None)
+            );
+            if !off_blocked {
+                let mut disabled = Map::new();
+                disabled.insert("type".to_string(), Value::String("disabled".to_string()));
+                body.insert("thinking".to_string(), Value::Object(disabled));
+            }
+        }
+    }
+
+    // `metadata: {user_id}` only when present (`:1031-1036`) — previously
+    // dropped entirely regardless of whether the caller set it.
+    if let Some(user_id) = opts.base.metadata.as_ref().and_then(|m| m.user_id.clone()) {
+        let mut metadata = Map::new();
+        metadata.insert("user_id".to_string(), Value::String(user_id));
+        body.insert("metadata".to_string(), Value::Object(metadata));
+    }
+
+    // Extra sampling params merged last over the request body — previously
+    // dropped entirely, so callers had no way to pass provider-specific
+    // extras through.
+    if let Some(Value::Object(extra)) = &opts.base.sampling_params {
+        for (key, value) in extra {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+
     let body = Value::Object(body).to_string();
 
     let mut headers = vec![

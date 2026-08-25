@@ -120,6 +120,7 @@ fn base_config(model: Model) -> AgentLoopConfig {
         model,
         api_key: None,
         tool_execution: None,
+        reasoning: None,
         convert_to_llm: Box::new(|msgs| Box::pin(async move { convert_to_llm(&msgs) })),
         transform_context: None,
         get_api_key: None,

@@ -2154,8 +2154,13 @@ async fn run_produce(
             crate::sse::SseError::Transport(crate::http::TransportError::to_string(&e))
         })
     });
+    // B4: feed each parsed chunk into the state machine as it arrives,
+    // rather than collecting every SSE event into a `Vec<Value>` and running
+    // the state machine only after the stream ends — which held the whole
+    // parsed response in memory and left the consumer seeing nothing until
+    // the answer was complete.
     let mut events = crate::sse::iterate_sse_messages(byte_stream);
-    let mut chunks = Vec::new();
+    let mut machine = StreamStateMachine::new();
     while let Some(item) = events.next().await {
         let sse = item.map_err(|e| match e {
             crate::sse::SseError::ServerError(data) => data,
@@ -2163,18 +2168,11 @@ async fn run_produce(
             crate::sse::SseError::Transport(message) => message,
         })?;
         if let Some(chunk) = parse_chunk(&sse.data) {
-            chunks.push(chunk);
+            machine.feed(model, &grammar_tool_input_properties, &chunk, output, sink);
         }
     }
 
-    run_stream_state_machine(
-        model,
-        &compat,
-        &grammar_tool_input_properties,
-        chunks.into_iter(),
-        output,
-        sink,
-    )
+    machine.finish(&compat, output, sink)
 }
 
 /// Resolve the provider api key (TS `getClientApiKey` `:60-64`): explicit
@@ -2415,21 +2413,42 @@ fn parse_chunk(data: &str) -> Option<Value> {
 /// maps tool names → custom-input property (TS `createGrammarToolInputProperties`
 /// result, already ported).
 #[allow(clippy::too_many_arguments)]
-pub fn run_stream_state_machine(
-    model: &Model,
-    compat: &ResolvedOpenAICompletionsCompat,
-    grammar_tool_input_properties: &HashMap<String, String>,
-    chunks: impl Iterator<Item = Value>,
-    output: &mut AssistantMessage,
-    sink: &mut AssistantMessageSink,
-) -> Result<(), String> {
-    let mut state = StreamingState::default();
-    let mut text_block: Option<usize> = None;
-    let mut thinking_block: Option<usize> = None;
-    let mut has_finish_reason = false;
-    let mut pending_reasoning_details: HashMap<String, String> = HashMap::new();
+/// Incremental driver for the streaming state machine (B4): a network call
+/// site can `feed` each chunk to `sink` as it arrives off the wire instead of
+/// buffering the whole response into a `Vec<Value>` and running the state
+/// machine only after the stream ends — which is what left the consumer
+/// seeing nothing until the answer was complete, with the full parsed
+/// response held in memory meanwhile. [`run_stream_state_machine`] is a thin
+/// wrapper over this for callers that already have every chunk (tests, the
+/// oracle harness).
+pub struct StreamStateMachine {
+    state: StreamingState,
+    text_block: Option<usize>,
+    thinking_block: Option<usize>,
+    has_finish_reason: bool,
+    pending_reasoning_details: HashMap<String, String>,
+}
 
-    for chunk in chunks {
+impl StreamStateMachine {
+    pub fn new() -> Self {
+        Self {
+            state: StreamingState::default(),
+            text_block: None,
+            thinking_block: None,
+            has_finish_reason: false,
+            pending_reasoning_details: HashMap::new(),
+        }
+    }
+
+    /// Process one chunk, pushing its events to `sink` immediately.
+    pub fn feed(
+        &mut self,
+        model: &Model,
+        grammar_tool_input_properties: &HashMap<String, String>,
+        chunk: &Value,
+        output: &mut AssistantMessage,
+        sink: &mut AssistantMessageSink,
+    ) {
         // output.responseId ||= chunk.id (TS `:568`)
         if output.response_id.is_none() {
             if let Some(id) = chunk.get("id").and_then(Value::as_str) {
@@ -2454,7 +2473,7 @@ pub fn run_stream_state_machine(
             .and_then(Value::as_array)
             .and_then(|a| a.first());
         let Some(choice) = choice else {
-            continue;
+            return;
         };
 
         // Fallback: usage in choice.usage (Moonshot) (TS `:578-581`)
@@ -2471,18 +2490,19 @@ pub fn run_stream_state_machine(
             if let Some(em) = finish_reason_result.1 {
                 output.error_message = Some(em);
             }
-            has_finish_reason = true;
+            self.has_finish_reason = true;
         }
 
         let Some(delta) = choice.get("delta") else {
-            continue;
+            return;
         };
 
         // content delta (TS `:585-596`)
         let content_delta = delta.get("content").and_then(Value::as_str);
         if let Some(cd) = content_delta {
             if !cd.is_empty() {
-                let block_idx = ensure_text_block(&mut state, output, &mut text_block, sink);
+                let block_idx =
+                    ensure_text_block(output, &mut self.text_block, sink);
                 if let AssistantContent::Text(t) = &mut output.content[block_idx] {
                     t.text.push_str(cd);
                 }
@@ -2518,9 +2538,8 @@ pub fn run_stream_state_machine(
                             field
                         };
                     let block_idx = ensure_thinking_block(
-                        &mut state,
                         output,
-                        &mut thinking_block,
+                        &mut self.thinking_block,
                         thinking_signature,
                         sink,
                     );
@@ -2541,11 +2560,11 @@ pub fn run_stream_state_machine(
             for tc in tool_calls {
                 let delta_tc = StreamingToolCallDelta::from_value(tc);
                 let block_idx = ensure_tool_call_block(
-                    &mut state,
+                    &mut self.state,
                     output,
                     &delta_tc,
                     grammar_tool_input_properties,
-                    &mut pending_reasoning_details,
+                    &mut self.pending_reasoning_details,
                     sink,
                 );
                 // block.id ||= toolCall.id (TS `:624-628`)
@@ -2554,7 +2573,9 @@ pub fn run_stream_state_machine(
                     if let AssistantContent::ToolCall(tc) = block {
                         if tc.id.is_empty() {
                             tc.id = id.clone();
-                            state.tool_call_blocks_by_id.insert(id.clone(), block_idx);
+                            self.state
+                                .tool_call_blocks_by_id
+                                .insert(id.clone(), block_idx);
                         }
                     }
                 }
@@ -2576,13 +2597,14 @@ pub fn run_stream_state_machine(
                 if let Some(fa) = &delta_tc.function_arguments {
                     delta_text = fa.clone();
                     // partialArgs accumulation (TS `:636-638`)
-                    state
+                    self.state
                         .partial_args
                         .entry(block_idx)
                         .or_default()
                         .push_str(fa);
                     // block.arguments = parseStreamingJson(block.partialArgs)
-                    let partial = state
+                    let partial = self
+                        .state
                         .partial_args
                         .get(&block_idx)
                         .cloned()
@@ -2595,10 +2617,15 @@ pub fn run_stream_state_machine(
                     }
                 } else if let Some(ci) = &delta_tc.custom_input {
                     // nextInput = getCustomToolCallInput(block) + input (TS `:640-642`)
-                    let next = get_custom_tool_call_input(&state, output, block_idx) + ci;
-                    delta_text =
-                        append_custom_tool_call_input(&mut state, output, block_idx, &next, false)
-                            .unwrap_or_default();
+                    let next = get_custom_tool_call_input(&self.state, output, block_idx) + ci;
+                    delta_text = append_custom_tool_call_input(
+                        &mut self.state,
+                        output,
+                        block_idx,
+                        &next,
+                        false,
+                    )
+                    .unwrap_or_default();
                 }
                 sink.push(AssistantMessageEvent::ToolcallDelta {
                     content_index: block_idx as u32,
@@ -2614,12 +2641,14 @@ pub fn run_stream_state_machine(
                 if is_encrypted_reasoning_detail(detail) {
                     let serialized = serde_json::to_string(detail).unwrap_or_default();
                     if let Some(id) = detail.get("id").and_then(Value::as_str) {
-                        if let Some(&block_idx) = state.tool_call_blocks_by_id.get(id) {
-                            if let AssistantContent::ToolCall(tc) = &mut output.content[block_idx] {
+                        if let Some(&block_idx) = self.state.tool_call_blocks_by_id.get(id) {
+                            if let AssistantContent::ToolCall(tc) = &mut output.content[block_idx]
+                            {
                                 tc.thought_signature = Some(serialized.clone());
                             }
                         } else {
-                            pending_reasoning_details.insert(id.to_string(), serialized);
+                            self.pending_reasoning_details
+                                .insert(id.to_string(), serialized);
                         }
                     }
                 }
@@ -2627,41 +2656,74 @@ pub fn run_stream_state_machine(
         }
     }
 
-    // Tail: finishBlock for every block in content order (TS `:674-676`)
-    let block_count = output.content.len();
-    for block_idx in 0..block_count {
-        finish_block(&mut state, output, block_idx, sink);
-    }
+    /// Finalize the message once the stream has ended: close every open
+    /// block, resolve a missing `finish_reason`, and surface an error stop
+    /// reason as `Err`.
+    pub fn finish(
+        mut self,
+        compat: &ResolvedOpenAICompletionsCompat,
+        output: &mut AssistantMessage,
+        sink: &mut AssistantMessageSink,
+    ) -> Result<(), String> {
+        // Tail: finishBlock for every block in content order (TS `:674-676`)
+        let block_count = output.content.len();
+        for block_idx in 0..block_count {
+            finish_block(&mut self.state, output, block_idx, sink);
+        }
 
-    // TS `:678-695`
-    if !has_finish_reason && !compat.supports_finish_reason {
-        output.stop_reason = if output
-            .content
-            .iter()
-            .any(|b| matches!(b, AssistantContent::ToolCall(_)))
-        {
-            StopReason::ToolUse
-        } else {
-            StopReason::Stop
-        };
-    }
-    if output.stop_reason == StopReason::Error {
-        return Err(output
-            .error_message
-            .clone()
-            .unwrap_or_else(|| "Provider returned an error stop reason".to_string()));
-    }
-    // TS `:691-692`: throw when the stream ended without a finish_reason.
-    // Pi's second clause `|| output.stopReason === "pending"` is a logical
-    // subset of the first here — `stopReason` stays its initial "pending" value
-    // EXACTLY when `supportsFinishReason && !hasFinishReason` (the fallback at
-    // `:678-683` already resolved it to toolUse/stop otherwise), so the two
-    // clauses are provably equivalent. It is collapsed into one check.
-    if compat.supports_finish_reason && !has_finish_reason {
-        return Err("Stream ended without finish_reason".to_string());
-    }
+        // TS `:678-695`
+        if !self.has_finish_reason && !compat.supports_finish_reason {
+            output.stop_reason = if output
+                .content
+                .iter()
+                .any(|b| matches!(b, AssistantContent::ToolCall(_)))
+            {
+                StopReason::ToolUse
+            } else {
+                StopReason::Stop
+            };
+        }
+        if output.stop_reason == StopReason::Error {
+            return Err(output
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "Provider returned an error stop reason".to_string()));
+        }
+        // TS `:691-692`: throw when the stream ended without a finish_reason.
+        // Pi's second clause `|| output.stopReason === "pending"` is a logical
+        // subset of the first here — `stopReason` stays its initial "pending" value
+        // EXACTLY when `supportsFinishReason && !hasFinishReason` (the fallback at
+        // `:678-683` already resolved it to toolUse/stop otherwise), so the two
+        // clauses are provably equivalent. It is collapsed into one check.
+        if compat.supports_finish_reason && !self.has_finish_reason {
+            return Err("Stream ended without finish_reason".to_string());
+        }
 
-    Ok(())
+        Ok(())
+    }
+}
+
+impl Default for StreamStateMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Buffered convenience wrapper over [`StreamStateMachine`] for callers that
+/// already have every chunk in hand (existing tests, the oracle harness).
+pub fn run_stream_state_machine(
+    model: &Model,
+    compat: &ResolvedOpenAICompletionsCompat,
+    grammar_tool_input_properties: &HashMap<String, String>,
+    chunks: impl Iterator<Item = Value>,
+    output: &mut AssistantMessage,
+    sink: &mut AssistantMessageSink,
+) -> Result<(), String> {
+    let mut machine = StreamStateMachine::new();
+    for chunk in chunks {
+        machine.feed(model, grammar_tool_input_properties, &chunk, output, sink);
+    }
+    machine.finish(compat, output, sink)
 }
 
 // --- helpers used by the state machine --------------------------------------
@@ -2669,7 +2731,6 @@ pub fn run_stream_state_machine(
 /// TS `ensureTextBlock` `:536-543`: create the single text block + emit
 /// `text_start` on first use. Returns the block index.
 fn ensure_text_block(
-    state: &mut StreamingState,
     output: &mut AssistantMessage,
     text_block: &mut Option<usize>,
     sink: &mut AssistantMessageSink,
@@ -2681,7 +2742,6 @@ fn ensure_text_block(
             text: String::new(),
             text_signature: None,
         }));
-        state.tool_call_blocks_by_index.clear(); // no-op; index maps are tool-only
         *text_block = Some(idx);
         sink.push(AssistantMessageEvent::TextStart {
             content_index: idx as u32,
@@ -2693,7 +2753,6 @@ fn ensure_text_block(
 
 /// TS `ensureThinkingBlock(thinkingSignature)` `:545-552`.
 fn ensure_thinking_block(
-    state: &mut StreamingState,
     output: &mut AssistantMessage,
     thinking_block: &mut Option<usize>,
     thinking_signature: &str,
@@ -2709,7 +2768,6 @@ fn ensure_thinking_block(
                 thinking_signature: Some(thinking_signature.to_string()),
                 redacted: None,
             }));
-        state.tool_call_blocks_by_index.clear(); // no-op; index maps are tool-only
         *thinking_block = Some(idx);
         sink.push(AssistantMessageEvent::ThinkingStart {
             content_index: idx as u32,

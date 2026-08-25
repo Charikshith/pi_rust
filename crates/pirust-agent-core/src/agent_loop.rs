@@ -225,9 +225,12 @@ async fn run_loop(
 ) {
     let mut current_context = initial_context;
     let mut config = initial_config;
-    // `config.reasoning` in TS (from SimpleStreamOptions). Not a field on the
-    // ported `AgentLoopConfig`, so tracked locally; `prepareNextTurn` remaps it.
-    let mut reasoning: Option<ThinkingLevel> = None;
+    // `config.reasoning` in TS (from SimpleStreamOptions). Seeded from the
+    // loop config (B3: this used to be hard-inited to `None`, so the first
+    // provider call of every prompt always ran with reasoning off regardless
+    // of the agent's configured thinking level); `prepareNextTurn` remaps it
+    // for later turns.
+    let mut reasoning: Option<ThinkingLevel> = config.reasoning;
     let mut first_turn = true;
     // Check for steering messages at start (user may have typed while waiting).
     let mut pending: Vec<AgentMessage> = drain(&config.get_steering_messages).await;
@@ -465,7 +468,23 @@ async fn stream_assistant_response(
 
     let mut partial_added = false;
 
-    while let Some(event) = stream.next().await {
+    loop {
+        // B2/B7: race the stream against the run's cancellation token so
+        // Ctrl+C interrupts an in-flight model response even for adapters
+        // that don't yet honor the token themselves at the HTTP layer —
+        // without this, cancelling mid-stream had no effect until the
+        // provider call finished or errored on its own.
+        let event = tokio::select! {
+            event = stream.next() => event,
+            _ = token.cancelled() => None,
+        };
+        let Some(event) = event else {
+            if token.is_cancelled() {
+                let aborted = aborted_assistant_message(&config.model);
+                return finish_stream(context, sink, aborted, partial_added).await;
+            }
+            break;
+        };
         match event {
             AssistantMessageEvent::Start { partial } => {
                 context
@@ -510,6 +529,28 @@ async fn stream_assistant_response(
     // Stream ended without a terminal event: fall back to the resolved result.
     let final_message = stream.result().await;
     finish_stream(context, sink, final_message, partial_added).await
+}
+
+/// A synthetic `Aborted` assistant message for a run cancelled mid-stream
+/// (B2), mirroring `error_stream`'s shape for a cancelled rather than failed
+/// response.
+fn aborted_assistant_message(model: &Model) -> AssistantMessage {
+    AssistantMessage {
+        role: AssistantRole::Assistant,
+        content: Vec::new(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: Some(model.id.clone()),
+        response_model: None,
+        diagnostics: None,
+        usage: zero_usage(),
+        stop_reason: StopReason::Aborted,
+        timestamp: now_millis(),
+        response_id: None,
+        raw_stop_reason: None,
+        error_message: Some("Operation aborted".to_string()),
+        end_turn: None,
+    }
 }
 
 async fn finish_stream(
@@ -1272,6 +1313,7 @@ mod tests {
             model: faux_model(),
             api_key: None,
             tool_execution: None,
+            reasoning: None,
             convert_to_llm: Box::new(|msgs| {
                 Box::pin(async move { crate::harness::messages::convert_to_llm(&msgs) })
             }),

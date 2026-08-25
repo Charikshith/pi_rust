@@ -821,34 +821,58 @@ enum OutputSlot {
     },
 }
 
-/// `processResponsesStream` — fold OpenAI Responses SSE events into the event tape and
-/// final `AssistantMessage`. Events are parsed JSON objects (the `type` field selects the
-/// arm). `output` is mutated in place; the caller finalizes `done`/`error` like TS.
-pub fn process_responses_stream(
-    events: impl Iterator<Item = Value>,
-    output: &mut AssistantMessage,
-    sink: &mut AssistantMessageSink,
-    model: &Model,
-    options: Option<&ResponsesStreamOptions>,
-) -> Result<(), String> {
-    let options = options.cloned().unwrap_or_default();
-    let mut saw_terminal_response_event = false;
-    let mut output_slots: HashMap<u64, OutputSlot> = HashMap::new();
-    let mut reasoning_blocks_by_id: HashMap<String, usize> = HashMap::new();
-    let mut custom_inputs: HashMap<usize, (String, GrammarToolInputJsonBuffer)> = HashMap::new();
+/// Incremental driver for the Responses-family SSE state machine (B4): a
+/// network call site can `feed` each parsed event to `sink` as it arrives
+/// off the wire instead of buffering the whole response into a `Vec<Value>`
+/// and running the state machine only after the stream ends — which left
+/// the consumer seeing nothing until the answer was complete, holding the
+/// full parsed response in memory meanwhile. [`process_responses_stream`]
+/// is a thin wrapper over this for callers that already have every event
+/// (tests, the oracle harness).
+pub struct ResponsesStreamState {
+    options: ResponsesStreamOptions,
+    saw_terminal_response_event: bool,
+    output_slots: HashMap<u64, OutputSlot>,
+    reasoning_blocks_by_id: HashMap<String, usize>,
+    custom_inputs: HashMap<usize, (String, GrammarToolInputJsonBuffer)>,
+}
 
-    // applyMessagePhaseStopReason (TS `:443-447`)
-    let apply_message_phase_stop_reason = |output: &mut AssistantMessage, item: &Value| {
-        if item.get("type").and_then(Value::as_str) == Some("message")
-            && item.get("phase").and_then(Value::as_str) == Some("final_answer")
-        {
-            output.stop_reason = StopReason::Stop;
+impl ResponsesStreamState {
+    pub fn new(options: Option<&ResponsesStreamOptions>) -> Self {
+        Self {
+            options: options.cloned().unwrap_or_default(),
+            saw_terminal_response_event: false,
+            output_slots: HashMap::new(),
+            reasoning_blocks_by_id: HashMap::new(),
+            custom_inputs: HashMap::new(),
         }
-    };
+    }
 
-    for event in events {
+    /// Process one event, pushing its events to `sink` immediately.
+    pub fn feed(
+        &mut self,
+        event: &Value,
+        output: &mut AssistantMessage,
+        sink: &mut AssistantMessageSink,
+        model: &Model,
+    ) -> Result<(), String> {
+        let options = self.options.clone();
+        let saw_terminal_response_event = &mut self.saw_terminal_response_event;
+        let output_slots = &mut self.output_slots;
+        let reasoning_blocks_by_id = &mut self.reasoning_blocks_by_id;
+        let custom_inputs = &mut self.custom_inputs;
+
+        // applyMessagePhaseStopReason (TS `:443-447`)
+        let apply_message_phase_stop_reason = |output: &mut AssistantMessage, item: &Value| {
+            if item.get("type").and_then(Value::as_str) == Some("message")
+                && item.get("phase").and_then(Value::as_str) == Some("final_answer")
+            {
+                output.stop_reason = StopReason::Stop;
+            }
+        };
+
         let Some(ev_type) = event.get("type").and_then(Value::as_str) else {
-            continue;
+            return Ok(());
         };
         match ev_type {
             "response.created" => {
@@ -862,30 +886,30 @@ pub fn process_responses_stream(
             }
             "response.output_item.added" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(item) = event.get("item") else {
-                    continue;
+                    return Ok(());
                 };
                 create_responses_slot(
                     output_index,
                     item,
                     output,
                     sink,
-                    &mut output_slots,
-                    &mut custom_inputs,
+                    output_slots,
+                    custom_inputs,
                     &options,
                 );
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(delta) = event.get("delta").and_then(Value::as_str) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 if let OutputSlot::Thinking { block_idx } = slot {
                     let block_idx = *block_idx;
@@ -901,10 +925,10 @@ pub fn process_responses_stream(
             }
             "response.reasoning_summary_part.done" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 if let OutputSlot::Thinking { block_idx } = slot {
                     let block_idx = *block_idx;
@@ -920,13 +944,13 @@ pub fn process_responses_stream(
             }
             "response.output_text.delta" | "response.refusal.delta" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(delta) = event.get("delta").and_then(Value::as_str) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 if let OutputSlot::Text { block_idx } = slot {
                     let block_idx = *block_idx;
@@ -942,13 +966,13 @@ pub fn process_responses_stream(
             }
             "response.function_call_arguments.delta" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(delta) = event.get("delta").and_then(Value::as_str) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 if let OutputSlot::ToolCall {
                     block_idx,
@@ -959,7 +983,7 @@ pub fn process_responses_stream(
                     let block_idx = *block_idx;
                     let partial_json = {
                         let AssistantContent::ToolCall(tc) = &mut output.content[block_idx] else {
-                            continue;
+                            return Ok(());
                         };
                         let partial = tc.partial_json.get_or_insert_with(String::new);
                         partial.push_str(delta);
@@ -978,13 +1002,13 @@ pub fn process_responses_stream(
             }
             "response.function_call_arguments.done" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(arguments) = event.get("arguments").and_then(Value::as_str) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 if let OutputSlot::ToolCall {
                     block_idx,
@@ -995,7 +1019,7 @@ pub fn process_responses_stream(
                     let block_idx = *block_idx;
                     let previous_partial_json = {
                         let AssistantContent::ToolCall(tc) = &output.content[block_idx] else {
-                            continue;
+                            return Ok(());
                         };
                         tc.partial_json.clone().unwrap_or_default()
                     };
@@ -1018,13 +1042,13 @@ pub fn process_responses_stream(
             }
             "response.custom_tool_call_input.delta" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(delta) = event.get("delta").and_then(Value::as_str) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 if let OutputSlot::ToolCall {
                     block_idx,
@@ -1034,10 +1058,10 @@ pub fn process_responses_stream(
                 {
                     let block_idx = *block_idx;
                     let next =
-                        get_custom_tool_call_input(output, &custom_inputs, block_idx) + delta;
+                        get_custom_tool_call_input(output, custom_inputs, block_idx) + delta;
                     let delta = append_custom_tool_call_input(
                         output,
-                        &mut custom_inputs,
+                        custom_inputs,
                         block_idx,
                         &next,
                         false,
@@ -1053,13 +1077,13 @@ pub fn process_responses_stream(
             }
             "response.custom_tool_call_input.done" => {
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(input) = event.get("input").and_then(Value::as_str) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 if let OutputSlot::ToolCall {
                     block_idx,
@@ -1070,7 +1094,7 @@ pub fn process_responses_stream(
                     let block_idx = *block_idx;
                     let delta = append_custom_tool_call_input(
                         output,
-                        &mut custom_inputs,
+                        custom_inputs,
                         block_idx,
                         input,
                         true,
@@ -1086,11 +1110,11 @@ pub fn process_responses_stream(
             }
             "response.output_item.done" => {
                 let Some(item) = event.get("item") else {
-                    continue;
+                    return Ok(());
                 };
                 apply_message_phase_stop_reason(output, item);
                 let Some(output_index) = event.get("output_index").and_then(Value::as_u64) else {
-                    continue;
+                    return Ok(());
                 };
                 let item_type = item.get("type").and_then(Value::as_str);
                 // getOrCreateSlot (TS `:515-517`): create the slot if not seen (item.done
@@ -1101,13 +1125,13 @@ pub fn process_responses_stream(
                         item,
                         output,
                         sink,
-                        &mut output_slots,
-                        &mut custom_inputs,
+                        output_slots,
+                        custom_inputs,
                         &options,
                     );
                 }
                 let Some(slot) = output_slots.get(&output_index) else {
-                    continue;
+                    return Ok(());
                 };
                 match (item_type, slot) {
                     (Some("reasoning"), OutputSlot::Thinking { block_idx }) => {
@@ -1141,7 +1165,7 @@ pub fn process_responses_stream(
                         let (final_thinking, end_content) = {
                             let AssistantContent::Thinking(t) = &mut output.content[block_idx]
                             else {
-                                continue;
+                                return Ok(());
                             };
                             let existing = t.thinking.clone();
                             let final_thinking = if !summary_text.is_empty() {
@@ -1225,7 +1249,7 @@ pub fn process_responses_stream(
                         let end_tool_call = {
                             let AssistantContent::ToolCall(tc) = &mut output.content[block_idx]
                             else {
-                                continue;
+                                return Ok(());
                             };
                             tc.arguments = parsed.as_object().cloned().unwrap_or_else(Map::new);
                             if namespace.is_some() {
@@ -1258,17 +1282,17 @@ pub fn process_responses_stream(
                         let delta = if let Some(input) = input {
                             append_custom_tool_call_input(
                                 output,
-                                &mut custom_inputs,
+                                custom_inputs,
                                 block_idx,
                                 input,
                                 true,
                             )?
                         } else {
                             let current =
-                                get_custom_tool_call_input(output, &custom_inputs, block_idx);
+                                get_custom_tool_call_input(output, custom_inputs, block_idx);
                             append_custom_tool_call_input(
                                 output,
-                                &mut custom_inputs,
+                                custom_inputs,
                                 block_idx,
                                 &current,
                                 true,
@@ -1284,7 +1308,7 @@ pub fn process_responses_stream(
                         let end_tool_call = {
                             let AssistantContent::ToolCall(tc) = &mut output.content[block_idx]
                             else {
-                                continue;
+                                return Ok(());
                             };
                             if namespace.is_some() {
                                 tc.namespace = namespace;
@@ -1305,14 +1329,14 @@ pub fn process_responses_stream(
             }
             "response.completed" | "response.incomplete" => {
                 let Some(response) = event.get("response") else {
-                    continue;
+                    return Ok(());
                 };
                 finalize_responses_response(
                     response,
                     output,
                     model,
-                    &mut saw_terminal_response_event,
-                    &reasoning_blocks_by_id,
+                    saw_terminal_response_event,
+                    reasoning_blocks_by_id,
                     &options,
                 )?;
             }
@@ -1356,12 +1380,35 @@ pub fn process_responses_stream(
             }
             _ => {}
         }
+        Ok(())
     }
 
-    if !saw_terminal_response_event {
-        return Err("OpenAI Responses stream ended before a terminal response event".to_string());
+    /// Finalize once the stream has ended: surface an error if no terminal
+    /// `response.completed`/`response.incomplete`/`response.failed` event
+    /// was ever seen.
+    pub fn finish(self) -> Result<(), String> {
+        if !self.saw_terminal_response_event {
+            return Err("OpenAI Responses stream ended before a terminal response event".to_string());
+        }
+        Ok(())
     }
-    Ok(())
+}
+
+/// Buffered convenience wrapper over [`ResponsesStreamState`] for callers
+/// that already have every event in hand (existing tests, the oracle
+/// harness).
+pub fn process_responses_stream(
+    events: impl Iterator<Item = Value>,
+    output: &mut AssistantMessage,
+    sink: &mut AssistantMessageSink,
+    model: &Model,
+    options: Option<&ResponsesStreamOptions>,
+) -> Result<(), String> {
+    let mut state = ResponsesStreamState::new(options);
+    for event in events {
+        state.feed(&event, output, sink, model)?;
+    }
+    state.finish()
 }
 
 #[allow(clippy::too_many_arguments)]

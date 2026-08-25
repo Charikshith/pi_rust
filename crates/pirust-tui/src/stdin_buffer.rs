@@ -275,6 +275,23 @@ fn high_byte_or_utf8(data: &[u8]) -> String {
     }
 }
 
+/// Split off a trailing UTF-8 sequence that's valid so far but cut short at
+/// the end of `data` (B5: a multi-byte character split across two 4096-byte
+/// reads used to become U+FFFD in *both* halves via `from_utf8_lossy`).
+/// Returns `(complete, incomplete_tail)` — `incomplete_tail` is at most 3
+/// bytes and should be prepended to the next chunk before decoding it.
+/// Genuinely invalid bytes (not just a truncated tail) are left in `complete`
+/// unchanged, so `from_utf8_lossy` still replaces them as before.
+fn split_trailing_incomplete_utf8(data: &[u8]) -> (&[u8], &[u8]) {
+    match std::str::from_utf8(data) {
+        Ok(_) => (data, &[]),
+        Err(e) => match e.error_len() {
+            None => (&data[..e.valid_up_to()], &data[e.valid_up_to()..]),
+            Some(_) => (data, &[]),
+        },
+    }
+}
+
 /// `StdinBuffer` (stdin-buffer.ts:274) — see module docs for the `EventEmitter`
 /// / timer design decisions.
 #[derive(Debug, Default)]
@@ -284,6 +301,9 @@ pub struct StdinBuffer {
     paste_mode: bool,
     paste_buffer: String,
     pending_kitty_printable_codepoint: Option<u32>,
+    /// Trailing bytes of a UTF-8 sequence cut short by a chunk boundary,
+    /// carried over to be prepended to the next `process()` call (B5).
+    pending_utf8: Vec<u8>,
 }
 
 impl StdinBuffer {
@@ -294,6 +314,7 @@ impl StdinBuffer {
             paste_mode: false,
             paste_buffer: String::new(),
             pending_kitty_printable_codepoint: None,
+            pending_utf8: Vec::new(),
         }
     }
 
@@ -306,7 +327,27 @@ impl StdinBuffer {
     /// that would have been emitted synchronously.
     pub fn process(&mut self, data: &[u8]) -> Vec<StdinEvent> {
         let mut events = Vec::new();
-        let str_data = high_byte_or_utf8(data);
+
+        // The single-byte high-bit-to-ESC-meta path only applies to a lone
+        // byte read in one shot; a genuinely carried-over UTF-8 tail is
+        // never a candidate for it, so only take this branch when nothing
+        // is pending.
+        if self.pending_utf8.is_empty() && data.len() == 1 && data[0] > 127 {
+            let str_data = high_byte_or_utf8(data);
+            self.process_str(&str_data, &mut events);
+            return events;
+        }
+
+        let combined: std::borrow::Cow<[u8]> = if self.pending_utf8.is_empty() {
+            std::borrow::Cow::Borrowed(data)
+        } else {
+            let mut buf = std::mem::take(&mut self.pending_utf8);
+            buf.extend_from_slice(data);
+            std::borrow::Cow::Owned(buf)
+        };
+        let (complete, incomplete) = split_trailing_incomplete_utf8(&combined);
+        let str_data = String::from_utf8_lossy(complete).into_owned();
+        self.pending_utf8 = incomplete.to_vec();
         self.process_str(&str_data, &mut events);
         events
     }
@@ -446,5 +487,45 @@ mod tests {
         assert_eq!(buf.process(b"\x1b["), vec![]);
         assert_eq!(buf.flush(), vec!["\x1b[".to_string()]);
         assert_eq!(buf.get_buffer(), "");
+    }
+
+    /// B5: a multi-byte UTF-8 character split across two reads must not
+    /// become U+FFFD — the trailing incomplete bytes of the first read are
+    /// held back and stitched onto the second read.
+    #[test]
+    fn multibyte_char_split_across_reads_is_not_corrupted() {
+        let bytes = "héllo 世界".as_bytes();
+        for split in 1..bytes.len() {
+            let mut buf = StdinBuffer::new(StdinBufferOptions::default());
+            let mut received = String::new();
+            for event in buf.process(&bytes[..split]) {
+                if let StdinEvent::Data(s) = event {
+                    received.push_str(&s);
+                }
+            }
+            for event in buf.process(&bytes[split..]) {
+                if let StdinEvent::Data(s) = event {
+                    received.push_str(&s);
+                }
+            }
+            assert!(
+                !received.contains('\u{FFFD}'),
+                "split at byte {split} corrupted the character: {received:?}"
+            );
+            assert_eq!(received, "héllo 世界", "split at byte {split}");
+        }
+    }
+
+    #[test]
+    fn genuinely_invalid_utf8_is_still_replaced() {
+        let mut buf = StdinBuffer::new(StdinBufferOptions::default());
+        let mut received = String::new();
+        for event in buf.process(&[b'a', 0xff, b'b']) {
+            if let StdinEvent::Data(s) = event {
+                received.push_str(&s);
+            }
+        }
+        assert!(received.contains('\u{FFFD}'), "got {received:?}");
+        assert_eq!(buf.pending_utf8, Vec::<u8>::new());
     }
 }

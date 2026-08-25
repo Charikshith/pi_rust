@@ -350,9 +350,13 @@ impl Terminal for ProcessTerminal {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = crossterm::terminal::disable_raw_mode();
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
+        // B6: the reader thread is blocked in a plain `stdin.lock().read()`
+        // with no wakeup mechanism — `running` is only checked between reads,
+        // so joining here hangs exit until the next keypress. Detach instead:
+        // drop the handle without waiting for it. The thread dies with the
+        // process; nothing it does after this point (forwarding stray bytes
+        // to a handler that's about to be cleared above) is observable.
+        self.reader_thread.take();
         if let Some(handle) = self.resize_thread.take() {
             let _ = handle.join();
         }

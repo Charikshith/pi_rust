@@ -102,6 +102,10 @@ struct DelayedSession {
     decider: Arc<Mutex<Option<ToolApprovalDecider>>>,
     /// The decision the decider returned for the last request.
     last_decision: Arc<Mutex<Option<ToolApprovalDecision>>>,
+    /// Set by `abort()` (B2: cooperative cancellation) — observed by the
+    /// release-wait loop below so a cancelled prompt unwinds on its own
+    /// instead of relying on a hard task abort dropping it mid-await.
+    aborted: Arc<AtomicBool>,
 }
 
 impl DelayedSession {
@@ -114,6 +118,7 @@ impl DelayedSession {
             ask_approval: Arc::new(AtomicBool::new(false)),
             decider: Arc::new(Mutex::new(None)),
             last_decision: Arc::new(Mutex::new(None)),
+            aborted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -176,8 +181,11 @@ impl PrintModeSession for DelayedSession {
             };
             *self.last_decision.lock().unwrap() = Some(decision);
         }
-        // Wait until released (or aborted via drop).
+        // Wait until released or cooperatively aborted.
         while !self.release.load(Ordering::SeqCst) {
+            if self.aborted.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         if self.fail_prompt.load(Ordering::SeqCst) {
@@ -204,6 +212,10 @@ impl PrintModeSession for DelayedSession {
 
     fn set_tool_approval_decider(&self, decider: ToolApprovalDecider) {
         *self.decider.lock().unwrap() = Some(decider);
+    }
+
+    fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
     }
 }
 

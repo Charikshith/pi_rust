@@ -220,7 +220,7 @@ impl SingleTurnSession {
     fn install_tool_approval_hook(&self) {
         let decider = Arc::clone(&self.tool_approval_decider);
         self.agent
-            .set_before_tool_call(Some(Arc::new(move |ctx, _token| {
+            .set_before_tool_call(Some(Arc::new(move |ctx, token| {
                 let decider = Arc::clone(&decider);
                 Box::pin(async move {
                     let request = ToolApprovalRequest {
@@ -231,7 +231,17 @@ impl SingleTurnSession {
                     // before the await (the future must stay Send).
                     let decider = decider.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let decision = match decider {
-                        Some(d) => d(request).await,
+                        // B2: race the decider against cancellation, so a
+                        // Ctrl+C while a prompt is parked awaiting approval
+                        // resolves as Deny instead of leaving the run stuck
+                        // on a oneshot no one will ever answer.
+                        Some(d) => match &token {
+                            Some(t) => tokio::select! {
+                                decision = d(request) => decision,
+                                _ = t.cancelled() => ToolApprovalDecision::Deny,
+                            },
+                            None => d(request).await,
+                        },
                         None => ToolApprovalDecision::RunOnce,
                     };
                     match decision {
@@ -464,21 +474,56 @@ impl SingleTurnSession {
         )));
 
         let runner_2 = Arc::clone(runner);
+        let decider = Arc::clone(&self.tool_approval_decider);
         self.agent.set_before_tool_call(Some(Arc::new(
-            move |ctx: BeforeToolCallContext, _token| {
+            move |ctx: BeforeToolCallContext, token| {
                 let runner = Arc::clone(&runner_2);
+                let decider = Arc::clone(&decider);
                 Box::pin(async move {
                     let event = ExtensionEvent::ToolCall {
                         tool_call_id: ctx.tool_call.id.clone(),
                         tool_name: ctx.tool_call.name.clone(),
                         input: ctx.args.clone(),
                     };
-                    match runner.lock().unwrap().emit_tool_call(&event) {
-                        Some(result) if result.block => Some(BeforeToolCallResult {
+                    if let Some(result) = runner.lock().unwrap().emit_tool_call(&event) {
+                        if result.block {
+                            return Some(BeforeToolCallResult {
+                                block: Some(true),
+                                reason: result.reason,
+                            });
+                        }
+                    }
+                    // `set_before_tool_call` is single-slot (B1): binding extensions
+                    // used to fully replace `install_tool_approval_hook`'s hook, so
+                    // the TUI's approval prompt never ran once extensions were bound.
+                    // Consult the interactive layer's decider here too, after
+                    // extensions had their say, so approval still gates every tool.
+                    let decider = decider.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let decision = match decider {
+                        // B2: race against cancellation so a Ctrl+C while
+                        // parked on an approval prompt resolves to Deny
+                        // instead of hanging forever on an unanswered oneshot.
+                        Some(d) => {
+                            let request = ToolApprovalRequest {
+                                tool_name: ctx.tool_call.name.clone(),
+                                args: ctx.args.clone(),
+                            };
+                            match &token {
+                                Some(t) => tokio::select! {
+                                    decision = d(request) => decision,
+                                    _ = t.cancelled() => ToolApprovalDecision::Deny,
+                                },
+                                None => d(request).await,
+                            }
+                        }
+                        None => ToolApprovalDecision::RunOnce,
+                    };
+                    match decision {
+                        ToolApprovalDecision::RunOnce | ToolApprovalDecision::AlwaysAllow => None,
+                        ToolApprovalDecision::Deny => Some(BeforeToolCallResult {
                             block: Some(true),
-                            reason: result.reason,
+                            reason: Some("Tool execution was denied by the user".to_string()),
                         }),
-                        Some(_) | None => None,
                     }
                 }) as BoxFuture<'static, Option<BeforeToolCallResult>>
             },
@@ -597,6 +642,10 @@ impl PrintModeSession for SingleTurnSession {
 
     async fn reload(&self) {
         // Unreachable this wave — see module docs.
+    }
+
+    fn abort(&self) {
+        self.agent.abort();
     }
 
     fn set_tool_approval_decider(&self, decider: ToolApprovalDecider) {

@@ -570,6 +570,11 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
             model,
             api_key: None,
             tool_execution: Some(ToolExecutionMode::Parallel),
+            // B3: seed the first turn's reasoning from the harness's current
+            // thinking level. `prepare_next_turn` above remaps this for every
+            // later turn, but only runs after turn 1 completes — without this,
+            // the first provider call of every prompt ran with reasoning off.
+            reasoning: (thinking_level != ThinkingLevel::Off).then_some(thinking_level),
             convert_to_llm: Box::new(|msgs| Box::pin(async move { convert_to_llm(&msgs) })),
             transform_context: None,
             get_api_key: None,

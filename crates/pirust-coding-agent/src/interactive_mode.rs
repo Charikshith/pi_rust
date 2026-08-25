@@ -173,6 +173,10 @@ const FALLBACK_PREVIEW_LINES: usize = 10;
 /// The interactive session runner.
 pub struct InteractiveMode {
     tui: Rc<RefCell<TUI>>,
+    /// Same editor the TUI renders; kept here too so `run_async` can check
+    /// whether the "/" command dropdown is open before treating Esc as
+    /// "cancel the active turn."
+    editor: Rc<RefCell<Editor>>,
     /// Raw input sequences from the terminal reader thread.
     input_rx: Receiver<String>,
     /// Submitted prompts from the editor's `on_submit`.
@@ -597,6 +601,7 @@ impl InteractiveMode {
 
         Self {
             tui,
+            editor: Rc::clone(&editor),
             input_rx,
             submit_rx,
             _submit_tx: submit_tx,
@@ -656,11 +661,13 @@ impl InteractiveMode {
                     // While a tool awaits approval, a single decision key routes to
                     // the approval instead of the editor/loop.
                     self.handle_approval_key(&data);
-                } else if pirust_tui::keys::matches_key(&data, "escape") {
-                    // No modal is open here (each modal branch above already
-                    // consumed Esc for its own close-handling) — this is the
-                    // plain "cancel the active turn" case the global listener
-                    // used to swallow before it could ever reach a modal.
+                } else if pirust_tui::keys::matches_key(&data, "escape")
+                    && !self.editor.borrow().is_showing_autocomplete()
+                {
+                    // No modal or autocomplete dropdown (e.g. the "/" command
+                    // list) is open here — this is the plain "cancel the
+                    // active turn" case the global listener used to swallow
+                    // before it could ever reach a modal.
                     self.cancel_requested.store(true, Ordering::Relaxed);
                 } else {
                     self.tui.borrow_mut().handle_input(&data);
@@ -690,9 +697,14 @@ impl InteractiveMode {
                     || self.turn_state == TurnState::AwaitingApproval
                 {
                     self.turn_state = TurnState::Cancelling;
-                    if let Some(turn) = self.active_turn.as_ref() {
-                        turn.abort();
-                    }
+                    // B2: cancel cooperatively instead of `JoinHandle::abort()`.
+                    // A hard abort drops the turn future mid-await, so
+                    // `finish_run()` never runs and every later prompt fails
+                    // `BusyPrompt` forever. `Agent::abort()` cancels the run's
+                    // token; the streaming loop and the approval decider both
+                    // now race against it and unwind on their own, so the
+                    // task below finishes normally and `finish_turn` runs.
+                    self.session.abort();
                 }
                 self.repaint();
             }

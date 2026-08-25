@@ -471,6 +471,17 @@ impl Agent {
     }
 }
 
+/// Runs [`AgentInner::finish_run`] when dropped, even if the enclosing future
+/// is dropped mid-await instead of running to completion (B2: a hard task
+/// abort used to skip `finish_run()` entirely and wedge the agent).
+struct FinishRunGuard<'a>(&'a AgentInner);
+
+impl Drop for FinishRunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish_run();
+    }
+}
+
 impl AgentInner {
     /// `continue()` (agent.ts:348-375): guard, inspect the tail, and either drain
     /// steering (skip-initial) / follow-up, reject an assistant tail, or continue.
@@ -580,7 +591,7 @@ impl AgentInner {
             (state.model.clone(), state.thinking_level)
         };
         // reasoning: "off" → None else the level (agent.ts:436).
-        let _reasoning = if thinking == ThinkingLevel::Off {
+        let reasoning = if thinking == ThinkingLevel::Off {
             None
         } else {
             Some(thinking)
@@ -634,6 +645,7 @@ impl AgentInner {
             model,
             api_key: None,
             tool_execution: Some(self.tool_execution),
+            reasoning,
             convert_to_llm,
             transform_context,
             get_api_key,
@@ -678,11 +690,23 @@ impl AgentInner {
             state.error_message = None;
         }
 
+        // Defense in depth for B2: if this future is dropped mid-await (a
+        // hard `JoinHandle::abort()` on the caller's task, rather than a
+        // cooperative `token.cancel()`), the explicit `finish_run()` below
+        // never runs and `active_run`/`idle` stay stuck forever — every later
+        // prompt fails `BusyPrompt` and `wait_for_idle` hangs. This guard
+        // runs `finish_run()` on any exit path, including a mid-await drop.
+        // `finish_run()` is idempotent, so the normal path's explicit call
+        // below and the guard's drop can both fire without double effects.
+        let guard = FinishRunGuard(self);
         let result = executor(token.clone()).await;
         if let Err(error) = result {
             self.handle_run_failure(error, token.is_cancelled()).await;
         }
-        self.finish_run();
+        // Explicit drop (rather than letting it fall out of scope) runs
+        // `finish_run()` before this function returns `Ok(())`, matching the
+        // original ordering exactly on the normal path.
+        drop(guard);
         Ok(())
     }
 

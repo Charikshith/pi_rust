@@ -296,6 +296,11 @@ pub struct AgentLoopConfig {
     pub api_key: Option<String>,
     /// Tool execution mode. Default: `Parallel` (types.ts:259).
     pub tool_execution: Option<ToolExecutionMode>,
+    /// Reasoning level for the first turn's provider call (agent.ts:436).
+    /// `prepare_next_turn` may override this for later turns; before this
+    /// field existed the first call of every prompt always ran with
+    /// reasoning off regardless of the agent's configured thinking level.
+    pub reasoning: Option<ThinkingLevel>,
     /// Required LLM conversion hook.
     pub convert_to_llm: ConvertToLlmFn,
     /// Optional context transform.

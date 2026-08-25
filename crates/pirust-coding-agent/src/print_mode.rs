@@ -829,6 +829,14 @@ pub trait PrintModeSession: Send + Sync {
     /// `session.reload()` (`print-mode.ts:95`).
     async fn reload(&self);
 
+    /// Cooperatively cancel the in-flight run (`Agent::abort`, agent.rs:437).
+    /// Cancels the run's token and lets the prompt future observe it and
+    /// unwind normally, so `finish_run()` still runs (B2: a hard
+    /// `JoinHandle::abort()` on the caller's task instead used to skip
+    /// `finish_run()` and wedge every later prompt on `BusyPrompt`). The
+    /// default is a no-op for sessions with no underlying `Agent` to cancel.
+    fn abort(&self) {}
+
     /// Register the interactive layer's tool-approval decider. The session
     /// consults it (awaiting its returned future) from its `before_tool_call`
     /// hook and blocks a tool when it returns a non-allow decision. The

@@ -14,8 +14,8 @@ use serde_json::{json, Map, Value};
 
 use crate::api::openai_completions::{clamp_openai_prompt_cache_key, resolve_cache_retention};
 use crate::api::openai_responses_shared::{
-    convert_responses_messages, convert_responses_tools, process_responses_stream,
-    split_deferred_tools, ConvertResponsesToolsOptions, DeferredToolsMode, ResponsesStreamOptions,
+    convert_responses_messages, convert_responses_tools, split_deferred_tools,
+    ConvertResponsesToolsOptions, DeferredToolsMode, ResponsesStreamOptions, ResponsesStreamState,
     ServiceTierMode,
 };
 use crate::http::{ByteStream, DynTransport};
@@ -333,8 +333,17 @@ async fn run_produce(
             crate::sse::SseError::Transport(crate::http::TransportError::to_string(&e))
         })
     });
+    // B4: feed each parsed event into the state machine as it arrives,
+    // rather than collecting every SSE event into a `Vec<Value>` and running
+    // the state machine only after the stream ends — which held the whole
+    // parsed response in memory and left the consumer seeing nothing until
+    // the answer was complete.
     let mut sse_events = crate::sse::iterate_sse_messages(sse_stream);
-    let mut json_events: Vec<Value> = Vec::new();
+    let mut state = ResponsesStreamState::new(Some(&ResponsesStreamOptions {
+        service_tier: opts.service_tier.clone(),
+        grammar_tool_input_properties: Some(grammar_tool_input_properties.clone()),
+        service_tier_mode: ServiceTierMode::OpenAi,
+    }));
     while let Some(item) = sse_events.next().await {
         let sse = item.map_err(|e| match e {
             crate::sse::SseError::ServerError(data) => data,
@@ -346,22 +355,12 @@ async fn run_produce(
         }
         if let Ok(v) = serde_json::from_str::<Value>(&sse.data) {
             if v.is_object() {
-                json_events.push(v);
+                state.feed(&v, output, sink, model)?;
             }
         }
     }
 
-    process_responses_stream(
-        json_events.into_iter(),
-        output,
-        sink,
-        model,
-        Some(&ResponsesStreamOptions {
-            service_tier: opts.service_tier.clone(),
-            grammar_tool_input_properties: Some(grammar_tool_input_properties.clone()),
-            service_tier_mode: ServiceTierMode::OpenAi,
-        }),
-    )?;
+    state.finish()?;
 
     // TS `:166-172`: aborted → throw; the "pending" sentinel is provably unreachable
     // (processResponsesStream always sets a concrete stop reason or throws first).
