@@ -695,6 +695,32 @@ pub struct TuiRuntimeStatus {
 pub trait TuiRuntimeInfo: Send + Sync {
     /// A snapshot of the runtime identity/status for the status line.
     fn runtime_status(&self) -> TuiRuntimeStatus;
+
+    /// The names of the tools this session has enabled, for the first-run
+    /// welcome block (`docs/tui-design-samples.html` §1 lists them).
+    ///
+    /// A **defaulted** method rather than a [`TuiRuntimeStatus`] field:
+    /// `TuiRuntimeStatus` is constructed as a struct literal by every golden
+    /// stub in the test suites, so adding a field there would break all of
+    /// them to carry data they have nothing to put in. The real set is
+    /// assembled in `sdk.rs` (`initial_active_tool_names`) and has never been
+    /// threaded back to the TUI; until it is, the default empty list makes the
+    /// welcome block render no tool row, which is honest. A fabricated list
+    /// would not be.
+    fn tool_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The resumable sessions on disk, newest first, for `/resume`.
+    ///
+    /// Defaulted for the same reason as [`Self::tool_names`]: the golden stubs
+    /// have no session store. `SingleTurnSession` overrides it from the
+    /// `SessionManager` it already holds, so the real picker is real — the
+    /// version this replaced listed only the *current* session and answered
+    /// "Session resume is not available" on Enter.
+    fn session_entries(&self) -> Vec<crate::interactive_pickers::SessionEntry> {
+        Vec::new()
+    }
 }
 
 /// `session.subscribe`'s return value: the unsubscribe thunk.
@@ -853,6 +879,21 @@ pub trait PrintModeSession: Send + Sync {
     /// session on which extensions were never bound.
     fn reload_wasm_extensions(&self) -> Result<usize, String> {
         Err("wasm extensions are not supported in this build".to_string())
+    }
+
+    /// `/name <name>` — persist the session's display label, returning the
+    /// sanitized name that was written.
+    ///
+    /// This makes `/name` genuinely work rather than reporting itself
+    /// unavailable. The store side always existed —
+    /// `SessionManager::append_session_info` (`session-manager.ts:1065-1076`)
+    /// appends the `session_info` entry and collapses newlines to spaces — it
+    /// simply had no route out to the interactive layer, so the TUI answered
+    /// "renaming is not wired to the session store" for every argument.
+    ///
+    /// The default still reports that, for sessions with no store behind them.
+    fn set_session_name(&self, _name: &str) -> Result<String, String> {
+        Err("renaming is not wired to the session store".to_string())
     }
 }
 

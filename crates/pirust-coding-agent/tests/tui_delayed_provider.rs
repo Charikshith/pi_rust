@@ -12,7 +12,7 @@
 //! only after the caller's prompt has been observed, mirroring a slow
 //! provider.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -93,7 +93,17 @@ fn take_on_input(input_slot: &InputSlot) -> Box<dyn FnMut(&str) + Send> {
 struct DelayedSession {
     listener: Arc<Mutex<Option<SessionEventListener>>>,
     prompt_seen: Arc<AtomicBool>,
+    /// How many times `prompt` has been entered. `prompt_seen` only says
+    /// "at least one", which cannot distinguish a queued prompt that later ran
+    /// from one that was silently dropped.
+    prompt_count: Arc<AtomicUsize>,
     release: Arc<AtomicBool>,
+    /// The assistant text the canned stream emits. Overridable so a test can
+    /// feed Markdown and assert the renderer consumed the markers.
+    stream_text: Arc<Mutex<String>>,
+    /// Reasoning text to emit as a `thinking` content block alongside the
+    /// answer. Empty (the default) emits no thinking block at all.
+    thinking_text: Arc<Mutex<String>>,
     fail_prompt: Arc<AtomicBool>,
     /// When set, `prompt` requests a tool approval before proceeding.
     ask_approval: Arc<AtomicBool>,
@@ -113,7 +123,10 @@ impl DelayedSession {
         Self {
             listener: Arc::new(Mutex::new(None)),
             prompt_seen: Arc::new(AtomicBool::new(false)),
+            prompt_count: Arc::new(AtomicUsize::new(0)),
             release: Arc::new(AtomicBool::new(false)),
+            stream_text: Arc::new(Mutex::new("Hello from the delayed provider".to_string())),
+            thinking_text: Arc::new(Mutex::new(String::new())),
             fail_prompt: Arc::new(AtomicBool::new(false)),
             ask_approval: Arc::new(AtomicBool::new(false)),
             decider: Arc::new(Mutex::new(None)),
@@ -123,24 +136,36 @@ impl DelayedSession {
     }
 
     /// Emit the canned assistant stream through the captured listener.
-    fn emit_stream(&self, text: &str) {
+    ///
+    /// `text` is ignored in favour of `stream_text` so a test can set the body
+    /// before submitting; the parameter is kept because existing callers pass
+    /// it and the default value matches what they assert on.
+    fn emit_stream(&self, _text: &str) {
         let listener = self.listener.lock().unwrap().clone();
+        let text = self.stream_text.lock().unwrap().clone();
+        let thinking = self.thinking_text.lock().unwrap().clone();
+        // A `thinking` block, shaped exactly like `pirust_ai`'s
+        // `ThinkingContent` (`crates/pirust-ai/src/types/content.rs:65`):
+        // `{"type":"thinking","thinking":"…"}`. Emitted before the text block,
+        // which is the order a real provider streams them in.
+        let content = |body: &str| {
+            let mut blocks = Vec::new();
+            if !thinking.is_empty() {
+                blocks.push(serde_json::json!({"type": "thinking", "thinking": thinking}));
+            }
+            blocks.push(serde_json::json!({"type": "text", "text": body}));
+            serde_json::json!({ "role": "assistant", "content": blocks })
+        };
         if let Some(listener) = listener {
             listener(&AgentSessionEvent::MessageStart {
                 message: serde_json::json!({"role": "assistant", "content": []}),
             });
             listener(&AgentSessionEvent::MessageUpdate {
                 assistant_message_event: serde_json::json!({}),
-                message: serde_json::json!({
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": text}]
-                }),
+                message: content(&text),
             });
             listener(&AgentSessionEvent::MessageEnd {
-                message: serde_json::json!({
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": text}]
-                }),
+                message: content(&text),
             });
             listener(&AgentSessionEvent::AgentEnd {
                 messages: vec![],
@@ -164,6 +189,7 @@ impl PrintModeSession for DelayedSession {
     }
     async fn prompt(&self, text: &str, _options: Option<PromptOptions>) -> Result<(), ThrownValue> {
         self.prompt_seen.store(true, Ordering::SeqCst);
+        self.prompt_count.fetch_add(1, Ordering::SeqCst);
         // Optionally request a tool approval (mirrors the agent's
         // `before_tool_call` hook flow, which blocks the loop awaiting the
         // user's decision).
@@ -542,4 +568,275 @@ fn resize_during_idle_is_picked_up() {
 
     mode.run();
     // Just proving the loop tolerates an idle run + quit without panic.
+}
+
+/// A prompt submitted while a turn is already running must be queued and then
+/// run — not silently discarded.
+///
+/// The submit drain used to be guarded by `self.active_turn.is_none()`, with no
+/// `else`. The editor clears itself on submit, so text entered during a turn
+/// disappeared from the screen *and* from the queue, and nothing told the user.
+/// `docs/tui-design-samples.html` §7 names `queued` as a response state the UI
+/// must distinguish, which is only meaningful if the queue exists.
+///
+/// This asserts both halves: the queue notice is rendered (so the user is told),
+/// and `prompt` is entered twice (so the queued text actually ran).
+#[test]
+fn a_prompt_submitted_mid_turn_is_queued_then_runs() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let prompt_seen = Arc::clone(&session.prompt_seen);
+    let prompt_count = Arc::clone(&session.prompt_count);
+    let release = Arc::clone(&session.release);
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        // First prompt: starts the turn, which then blocks on `release`.
+        type_and_submit(&mut on_input);
+        for _ in 0..200 {
+            if prompt_seen.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Second prompt, typed while the first turn is still in flight.
+        for ch in ["q", "u", "e", "u", "e", "d"] {
+            on_input(ch);
+            thread::sleep(Duration::from_millis(10));
+        }
+        on_input("\r");
+        thread::sleep(Duration::from_millis(80));
+        // Let the first turn finish; the queued one must start on its own.
+        release.store(true, Ordering::SeqCst);
+        for _ in 0..300 {
+            if prompt_count.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(60));
+        on_input("\u{4}"); // quit
+    });
+
+    runtime.block_on(mode.run_async());
+
+    let writes = handles.writes.lock().unwrap().clone();
+    assert!(
+        writes.contains("queued #1"),
+        "the queued prompt should be announced, got: {writes:?}"
+    );
+    assert_eq!(
+        session.prompt_count.load(Ordering::SeqCst),
+        2,
+        "the queued prompt should have run after the first turn finished"
+    );
+}
+
+/// An idle TUI must not burn CPU.
+///
+/// The loop used to end every iteration with an unconditional
+/// `tokio::time::sleep(10ms)`, so an idle process woke 100 times a second to
+/// drain four empty channels and re-poll the terminal size. `wait_for_work`
+/// replaced that with a park on the input channel plus a `Notify` permit, so an
+/// idle second should cost a couple of resize-poll wakeups, not a hundred.
+///
+/// `InteractiveMode::loop_iterations` counts loop-body entries directly, and
+/// `run_async` borrows `&mut self`, so the count is still readable after
+/// `block_on` returns. The bound is deliberately loose — this is a regression
+/// guard against returning to a busy-poll, not a benchmark.
+#[test]
+fn an_idle_loop_parks_instead_of_polling() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        // Sit completely idle for a second: no keys, no prompt, no events.
+        thread::sleep(Duration::from_millis(1000));
+        on_input("\u{4}"); // quit
+    });
+
+    runtime.block_on(mode.run_async());
+    let _ = handles.writes;
+
+    let iterations = mode.loop_iterations();
+    // At a 500ms idle resize-poll, one idle second is ~2-3 iterations plus a
+    // few for startup and shutdown. The old 10ms busy-poll would be ~100.
+    assert!(
+        iterations < 25,
+        "an idle second should park, not spin: {iterations} loop iterations \
+         (the 10ms busy-poll this replaced would be ~100)"
+    );
+}
+
+/// Assistant text must go through the Markdown renderer, not be shown raw.
+///
+/// `pirust-tui` has shipped a 2,000-line Markdown renderer since the crate was
+/// ported, and the chat never called it — `render_event` mounted a plain
+/// `Text`, so `**bold**` and `# heading` reached the screen as literal
+/// asterisks and hashes. This asserts the markers are consumed.
+#[test]
+fn assistant_markdown_is_rendered_not_shown_raw() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let prompt_seen = Arc::clone(&session.prompt_seen);
+    let release = Arc::clone(&session.release);
+    let markdown = Arc::clone(&session.stream_text);
+    *markdown.lock().unwrap() = "# Heading\n\nSome **bold** words.".to_string();
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        type_and_submit(&mut on_input);
+        for _ in 0..200 {
+            if prompt_seen.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        release.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(150));
+        on_input("\u{4}");
+    });
+
+    runtime.block_on(mode.run_async());
+    let writes = handles.writes.lock().unwrap().clone();
+
+    assert!(
+        writes.contains("Heading"),
+        "heading text should be rendered, got: {writes:?}"
+    );
+    assert!(
+        writes.contains("bold"),
+        "emphasised text should be rendered, got: {writes:?}"
+    );
+    assert!(
+        !writes.contains("**bold**"),
+        "the ** markers should be consumed by the Markdown renderer, not printed: {writes:?}"
+    );
+    assert!(
+        !writes.contains("# Heading"),
+        "the # marker should be consumed by the Markdown renderer, not printed: {writes:?}"
+    );
+}
+
+/// A model's reasoning must be shown, collapsed, and expandable with Ctrl+O.
+///
+/// `assistant_text` filtered assistant content blocks down to `type == "text"`
+/// and dropped everything else, so thinking output was discarded entirely.
+#[test]
+fn thinking_is_shown_collapsed_and_expands_on_ctrl_o() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let prompt_seen = Arc::clone(&session.prompt_seen);
+    let release = Arc::clone(&session.release);
+    *session.thinking_text.lock().unwrap() =
+        "First I inspect the parser.\nThen I plan the smallest safe change.".to_string();
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        type_and_submit(&mut on_input);
+        for _ in 0..200 {
+            if prompt_seen.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        release.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(120));
+        // Ctrl+O expands the reasoning block.
+        on_input("\u{f}");
+        thread::sleep(Duration::from_millis(120));
+        on_input("\u{4}");
+    });
+
+    runtime.block_on(mode.run_async());
+    let writes = handles.writes.lock().unwrap().clone();
+
+    assert!(
+        writes.contains("Thinking") || writes.contains("Thought"),
+        "a reasoning block should be shown, got: {writes:?}"
+    );
+    assert!(
+        writes.contains("smallest safe change"),
+        "Ctrl+O should expand the reasoning text, got: {writes:?}"
+    );
+}
+
+/// A `write` tool call must render a diff, not its raw args JSON.
+#[test]
+fn a_write_tool_call_renders_a_diff_not_raw_json() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    // A path that certainly does not exist, so the diff is a clean "new file".
+    let path = "pirust_diff_probe_does_not_exist.txt";
+    if let Some(listener) = session.listener.lock().unwrap().clone() {
+        listener(&AgentSessionEvent::ToolExecutionStart {
+            tool_call_id: "call_w".into(),
+            tool_name: "write".into(),
+            args: serde_json::json!({ "path": path, "content": "alpha\nbeta\n" }),
+        });
+    }
+
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        thread::sleep(Duration::from_millis(120));
+        on_input("\u{4}");
+    });
+
+    runtime.block_on(mode.run_async());
+    let writes = handles.writes.lock().unwrap().clone();
+
+    assert!(
+        writes.contains("alpha"),
+        "the written content should appear as diff lines, got: {writes:?}"
+    );
+    assert!(
+        writes.contains(path),
+        "the changed path should be identified, got: {writes:?}"
+    );
+    assert!(
+        !writes.contains("\"content\""),
+        "the raw args JSON should be suppressed in favour of the diff: {writes:?}"
+    );
 }

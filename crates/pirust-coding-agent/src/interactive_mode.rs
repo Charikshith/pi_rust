@@ -34,20 +34,31 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use pirust_tui::components::text::Text;
 use pirust_tui::editor::Editor;
-use pirust_tui::tui::{SharedComponent, TUI};
+use pirust_tui::tui::{Component, SharedComponent, TUI};
 
+use crate::interactive_a11y::glyph;
+use crate::interactive_commands::CommandOutcome;
+use crate::interactive_debug::{DebugLog, DebugPanel, RequestId, TurnTimings};
+use crate::interactive_diff::{parse_file_change, DiffPreview};
+use crate::interactive_markdown::MarkdownText;
+use crate::interactive_pickers::{
+    ModelEntry, ModelPicker as PickerModelPicker, PickerAction, SessionPicker,
+};
 use crate::interactive_theme::{self, dark};
+use crate::interactive_thinking::{thinking_text, ThinkingComponent, ThinkingRegistry};
 use crate::print_mode::{
     AgentSessionEvent, PrintModeSession, ToolApprovalDecision, ToolApprovalRequest, TuiRuntimeInfo,
     TuiRuntimeStatus,
@@ -98,73 +109,27 @@ struct ApprovalMessage {
 // connection to the input box at all. Letting `/` flow to the editor as a
 // normal character is the fix — no replacement code needed here.
 
-/// The `/model` picker (plan.md step 5): filters the model catalog by
-/// provider/model id, ↑/↓ navigate, Enter selects, Esc dismisses.
-struct ModelPicker {
-    /// (provider, model id) of each selectable model.
-    models: Vec<(String, String)>,
-    filter: String,
-    selected: usize,
-}
-
-impl ModelPicker {
-    fn render(&self) -> String {
-        let mut lines = vec![format!("Select model (filter: {})", self.filter)];
-        let visible = self.visible();
-        if visible.is_empty() {
-            lines.push("  (no matching models)".to_string());
-        }
-        for (index, (provider, model)) in visible.iter().enumerate() {
-            let marker = if index == self.selected.min(visible.len().saturating_sub(1)) {
-                "▸"
-            } else {
-                " "
-            };
-            lines.push(format!("{marker} {provider} / {model}"));
-        }
-        lines.push("↑/↓ navigate · Enter select · Esc dismiss".to_string());
-        lines.join("\n")
-    }
-
-    fn visible(&self) -> Vec<&(String, String)> {
-        let filter = self.filter.to_ascii_lowercase();
-        self.models
-            .iter()
-            .filter(|(provider, model)| {
-                provider.to_ascii_lowercase().contains(&filter)
-                    || model.to_ascii_lowercase().contains(&filter)
-            })
-            .collect()
-    }
-}
-
-/// The `/resume` picker (plan.md step 5): lists resumable sessions. The real
-/// session store lives behind `SessionManager`; the TUI seam exposes it as
-/// a simple (id, title, cwd) list the session implementation supplies.
-struct ResumePicker {
-    /// (session id, title, cwd) of each resumable session.
-    sessions: Vec<(String, String, String)>,
-    selected: usize,
-}
-
-impl ResumePicker {
-    fn render(&self) -> String {
-        let mut lines = vec!["Resume a session:".to_string()];
-        if self.sessions.is_empty() {
-            lines.push("  (no resumable sessions)".to_string());
-        }
-        for (index, (id, title, cwd)) in self.sessions.iter().enumerate() {
-            let marker = if index == self.selected.min(self.sessions.len().saturating_sub(1)) {
-                "▸"
-            } else {
-                " "
-            };
-            lines.push(format!("{marker} {title} ({id}) — {cwd}"));
-        }
-        lines.push("↑/↓ navigate · Enter resume · Esc dismiss".to_string());
-        lines.join("\n")
-    }
-}
+// REMOVED: two hand-rolled pickers used to live here — a `ModelPicker` over a
+// `Vec<(String, String)>` and a `ResumePicker` over a `Vec<(String, String,
+// String)>`. Both were fakes in every sense that mattered:
+//
+//   * their *data* was a one-element list built from the current status, so
+//     `/model` offered only the model already in use and `/resume` only the
+//     session already open, and Enter on either answered "not available in
+//     this session";
+//   * `visible()` rebuilt a `Vec<&(String, String)>` on every keystroke and
+//     filtered with `to_ascii_lowercase().contains()`, not the fuzzy matcher
+//     `pirust-tui` already ships;
+//   * navigation was `selected += 1` with **no upper bound** — held-down
+//     Down-arrow walked the index past the end of the list, and only the
+//     `.min(len - 1)` in the renderer hid it;
+//   * there was no viewport, so a real provider list would have rendered
+//     every model into the band and pushed the editor off-screen.
+//
+// They are replaced by `crate::interactive_pickers::{ModelPicker,
+// SessionPicker}`: real data off the session seam, fuzzy filtering over a
+// reused index buffer, clamped navigation, a scrolling viewport, and columns
+// that degrade at narrow widths.
 
 /// How many lines of a tool result to preview before truncating with
 /// `... (N more lines)` — `FALLBACK_PREVIEW_LINES` (tool-execution.ts:15).
@@ -178,13 +143,58 @@ pub struct InteractiveMode {
     /// "cancel the active turn."
     editor: Rc<RefCell<Editor>>,
     /// Raw input sequences from the terminal reader thread.
-    input_rx: Receiver<String>,
+    ///
+    /// A **tokio** unbounded channel rather than [`std::sync::mpsc`] so
+    /// `run_async` can `select!` on it and park until a key actually arrives
+    /// (see [`Self::wait_for_work`]). `UnboundedSender::send` is a plain
+    /// non-blocking, non-async call that needs no runtime context, so the
+    /// terminal's reader thread still feeds it exactly as before.
+    input_rx: UnboundedReceiver<String>,
     /// Submitted prompts from the editor's `on_submit`.
     submit_rx: Receiver<String>,
     _submit_tx: Sender<String>,
     /// Session events from the agent loop thread (subscription listener).
+    ///
+    /// Deliberately still a **bounded** [`std::sync::mpsc::SyncSender`]: the
+    /// bound is the backpressure that stops a fast provider from growing the
+    /// queue without limit, and `tokio::sync::mpsc::Sender::blocking_send`
+    /// cannot replace it — the agent loop calls this listener from *inside* the
+    /// runtime, where `blocking_send` panics ("Cannot block the current thread
+    /// from within a runtime"), which is the exact class of bug this TUI was
+    /// first bitten by. The loop is woken instead by [`Self::wake`].
     event_rx: Receiver<AgentSessionEvent>,
     _event_tx: std::sync::mpsc::SyncSender<AgentSessionEvent>,
+    /// Keystrokes [`Self::wait_for_work`] pulled off `input_rx` to end its
+    /// wait, handed back so the single drain site in `run_async` still sees
+    /// them in order. A tokio receiver has no push-back, and dropping the
+    /// value would silently eat the key that woke us.
+    ///
+    /// Never holds more than one element in practice — `select!` returns one
+    /// value per wait — so this costs nothing; `VecDeque` is used only because
+    /// it makes the drain's ordering obvious.
+    replay_input: VecDeque<String>,
+    /// Wakes `run_async` when a producer that is *not* the input channel has
+    /// something for it: a session event or a tool-approval request, both of
+    /// which arrive on sync channels from the agent thread.
+    ///
+    /// [`Notify::notify_one`] is sync, allocation-free, safe from any thread
+    /// with or without a runtime, and — critically — *stores* a permit, so a
+    /// notification sent between two `notified()` calls is not lost. That
+    /// permit is what lets the loop sleep indefinitely instead of polling.
+    wake: Arc<Notify>,
+    /// How many times `run_async`'s body has run. The regression seam for
+    /// [`Self::wait_for_work`]: an idle loop must park, so this must stay
+    /// near-flat while nothing is happening. A plain `u64` is enough — the
+    /// loop is single-threaded and nothing else writes it.
+    loop_iterations: u64,
+    /// Prompts submitted while a turn was already in flight.
+    ///
+    /// These used to be dropped on the floor: the submit drain ran only
+    /// `if ... self.active_turn.is_none()`, so anything typed and entered
+    /// during a turn vanished with no message at all. The design spec's
+    /// response-state list names `queued` as a state the UI must distinguish,
+    /// so they are now held here and started in order as turns finish.
+    pending_prompts: VecDeque<String>,
     /// Set when the user quits (Ctrl+D on an empty editor).
     quit: Arc<AtomicBool>,
     /// Set by Ctrl+C/Esc and consumed by the async turn loop.
@@ -216,7 +226,36 @@ pub struct InteractiveMode {
     /// Cached runtime status for the status line (refreshed on turn
     /// transitions and events).
     runtime_status: Option<TuiRuntimeStatus>,
-    streaming_text: Option<Rc<RefCell<Text>>>,
+    /// The live assistant message.
+    ///
+    /// A [`MarkdownText`], not a plain `Text`: `pirust-tui` has carried a full
+    /// 2,000-line Markdown renderer since the TUI crate was ported and the
+    /// chat never called it, so every fenced code block, list and heading a
+    /// model produced was shown as literal `**` and backticks. The component
+    /// no-ops an unchanged `set_text`, which matters because this is written
+    /// once per streamed token.
+    streaming_text: Option<Rc<RefCell<MarkdownText>>>,
+    /// The live reasoning block for the current assistant message, mounted
+    /// above it. `None` until the model actually emits thinking, so a
+    /// non-reasoning model costs nothing.
+    streaming_thinking: Option<Rc<RefCell<ThinkingComponent>>>,
+    /// Every thinking block in the transcript, so a global Ctrl+O can expand
+    /// or collapse them without the chat container knowing what it holds.
+    thinking: ThinkingRegistry,
+    /// Diff previews for file-editing tool calls, keyed by tool call id and
+    /// mounted directly under their tool box.
+    pending_diffs: HashMap<String, Rc<RefCell<DiffPreview>>>,
+    /// Instrumentation for the turn in flight: request id, time-to-first-token,
+    /// total duration, per-tool durations. `None` between turns.
+    timings: Option<TurnTimings>,
+    /// The bounded event log behind the debug panel and the panic report.
+    ///
+    /// `Arc<Mutex<_>>` rather than the `Rc<RefCell<_>>` everything else in this
+    /// file uses, because the panic hook is `Send + Sync + 'static` and cannot
+    /// hold `Rc`. It is the one piece of TUI state that must outlive the TUI.
+    debug_log: Arc<Mutex<DebugLog>>,
+    /// The debug panel, part of the bottom band and hidden by default.
+    debug_panel: Rc<RefCell<DebugPanel>>,
     /// Tool executions in flight, keyed by tool call id
     /// (`pendingTools` map, interactive-mode.ts:468).
     pending_tools: HashMap<String, Rc<RefCell<ToolExecutionComponent>>>,
@@ -231,15 +270,28 @@ pub struct InteractiveMode {
     /// and the agent loop unblocks.
     pending_approval: Option<ApprovalMessage>,
     /// The model picker, `Some` while it is open.
-    model_picker: Option<ModelPicker>,
-    /// The resume picker, `Some` while it is open.
-    resume_picker: Option<ResumePicker>,
+    model_picker: Option<Rc<RefCell<PickerModelPicker>>>,
+    /// The session picker, `Some` while it is open.
+    resume_picker: Option<Rc<RefCell<SessionPicker>>>,
+    /// The first-run block, dismissed on the first submitted prompt so it
+    /// stops occupying rows once there is a conversation to read.
+    welcome: Rc<RefCell<crate::interactive_welcome::WelcomeScreen>>,
+    /// The selectable model list, supplied by `main.rs` through
+    /// [`Self::set_model_entries`].
+    ///
+    /// Not read off the session seam like the session list is, because there
+    /// is nothing to read it from: `SingleTurnSession` holds an `Agent`, and
+    /// `Agent::model()` is the *one* model in use — the composed provider list
+    /// lives in the `ModelRuntime` that `main.rs` builds and never hands to
+    /// the session. Pushing it in from there beats widening
+    /// `InteractiveMode::new`, whose signature every test rig calls.
+    model_entries: Vec<ModelEntry>,
     /// The text any open modal (palette/model-picker/resume-picker) renders
     /// into — empty when none is open. NOT its own overlay: it renders as
     /// part of the SAME `BottomLeft` overlay as the editor/status band (see
     /// `EditorStatusBand`), directly above the editor, rather than floating
     /// as an independent centered overlay disconnected from the input box.
-    modal_text: Rc<RefCell<Text>>,
+    modal_text: Rc<RefCell<Modal>>,
 }
 
 /// `ToolExecutionComponent` (tool-execution.ts) — a simplified but faithful
@@ -248,6 +300,13 @@ pub struct InteractiveMode {
 pub struct ToolExecutionComponent {
     tool_name: String,
     args: serde_json::Value,
+    /// Suppress the pretty-printed args JSON.
+    ///
+    /// Set when a sibling [`DiffPreview`] is mounted directly beneath this box
+    /// (a `write` or `edit` call). Printing `{"path": …, "content": "…"}` above
+    /// a rendered diff of that same content shows the file twice, once
+    /// unreadably — the diff *is* the argument display for those tools.
+    suppress_args: bool,
     expanded: bool,
     is_partial: bool,
     execution_started: bool,
@@ -267,10 +326,11 @@ pub struct ToolResultContent {
 
 impl ToolExecutionComponent {
     /// `constructor` (tool-execution.ts:41).
-    fn new(tool_name: String, args: serde_json::Value) -> Self {
+    fn new(tool_name: String, args: serde_json::Value, suppress_args: bool) -> Self {
         Self {
             tool_name,
             args,
+            suppress_args,
             expanded: false,
             is_partial: true,
             execution_started: false,
@@ -309,10 +369,12 @@ impl ToolExecutionComponent {
     /// bold tool name + args JSON + result output.
     fn format_tool_execution(&self) -> String {
         let mut text = self.tool_name.clone();
-        let content = serde_json::to_string_pretty(&self.args).unwrap_or_default();
-        if !content.is_empty() && content != "{}" && content != "null" {
-            text.push_str("\n\n");
-            text.push_str(&content);
+        if !self.suppress_args {
+            let content = serde_json::to_string_pretty(&self.args).unwrap_or_default();
+            if !content.is_empty() && content != "{}" && content != "null" {
+                text.push_str("\n\n");
+                text.push_str(&content);
+            }
         }
         if let Some(result) = &self.result {
             let output = result_text(&result.content);
@@ -376,20 +438,63 @@ impl pirust_tui::tui::Component for ToolExecutionComponent {
 /// into this same band, rendered first (so it appears directly above the
 /// editor), fixes that: one cohesive, bottom-anchored block, no gap.
 struct EditorStatusBand {
-    modal: Rc<RefCell<Text>>,
+    /// The debug panel. Renders zero rows while hidden, which is its default,
+    /// so it costs nothing until `/debug` turns it on.
+    debug: Rc<RefCell<DebugPanel>>,
+    modal: Rc<RefCell<Modal>>,
     editor: Rc<RefCell<Editor>>,
     status: Rc<RefCell<Text>>,
 }
 
+/// What currently occupies the band's modal row(s).
+///
+/// This used to be a bare `Text`, which forced every modal to pre-render
+/// itself to a `String` before it knew the terminal width. The real pickers
+/// lay out aligned columns and a scrolling viewport, both of which need the
+/// width, and their output is already ANSI-coloured — pushing that through
+/// `Text`'s wrapper would re-wrap and mangle it. So the slot now holds either
+/// plain text (short notices, which genuinely do not care about width) or a
+/// full [`Component`](pirust_tui::tui::Component) that renders itself.
+enum Modal {
+    /// Nothing open.
+    None,
+    /// A short pre-rendered notice.
+    Text(Text),
+    /// A width-aware component: the model or session picker.
+    Component(SharedComponent),
+}
+
+impl Modal {
+    fn render(&mut self, width: usize) -> Vec<String> {
+        match self {
+            Modal::None => Vec::new(),
+            Modal::Text(text) => text.render(width),
+            Modal::Component(component) => component.borrow_mut().render(width),
+        }
+    }
+
+    fn invalidate(&mut self) {
+        match self {
+            Modal::None => {}
+            Modal::Text(text) => text.invalidate(),
+            Modal::Component(component) => component.borrow_mut().invalidate(),
+        }
+    }
+}
+
 impl pirust_tui::tui::Component for EditorStatusBand {
     fn render(&mut self, width: usize) -> Vec<String> {
-        let mut lines = self.modal.borrow_mut().render(width);
+        // Debug output sits at the top of the band — furthest from the input
+        // box, because it is the least likely thing the user is looking at.
+        let mut lines = self.debug.borrow_mut().render(width);
+        lines.extend(self.modal.borrow_mut().render(width));
         lines.extend(self.editor.borrow_mut().render(width));
         lines.extend(self.status.borrow_mut().render(width));
         lines
     }
 
     fn invalidate(&mut self) {
+        self.debug.borrow_mut().invalidate();
         self.modal.borrow_mut().invalidate();
         self.editor.borrow_mut().invalidate();
         self.status.borrow_mut().invalidate();
@@ -404,9 +509,30 @@ impl InteractiveMode {
         session: Arc<dyn InteractiveSession>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
-        let (input_tx, input_rx) = channel::<String>();
+        // Accessibility first: everything built below asks
+        // `interactive_a11y::active()` whether it may emit colour, box-drawing
+        // glyphs or animation, so the detection has to happen before the first
+        // component exists. `NO_COLOR`, `TERM=dumb` and a non-TTY stdout all
+        // land here, and the Markdown theme is switched to its identity
+        // variant so a `NO_COLOR` run emits no escape bytes at all rather than
+        // colouring text and hoping the terminal ignores it.
+        let a11y = crate::interactive_a11y::detect();
+        crate::interactive_a11y::set_active(a11y);
+        crate::interactive_markdown::set_color_enabled(
+            a11y.color != crate::interactive_a11y::ColorMode::None,
+        );
 
-        // Start the terminal reader thread, feeding the channel.
+        // The bounded event log. Built before anything can fail so the panic
+        // hook has somewhere to write from the earliest possible moment.
+        let debug_log = Arc::new(Mutex::new(DebugLog::new()));
+        crate::interactive_debug::install_panic_hook(Arc::clone(&debug_log));
+
+        let (input_tx, input_rx) = unbounded_channel::<String>();
+
+        // Start the terminal reader thread, feeding the channel. `send` on a
+        // tokio unbounded sender is a lock-free push with no `.await` and no
+        // runtime requirement, so this stays a plain callback from a plain
+        // thread — the reader is unchanged, only the loop's *wait* changes.
         let mut terminal = terminal;
         terminal.start(
             Box::new(move |data: &str| {
@@ -414,6 +540,9 @@ impl InteractiveMode {
             }),
             Box::new(|| {}),
         );
+
+        // The loop's wakeup source for everything that is not a keystroke.
+        let wake = Arc::new(Notify::new());
 
         let tui = Rc::new(RefCell::new(TUI::new(terminal, Some(false))));
         tui.borrow_mut().start();
@@ -436,6 +565,35 @@ impl InteractiveMode {
         tui.borrow_mut()
             .add_child(Rc::clone(&chat) as SharedComponent);
 
+        // The first-run block (`docs/tui-design-samples.html` §1): cwd, the
+        // model actually selected, the provider, and the tool names. It is a
+        // normal chat child, so it simply scrolls away as the conversation
+        // grows instead of needing to be explicitly dismissed.
+        //
+        // Tool names come off the session seam's `tool_names()`, which
+        // defaults to empty — `TuiRuntimeStatus` carries only `tools_enabled`,
+        // and the real enabled-tool set is assembled in `sdk.rs` and was never
+        // threaded back to the TUI. An empty list renders no tool row rather
+        // than inventing one.
+        let welcome = {
+            let cwd = session
+                .header()
+                .map(|h| h.cwd)
+                .unwrap_or_else(|| String::from("."));
+            let tool_names = session.tool_names();
+            let borrowed: Vec<&str> = tool_names.iter().map(String::as_str).collect();
+            let welcome = Rc::new(RefCell::new(
+                crate::interactive_welcome::WelcomeScreen::from_status(
+                    &cwd,
+                    &runtime_status,
+                    &borrowed,
+                ),
+            ));
+            chat.borrow_mut()
+                .add_child(Rc::clone(&welcome) as SharedComponent);
+            welcome
+        };
+
         let editor = Rc::new(RefCell::new(Editor::new(
             tui.borrow().terminal_rows_handle(),
             Box::new(|s| s.to_string()),
@@ -456,8 +614,10 @@ impl InteractiveMode {
         // instead of above it, and an open palette/picker renders directly
         // above the editor instead of floating separately. See
         // `EditorStatusBand`'s doc comment.
-        let modal_text = Rc::new(RefCell::new(Text::new(String::new(), 1, 0)));
+        let modal_text = Rc::new(RefCell::new(Modal::None));
+        let debug_panel = Rc::new(RefCell::new(DebugPanel::new(Arc::clone(&debug_log))));
         let band = Rc::new(RefCell::new(EditorStatusBand {
+            debug: Rc::clone(&debug_panel),
             modal: Rc::clone(&modal_text),
             editor: Rc::clone(&editor),
             status: Rc::clone(&status),
@@ -572,8 +732,13 @@ impl InteractiveMode {
         let (event_tx, event_rx) = std::sync::mpsc::sync_channel::<AgentSessionEvent>(256);
         let subscription = {
             let tx = event_tx.clone();
+            let wake = Arc::clone(&wake);
             let subscription = session.subscribe(Arc::new(move |event: &AgentSessionEvent| {
                 let _ = tx.send(event.clone());
+                // Hand the loop a permit *after* the event is queued, so it
+                // cannot wake to an empty queue and go straight back to sleep
+                // holding an unconsumed event.
+                wake.notify_one();
             }));
             // Keep the subscription alive for the mode's lifetime and
             // unsubscribe it deterministically when the mode is dropped.
@@ -586,12 +751,17 @@ impl InteractiveMode {
         let (approval_tx, approval_rx) = channel::<ApprovalMessage>();
         {
             let tx = approval_tx.clone();
+            let wake = Arc::clone(&wake);
             session.set_tool_approval_decider(Arc::new(move |request: ToolApprovalRequest| {
                 let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
                 let _ = tx.send(ApprovalMessage {
                     request,
                     respond: respond_tx,
                 });
+                // Without this the agent loop would park on the oneshot while
+                // the UI loop slept, and the approval prompt would not appear
+                // until the idle timeout fired.
+                wake.notify_one();
                 // Await the user's decision from the UI loop. The oneshot is
                 // cancelled if the turn task is aborted (Ctrl+C), unblocking
                 // the agent loop.
@@ -607,6 +777,10 @@ impl InteractiveMode {
             _submit_tx: submit_tx,
             event_rx,
             _event_tx: event_tx,
+            replay_input: VecDeque::new(),
+            wake,
+            loop_iterations: 0,
+            pending_prompts: VecDeque::new(),
             quit,
             cancel_requested,
             last_ctrl_c,
@@ -622,23 +796,64 @@ impl InteractiveMode {
             last_size: None,
             runtime_status: Some(runtime_status),
             streaming_text: None,
+            streaming_thinking: None,
+            thinking: ThinkingRegistry::new(),
+            pending_diffs: HashMap::new(),
+            timings: None,
+            debug_log,
+            debug_panel,
             pending_tools: HashMap::new(),
             _approval_tx: approval_tx,
             approval_rx,
             pending_approval: None,
             model_picker: None,
             resume_picker: None,
+            welcome,
+            model_entries: Vec::new(),
             modal_text,
         }
     }
 
     /// Drive the TUI without blocking while a model turn runs.
+    ///
+    /// # Why this loop parks instead of polling
+    ///
+    /// It used to end every iteration with an unconditional
+    /// `tokio::time::sleep(10ms)`, so an idle pirust woke, took four `RefCell`
+    /// borrows, drained four empty channels, polled the terminal size and
+    /// re-rendered **one hundred times a second** while the user was reading
+    /// the screen or thinking. On a laptop that is a measurable battery cost
+    /// for literally no work, and it put a 10ms floor under input latency for
+    /// free.
+    ///
+    /// Now every producer can wake the loop — keystrokes through the tokio
+    /// input channel, session events and approval requests through
+    /// [`Self::wake`] — so [`Self::wait_for_work`] parks the task until there
+    /// is genuinely something to do. The timeout that remains is a safety net
+    /// for the one input the loop cannot be notified about (a terminal
+    /// resize, which is polled), and it is chosen by whether a turn is live.
     pub async fn run_async(&mut self) {
         loop {
             if self.quit.load(Ordering::Relaxed) {
                 break;
             }
-            while let Ok(data) = self.input_rx.try_recv() {
+            self.loop_iterations += 1;
+            // Whether this iteration found anything at all. When it did, the
+            // loop goes straight round again rather than parking: a burst of
+            // input or events is drained back-to-back at full speed, and only
+            // a genuinely quiet iteration pays for a wait.
+            let mut did_work = false;
+            // Replayed keys (the one that ended the last wait) come first so
+            // ordering is preserved, then whatever else has queued up.
+            loop {
+                let data = match self.replay_input.pop_front() {
+                    Some(data) => data,
+                    None => match self.input_rx.try_recv() {
+                        Ok(data) => data,
+                        Err(_) => break,
+                    },
+                };
+                did_work = true;
                 // Ctrl+C is global and must outrank every modal. The branches
                 // below never reach `TUI::handle_input`, so the global input
                 // listener that normally sees Ctrl+C never runs while a picker
@@ -661,6 +876,13 @@ impl InteractiveMode {
                     // While a tool awaits approval, a single decision key routes to
                     // the approval instead of the editor/loop.
                     self.handle_approval_key(&data);
+                } else if pirust_tui::keys::matches_key(&data, "ctrl+o") {
+                    // Expand/collapse the most recent reasoning block. The
+                    // design spec names Ctrl+O for exactly this, and it is
+                    // handled here rather than in the global input listener so
+                    // it cannot fire while a modal owns the keyboard.
+                    self.thinking.toggle_latest();
+                    self.repaint();
                 } else if pirust_tui::keys::matches_key(&data, "escape")
                     && !self.editor.borrow().is_showing_autocomplete()
                 {
@@ -677,6 +899,7 @@ impl InteractiveMode {
             // rendered this iteration (plan.md step 2 backpressure).
             let mut latest_update: Option<AgentSessionEvent> = None;
             while let Ok(event) = self.event_rx.try_recv() {
+                did_work = true;
                 if let AgentSessionEvent::MessageUpdate { .. } = &event {
                     // Keep only the newest update; render others as-is.
                     if latest_update.replace(event).is_some() {
@@ -690,9 +913,11 @@ impl InteractiveMode {
                 self.render_event(&update);
             }
             while let Ok(approval) = self.approval_rx.try_recv() {
+                did_work = true;
                 self.show_approval(approval);
             }
             if self.cancel_requested.swap(false, Ordering::Relaxed) {
+                did_work = true;
                 if self.turn_state == TurnState::Running
                     || self.turn_state == TurnState::AwaitingApproval
                 {
@@ -713,6 +938,7 @@ impl InteractiveMode {
                 .as_ref()
                 .is_some_and(JoinHandle::is_finished)
             {
+                did_work = true;
                 let handle = self.active_turn.take().unwrap();
                 let cancelled = self.turn_state == TurnState::Cancelling;
                 match handle.await {
@@ -744,18 +970,36 @@ impl InteractiveMode {
                 }
             }
             while let Ok(text) = self.submit_rx.try_recv() {
-                if !text.is_empty() && self.active_turn.is_none() {
-                    if text.starts_with('/') {
-                        self.dispatch_command(&text);
-                    } else {
-                        self.start_turn(text);
-                    }
+                if text.is_empty() {
+                    continue;
+                }
+                did_work = true;
+                // Slash commands are UI-local and instant, so they run even
+                // mid-turn — `/hotkeys` or `/session` while the model thinks
+                // is exactly when a user wants them. Only prompts queue.
+                if text.starts_with('/') {
+                    self.dispatch_command(&text);
+                } else if self.active_turn.is_none() {
+                    self.start_turn(text);
+                } else {
+                    self.enqueue_prompt(text);
+                }
+            }
+            // A turn just ended and something is waiting: start it now rather
+            // than after the next wakeup, so a queued prompt does not sit
+            // visibly idle for a whole timeout.
+            if self.active_turn.is_none() {
+                if let Some(next) = self.pending_prompts.pop_front() {
+                    did_work = true;
+                    self.refresh_status();
+                    self.start_turn(next);
                 }
             }
             // Detect a terminal resize (the TUI's own resize callback is not
             // wired this wave; the loop polls size directly and re-renders).
             let size = self.tui.borrow().terminal_rows();
             if Some(size) != self.last_size {
+                did_work = true;
                 self.last_size = Some(size);
                 // A real invalidation: every cached line is the wrong width or
                 // in the wrong row, so the diff cache must go. This is the one
@@ -765,7 +1009,59 @@ impl InteractiveMode {
             }
             self.prune_scrollback();
             self.tui.borrow_mut().poll();
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            if !did_work {
+                self.wait_for_work().await;
+            }
+        }
+    }
+
+    /// Park until a producer has something, or the resize poll is due.
+    ///
+    /// Three things can end the wait:
+    ///
+    /// * a keystroke — the tokio input channel is awaited directly, so this is
+    ///   woken by the terminal reader thread's `send` with no timer involved;
+    /// * a session event or approval request — [`Self::wake`]'s stored permit,
+    ///   posted by the agent thread;
+    /// * the timeout — the safety net for terminal resize, which nothing
+    ///   notifies us about because `TUI`'s own resize callback is not wired.
+    ///
+    /// The timeout is the only thing that still costs idle wakeups, so it is
+    /// deliberately asymmetric. `RESIZE_POLL_ACTIVE` keeps a live turn's
+    /// layout honest while output is streaming; `RESIZE_POLL_IDLE` is 25×
+    /// longer, because a resize while the user is idle only has to be noticed
+    /// before they type — and a keystroke ends the wait instantly anyway.
+    ///
+    /// A recovered keystroke is pushed back into the queue rather than handled
+    /// here: `select!` hands us the value, and dropping it would eat the key.
+    /// Re-queueing keeps the single drain site in `run_async` authoritative.
+    async fn wait_for_work(&mut self) {
+        /// Resize-poll period while a turn is streaming.
+        const RESIZE_POLL_ACTIVE: Duration = Duration::from_millis(20);
+        /// Resize-poll period while nothing is running. 500ms is ~50× fewer
+        /// wakeups than the old unconditional 10ms tick, and is invisible:
+        /// input, events and approvals all wake the loop on their own.
+        const RESIZE_POLL_IDLE: Duration = Duration::from_millis(500);
+
+        let live = matches!(
+            self.turn_state,
+            TurnState::Running | TurnState::AwaitingApproval | TurnState::Cancelling
+        ) || self.active_turn.is_some();
+        let timeout = if live {
+            RESIZE_POLL_ACTIVE
+        } else {
+            RESIZE_POLL_IDLE
+        };
+
+        tokio::select! {
+            biased;
+            data = self.input_rx.recv() => {
+                if let Some(data) = data {
+                    self.replay_input.push_back(data);
+                }
+            }
+            _ = self.wake.notified() => {}
+            _ = tokio::time::sleep(timeout) => {}
         }
     }
 
@@ -817,14 +1113,49 @@ impl InteractiveMode {
     /// Finish the active turn: clear the streaming message and approval, drop
     /// stale pending tools, and refresh the status line.
     fn finish_turn(&mut self, outcome: TurnState) {
+        // A cancelled turn can leave a thinking block mid-stream. Closing it
+        // flips its header from "Thinking…" to a settled summary, so the
+        // transcript does not keep claiming work is in progress.
+        if let Some(th) = self.streaming_thinking.take() {
+            th.borrow_mut().finish();
+        }
         self.streaming_text = None;
         self.streaming_turn = None;
         self.pending_tools.clear();
+        self.pending_diffs.clear();
         self.pending_approval = None;
         self.active_turn = None;
         self.turn_state = outcome;
+        // Stop the clock and put the timing summary in the transcript. This is
+        // the design spec's "elapsed time" and "request id" requirement, and
+        // it is the only place they are cheap to show: once per turn, not per
+        // frame.
+        if let Some(timings) = &mut self.timings {
+            timings.mark_end();
+            let summary = timings.summary();
+            self.log(crate::interactive_debug::LogLevel::Info, &summary);
+            if self.debug_panel.borrow().is_visible() {
+                self.show_notice(summary);
+            }
+        }
         self.refresh_status();
         self.repaint();
+    }
+
+    /// Append one line to the bounded debug log.
+    ///
+    /// Swallows a poisoned mutex rather than propagating it: the log is
+    /// instrumentation, and a panic in the *logger* while reporting a panic is
+    /// how a TUI ends up wedged with the terminal in raw mode.
+    fn log(&self, level: crate::interactive_debug::LogLevel, message: &str) {
+        if let Ok(mut log) = self.debug_log.lock() {
+            match level {
+                crate::interactive_debug::LogLevel::Error => log.error(message),
+                crate::interactive_debug::LogLevel::Warn => log.warn(message),
+                crate::interactive_debug::LogLevel::Info => log.info(message),
+                crate::interactive_debug::LogLevel::Debug => log.debug(message),
+            }
+        }
     }
 
     /// Compatibility wrapper for callers outside an async runtime. Production
@@ -864,7 +1195,11 @@ impl InteractiveMode {
         // guard means the same thing on both paths.
         self.turn_state = TurnState::Running;
         self.turn_id += 1;
-        let user_text = Rc::new(RefCell::new(Text::new(format!("▶ {text}"), 0, 0)));
+        let user_text = Rc::new(RefCell::new(Text::new(
+            format!("{} {text}", glyph("▶", ">")),
+            0,
+            0,
+        )));
         self.chat
             .borrow_mut()
             .add_child(user_text as SharedComponent);
@@ -907,6 +1242,12 @@ impl InteractiveMode {
             ),
             "refresh-model-list" => self.refresh_models(),
             "reload-extensions" => self.reload_extensions(),
+            "debug" => self.toggle_debug_panel(),
+            "thinking" => self.toggle_thinking(arg),
+            "export" => self.run_export(arg),
+            "copy" => self.run_copy(),
+            "trust" => self.run_trust(arg),
+            "changelog" => self.run_changelog(arg),
             "quit" => {
                 self.quit.store(true, Ordering::Relaxed);
             }
@@ -915,7 +1256,15 @@ impl InteractiveMode {
                     .iter()
                     .any(|(name, _, _)| *name == command)
                 {
-                    self.show_error(format!("/{command} is not available in this session"));
+                    // A precise reason beats a flat "not available": it names
+                    // the missing seam, so the answer is actionable instead of
+                    // just a refusal.
+                    match crate::interactive_commands::unavailable_reason(&command) {
+                        Some(reason) => self.show_error(format!("/{command}: {reason}")),
+                        None => {
+                            self.show_error(format!("/{command} is not available in this session"))
+                        }
+                    }
                 } else {
                     self.show_error(format!("Unknown command: /{command}"));
                 }
@@ -926,24 +1275,23 @@ impl InteractiveMode {
     /// `/help` — the registered command list, with the same availability
     /// marking the autocomplete dropdown uses (audit #22).
     fn show_help(&mut self) {
-        let help = BUILTIN_SLASH_COMMANDS
-            .iter()
-            .map(|(name, description, _)| {
-                if slash_command_available(name) {
-                    format!("/{name} — {description}")
-                } else {
-                    format!("/{name} — {description} (unavailable in this session)")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Grouped by category with aligned columns, rather than the flat
+        // 28-line dump this used to print.
+        let help = crate::interactive_commands::command_help_lines(&slash_command_available);
         self.show_notice(help);
     }
 
     /// `/hotkeys` — the keyboard shortcuts the TUI implements.
     fn show_hotkeys(&mut self) {
         self.show_notice(
-            "Ctrl+D quit (empty editor)\nCtrl+C / Esc cancel the active turn\nr / a / d resolve a tool-approval prompt\n/ opens the command palette",
+            "Ctrl+D    quit (empty editor)\n\
+             Ctrl+C    cancel the active turn (twice within 500ms quits)\n\
+             Esc       cancel the active turn, or close an open picker\n\
+             Ctrl+O    expand/collapse the latest reasoning block\n\
+             r / a / d resolve a tool-approval prompt (run once / always / deny)\n\
+             /         open the command palette\n\
+             ↑ / ↓     move in a picker · Enter select · Esc dismiss\n\
+             /debug    show the debug panel · /thinking [on|off] all reasoning",
         );
     }
 
@@ -986,9 +1334,13 @@ impl InteractiveMode {
         let name = arg.map(str::trim).filter(|n| !n.is_empty());
         match name {
             None => self.show_error("Usage: /name <name>"),
-            Some(_) => self.show_error(
-                "/name is not available in this session (renaming is not wired to the session store)",
-            ),
+            // Echoes the name the store actually wrote, not the argument:
+            // `append_session_info` collapses newline runs to single spaces
+            // and trims, so the two can differ.
+            Some(name) => match self.session.set_session_name(name) {
+                Ok(written) => self.show_notice(format!("Session renamed to: {written}")),
+                Err(error) => self.show_error(format!("Could not rename the session: {error}")),
+            },
         }
     }
 
@@ -1021,6 +1373,147 @@ impl InteractiveMode {
         self.show_notice("Model list refreshed");
     }
 
+    /// Render a [`CommandOutcome`] from [`crate::interactive_commands`] into
+    /// the chat. One place, so every wired command reports consistently.
+    fn apply_outcome(&mut self, outcome: CommandOutcome) {
+        match outcome {
+            CommandOutcome::Notice(text) => self.show_notice(text),
+            CommandOutcome::Error(text) => self.show_error(text),
+            CommandOutcome::Quit => self.quit.store(true, Ordering::Relaxed),
+            CommandOutcome::OpenModelPicker => self.open_model_picker(),
+            CommandOutcome::OpenSessionPicker => self.open_resume_picker(),
+            CommandOutcome::OpenSettings => {
+                self.show_error("/settings needs the SettingsManager, which the TUI does not hold")
+            }
+            CommandOutcome::ToggleDebug => self.toggle_debug_panel(),
+            // OSC 52: written straight to the terminal, not into the
+            // transcript — it is a control sequence, not text to display.
+            CommandOutcome::CopyToClipboard(sequence) => {
+                self.tui.borrow_mut().write_raw(&sequence);
+                self.show_notice("Copied the last assistant message to the clipboard");
+            }
+        }
+    }
+
+    /// `/export [path]` — write the transcript as JSONL (default) or HTML.
+    fn run_export(&mut self, arg: Option<&str>) {
+        let state = self.session.state();
+        let session_id = self.session.header().map(|h| h.id);
+        let outcome = crate::interactive_commands::export_session(
+            &state.messages,
+            session_id.as_deref(),
+            arg,
+        );
+        self.apply_outcome(outcome);
+    }
+
+    /// `/copy` — put the last assistant message on the clipboard via OSC 52,
+    /// which works over SSH and needs no platform clipboard binding.
+    fn run_copy(&mut self) {
+        let state = self.session.state();
+        let outcome = crate::interactive_commands::copy_last_message(&state.messages);
+        self.apply_outcome(outcome);
+    }
+
+    /// `/trust [on|off]` — record this project's trust decision.
+    fn run_trust(&mut self, arg: Option<&str>) {
+        let trusted = match arg.map(str::to_ascii_lowercase).as_deref() {
+            None | Some("on") | Some("yes") | Some("trust") => true,
+            Some("off") | Some("no") | Some("revoke") => false,
+            Some(other) => {
+                self.show_error(format!("Usage: /trust [on|off] (got {other:?})"));
+                return;
+            }
+        };
+        let cwd = match self.session.header().map(|h| h.cwd) {
+            Some(cwd) => cwd,
+            None => {
+                self.show_error("/trust needs a session cwd, and this session reports none");
+                return;
+            }
+        };
+        let config = crate::config::ConfigEnv::from_process_env();
+        let agent_dir = match config.agent_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.show_error(format!(
+                    "/trust could not resolve the agent directory: {error}"
+                ));
+                return;
+            }
+        };
+        let path = crate::interactive_commands::trust_store_path(&agent_dir);
+        let outcome = crate::interactive_commands::set_project_trust(&path, &cwd, trusted);
+        self.apply_outcome(outcome);
+    }
+
+    /// `/changelog [path]` — pirust ships no `CHANGELOG.md`, so the path is
+    /// required rather than guessed. Saying so beats reading a stale file from
+    /// whatever directory the binary happens to sit in.
+    fn run_changelog(&mut self, arg: Option<&str>) {
+        /// How many entries to show — enough to be useful, short enough not to
+        /// bury the transcript.
+        const MAX_ENTRIES: usize = 5;
+
+        let Some(path) = arg else {
+            self.show_error(
+                "Usage: /changelog <path-to-CHANGELOG.md> — pirust does not ship one, \
+                 so there is no default to read",
+            );
+            return;
+        };
+        let outcome =
+            crate::interactive_commands::changelog_text(std::path::Path::new(path), MAX_ENTRIES);
+        self.apply_outcome(outcome);
+    }
+
+    /// `/debug` — show or hide the debug panel.
+    ///
+    /// The panel reads the same bounded ring buffer the panic report does, so
+    /// turning it on costs nothing extra: the events were already being
+    /// recorded, they just were not on screen.
+    fn toggle_debug_panel(&mut self) {
+        self.debug_panel.borrow_mut().toggle();
+        let visible = self.debug_panel.borrow().is_visible();
+        let path = std::env::var(crate::interactive_debug::DEBUG_LOG_ENV).ok();
+        if visible {
+            let sink = match &path {
+                Some(path) => format!(" · also logging to {path}"),
+                None => format!(
+                    " · set {}=<path> to also write a log file",
+                    crate::interactive_debug::DEBUG_LOG_ENV
+                ),
+            };
+            self.show_notice(format!("Debug panel on{sink}"));
+        } else {
+            self.show_notice("Debug panel off");
+        }
+        self.repaint();
+    }
+
+    /// `/thinking [on|off]` — expand or collapse reasoning blocks.
+    ///
+    /// Ctrl+O toggles the most recent block; this sets *all* of them at once,
+    /// which is what you want after the fact when reading back a long session.
+    fn toggle_thinking(&mut self, arg: Option<&str>) {
+        let expanded = match arg.map(str::to_ascii_lowercase).as_deref() {
+            Some("on") | Some("expand") | Some("show") => true,
+            Some("off") | Some("collapse") | Some("hide") => false,
+            None => true,
+            Some(other) => {
+                self.show_error(format!("Usage: /thinking [on|off] (got {other:?})"));
+                return;
+            }
+        };
+        self.thinking.toggle_all(expanded);
+        self.show_notice(if expanded {
+            "Reasoning blocks expanded (Ctrl+O toggles the latest)"
+        } else {
+            "Reasoning blocks collapsed (Ctrl+O toggles the latest)"
+        });
+        self.repaint();
+    }
+
     /// `/reload-extensions` (Wave 5) — rescan `<agent_dir>/extensions/*.wasm`
     /// for extensions not already loaded, without restarting `pirust`.
     fn reload_extensions(&mut self) {
@@ -1031,17 +1524,66 @@ impl InteractiveMode {
         }
     }
 
+    /// Hold a prompt typed while a turn was already running.
+    ///
+    /// The old code dropped these silently, which is the worst possible
+    /// outcome: the editor clears on submit, so the text was gone from the
+    /// screen *and* gone from the queue, and nothing said so. Queueing it and
+    /// echoing it dimmed keeps the promise the cleared editor implies.
+    ///
+    /// The queue is bounded. An unbounded one is a memory leak with a user
+    /// holding Enter on it, and a hundred stacked prompts is never what
+    /// somebody meant.
+    fn enqueue_prompt(&mut self, text: String) {
+        /// How many prompts may wait behind the running turn.
+        const MAX_QUEUED_PROMPTS: usize = 16;
+
+        if self.pending_prompts.len() >= MAX_QUEUED_PROMPTS {
+            self.show_error(format!(
+                "Queue is full ({MAX_QUEUED_PROMPTS} prompts waiting) — this one was not accepted"
+            ));
+            return;
+        }
+        let position = self.pending_prompts.len() + 1;
+        self.pending_prompts.push_back(text.clone());
+        self.show_notice(format!(
+            "{} queued #{position}: {text}",
+            glyph("⋯", "[queued]")
+        ));
+        self.refresh_status();
+    }
+
+    /// How many prompts are waiting behind the active turn — the regression
+    /// seam for the queueing behaviour, and what the status line reports.
+    pub fn queued_prompts(&self) -> usize {
+        self.pending_prompts.len()
+    }
+
+    /// How many times the async loop body has run — the regression seam for
+    /// "an idle TUI parks instead of polling".
+    pub fn loop_iterations(&self) -> u64 {
+        self.loop_iterations
+    }
+
     /// Start one turn as a task so input and streamed events remain responsive.
     fn start_turn(&mut self, text: String) {
         self.turn_state = TurnState::Running;
         self.turn_id += 1;
+        // Fresh instrumentation per turn: a new request id to quote in an
+        // error report, and the clock that produces the time-to-first-token
+        // figure the status line shows once the turn ends.
+        self.timings = Some(TurnTimings::new(RequestId::next()));
+        // The first-run block has done its job — free its rows for the
+        // transcript. Idempotent, so no need to track whether this is the
+        // first turn.
+        self.welcome.borrow_mut().dismiss();
         self.refresh_status();
         // User message line (Pi adds the user message on `message_start`
         // with role user; we mirror that by appending it before the turn).
         // Boxed in `userMessageBg` (real Pi's own theme color), the same way
         // `ToolExecutionComponent` boxes tool calls — so typed input is
         // visually distinct from both plain assistant text and tool output.
-        let user_line = format!("▶ {text}");
+        let user_line = format!("{} {text}", glyph("▶", ">"));
         let user_text = Rc::new(RefCell::new(Text::with_bg_fn(
             user_line,
             1,
@@ -1069,7 +1611,7 @@ impl InteractiveMode {
             header.as_ref(),
             self.runtime_status.as_ref().unwrap(),
             self.turn_state,
-            self.turn_id,
+            self.pending_prompts.len(),
         ));
         self.repaint();
     }
@@ -1119,7 +1661,10 @@ impl InteractiveMode {
 
     fn show_error(&mut self, message: impl Into<String>) {
         let error = Rc::new(RefCell::new(Text::new(
-            format!("✗ {}", message.into()),
+            // `[error]` rather than a red ✗ when glyphs are off: the spec's
+            // accessibility bar is "no colour-only meaning", so the state has
+            // to survive both a monochrome and an ASCII-only terminal.
+            format!("{} {}", glyph("✗", "[error]"), message.into()),
             0,
             0,
         )));
@@ -1134,7 +1679,8 @@ impl InteractiveMode {
         // Risk warning for destructive tools (plan.md step 7): the exact
         // command, the cwd it would run in, and a warning for bash.
         let mut lines = vec![format!(
-            "⚠ Tool execution requires approval: {}",
+            "{} Tool execution requires approval: {}",
+            glyph("⚠", "[approval]"),
             request.tool_name
         )];
         if !args.is_empty() && args != "null" {
@@ -1144,7 +1690,10 @@ impl InteractiveMode {
             if let Some(cwd) = self.session.header().map(|h| h.cwd) {
                 lines.push(format!("cwd: {cwd}"));
             }
-            lines.push("⚠ This command runs on your machine — review it carefully".to_string());
+            lines.push(format!(
+                "{} This command runs on your machine — review it carefully",
+                glyph("⚠", "[warning]")
+            ));
         }
         lines.push("[r]un once · [a]lways allow · [d]eny".to_string());
         self.set_status(TurnState::AwaitingApproval);
@@ -1201,7 +1750,11 @@ impl InteractiveMode {
             ToolApprovalDecision::AlwaysAllow => "allowed (always)",
             ToolApprovalDecision::Deny => "denied",
         };
-        self.show_notice(format!("✓ {} {verb}", approval.request.tool_name));
+        self.show_notice(format!(
+            "{} {} {verb}",
+            glyph("✓", "[ok]"),
+            approval.request.tool_name
+        ));
         self.set_status(TurnState::Running);
     }
 
@@ -1222,6 +1775,21 @@ impl InteractiveMode {
         //
         // This field pair used to be written and never read; the comment here
         // claimed a guard that did not exist.
+        // Log every event, including the ten variants the match below ignores.
+        // Those used to vanish into a silent `_ => {}`, which is exactly what
+        // made a misbehaving turn impossible to explain after the fact.
+        // `record_event` logs the variant name plus small scalars only — never
+        // the message payloads — so this is bounded and cheap.
+        if let Ok(mut log) = self.debug_log.lock() {
+            log.record_event(event);
+        }
+
+        // Any session activity makes the first-run block stale — not just a
+        // prompt the user typed. Tool calls and messages can arrive from a
+        // resumed session or an extension, and in every case the transcript
+        // now has content worth the rows. `dismiss` early-returns once set.
+        self.welcome.borrow_mut().dismiss();
+
         let turn_live = matches!(
             self.turn_state,
             TurnState::Running | TurnState::AwaitingApproval
@@ -1234,34 +1802,68 @@ impl InteractiveMode {
                     // added them, so skip duplicates (Pi adds them on
                     // message_start; we did it in run_turn).
                 } else if role == Some("assistant") && turn_live {
-                    // Begin streaming: a fresh Text that updates on
-                    // message_update.
-                    self.streaming_text = Some(Rc::new(RefCell::new(Text::new("", 0, 0))));
+                    // Reasoning is mounted *before* the answer so it reads
+                    // top-down the way the model produced it. It renders
+                    // nothing at all until thinking text actually arrives, so
+                    // a non-reasoning model pays one `Rc` and no rows.
+                    let thinking = Rc::new(RefCell::new(ThinkingComponent::new()));
+                    self.thinking.register(&thinking);
+                    self.chat
+                        .borrow_mut()
+                        .add_child(Rc::clone(&thinking) as SharedComponent);
+                    self.streaming_thinking = Some(thinking);
+
+                    // Begin streaming the answer itself, through the Markdown
+                    // renderer rather than as literal text.
+                    let text = Rc::new(RefCell::new(MarkdownText::new("", 0, 0)));
+                    self.chat
+                        .borrow_mut()
+                        .add_child(Rc::clone(&text) as SharedComponent);
+                    self.streaming_text = Some(text);
                     self.streaming_turn = Some(self.turn_id);
-                    let st = self.streaming_text.as_ref().unwrap().clone();
-                    self.chat.borrow_mut().add_child(st as SharedComponent);
                 }
             }
             AgentSessionEvent::MessageUpdate { message, .. } => {
                 if self.streaming_turn != Some(self.turn_id) {
                     return;
                 }
-                if let Some(st) = &self.streaming_text {
-                    let text = assistant_text(message);
-                    st.borrow_mut().set_text(text);
-                    self.repaint();
+                // First visible token of the turn — the latency number that
+                // actually describes how fast pirust feels.
+                if let Some(timings) = &mut self.timings {
+                    timings.mark_first_token();
                 }
+                // Reasoning first: the thinking component stays silent while
+                // `thinking_text` is empty, so this costs a scan of the
+                // content array and nothing else for a non-reasoning model.
+                if let Some(th) = &self.streaming_thinking {
+                    let reasoning = thinking_text(message);
+                    if !reasoning.is_empty() {
+                        th.borrow_mut().set_text(&reasoning);
+                    }
+                }
+                if let Some(st) = &self.streaming_text {
+                    st.borrow_mut().set_text(&assistant_text(message));
+                }
+                self.repaint();
             }
             AgentSessionEvent::MessageEnd { message } => {
                 if self.streaming_turn != Some(self.turn_id) {
                     return;
                 }
-                if let Some(st) = self.streaming_text.take() {
-                    let text = assistant_text(message);
-                    st.borrow_mut().set_text(text);
-                    self.streaming_turn = None;
-                    self.repaint();
+                if let Some(th) = self.streaming_thinking.take() {
+                    let reasoning = thinking_text(message);
+                    if !reasoning.is_empty() {
+                        th.borrow_mut().set_text(&reasoning);
+                    }
+                    // Flips the collapsed summary from "Thinking…" to
+                    // "Thought for N lines" and stops the live tail.
+                    th.borrow_mut().finish();
                 }
+                if let Some(st) = self.streaming_text.take() {
+                    st.borrow_mut().set_text(&assistant_text(message));
+                    self.streaming_turn = None;
+                }
+                self.repaint();
             }
             AgentSessionEvent::AgentEnd { .. } => {
                 // Turn over: a blank separator line.
@@ -1277,20 +1879,48 @@ impl InteractiveMode {
                 // `handleEvent` case "tool_execution_start"
                 // (interactive-mode.ts:3263-3285): add a ToolExecutionComponent
                 // if not already present, then mark execution started.
-                let tool = self
-                    .pending_tools
-                    .entry(tool_call_id.clone())
-                    .or_insert_with(|| {
-                        let component = Rc::new(RefCell::new(ToolExecutionComponent::new(
-                            tool_name.clone(),
-                            args.clone(),
-                        )));
-                        let shared: SharedComponent = Rc::clone(&component) as SharedComponent;
-                        self.chat.borrow_mut().add_child(shared);
-                        component
-                    });
-                tool.borrow_mut().set_expanded(false); // Pi: this.toolOutputExpanded
-                tool.borrow_mut().mark_execution_started();
+                if !self.pending_tools.contains_key(tool_call_id) {
+                    // `write`/`edit` get a real diff instead of their args
+                    // JSON — the design spec's file-safety requirement is
+                    // "preview diffs before writes, identify changed paths".
+                    // This runs on `tool_execution_start`, i.e. *before* the
+                    // tool has written anything, which is what makes the
+                    // on-disk read below the true "before" side.
+                    let change = parse_file_change(tool_name, args);
+                    let component = Rc::new(RefCell::new(ToolExecutionComponent::new(
+                        tool_name.clone(),
+                        args.clone(),
+                        change.is_some(),
+                    )));
+                    self.chat
+                        .borrow_mut()
+                        .add_child(Rc::clone(&component) as SharedComponent);
+                    if let Some(change) = change {
+                        // Read the current file so the preview is a genuine
+                        // before/after. A failure here is not an error: a
+                        // brand-new file legitimately has no old content, and
+                        // the renderer already labels that case "new file".
+                        let change = match crate::interactive_diff::read_old_content_from_disk(
+                            std::path::Path::new(&change.path),
+                        ) {
+                            Ok(old) => change.with_old_content(old),
+                            Err(_) => change,
+                        };
+                        let preview = Rc::new(RefCell::new(DiffPreview::new(change)));
+                        self.chat
+                            .borrow_mut()
+                            .add_child(Rc::clone(&preview) as SharedComponent);
+                        self.pending_diffs.insert(tool_call_id.clone(), preview);
+                    }
+                    self.pending_tools.insert(tool_call_id.clone(), component);
+                }
+                if let Some(tool) = self.pending_tools.get(tool_call_id) {
+                    tool.borrow_mut().set_expanded(false); // Pi: this.toolOutputExpanded
+                    tool.borrow_mut().mark_execution_started();
+                }
+                if let Some(timings) = &mut self.timings {
+                    timings.mark_tool_start(tool_call_id.clone(), tool_name.clone());
+                }
                 self.repaint();
             }
             AgentSessionEvent::ToolExecutionUpdate {
@@ -1313,18 +1943,31 @@ impl InteractiveMode {
                 if let Some(tool) = self.pending_tools.remove(tool_call_id) {
                     let content = result_content(result);
                     tool.borrow_mut().update_result(content, *is_error, false);
-                    self.repaint();
                 }
+                // The diff preview stays mounted in the transcript — it is the
+                // record of what changed — but drop this map's handle so a
+                // long session does not accumulate one entry per edit.
+                self.pending_diffs.remove(tool_call_id);
+                if let Some(timings) = &mut self.timings {
+                    timings.mark_tool_end(tool_call_id);
+                }
+                self.repaint();
             }
             AgentSessionEvent::CompactionStart { .. } => {
                 self.set_status(TurnState::Running);
-                self.show_notice("♻ Compacting session…");
+                self.show_notice(format!(
+                    "{} Compacting session…",
+                    glyph("♻", "[compacting]")
+                ));
             }
             AgentSessionEvent::CompactionEnd { .. } => {
-                self.show_notice("♻ Compaction finished");
+                self.show_notice(format!("{} Compaction finished", glyph("♻", "[compacted]")));
             }
             AgentSessionEvent::AutoRetryStart { attempt, .. } => {
-                self.show_notice(format!("⟳ Retrying request (attempt {attempt})…"));
+                self.show_notice(format!(
+                    "{} Retrying request (attempt {attempt})…",
+                    glyph("⟳", "[retry]")
+                ));
             }
             AgentSessionEvent::AgentSettled => {
                 self.refresh_status();
@@ -1336,140 +1979,144 @@ impl InteractiveMode {
     /// Set the modal band's text (see `EditorStatusBand`), updating it in
     /// place. Every modal keystroke goes through here, so a redraw must
     /// never append a new component.
+    #[allow(dead_code)]
     fn show_modal(&mut self, body: String) {
-        self.modal_text.borrow_mut().set_text(body);
+        *self.modal_text.borrow_mut() = Modal::Text(Text::new(body, 1, 0));
         self.repaint();
     }
 
-    /// Clear the modal band's text. Idempotent, so every modal-close path
-    /// can call it unconditionally next to its `self.<modal> = None`.
-    fn hide_modal(&mut self) {
-        self.modal_text.borrow_mut().set_text(String::new());
+    /// Put a width-aware component in the modal slot — the pickers, which lay
+    /// out columns and a viewport and so cannot be pre-rendered to a `String`.
+    fn show_modal_component(&mut self, component: SharedComponent) {
+        *self.modal_text.borrow_mut() = Modal::Component(component);
         self.repaint();
+    }
+
+    /// Clear the modal slot. Idempotent, so every modal-close path can call it
+    /// unconditionally next to its `self.<modal> = None`.
+    fn hide_modal(&mut self) {
+        *self.modal_text.borrow_mut() = Modal::None;
+        self.repaint();
+    }
+
+    /// The selectable model list. `main.rs` calls this after building the
+    /// model runtime; without it `/model` honestly reports an empty catalog
+    /// rather than showing one fabricated row.
+    pub fn set_model_entries(&mut self, entries: Vec<ModelEntry>) {
+        self.model_entries = entries;
     }
 
     /// Open the `/model` picker.
     fn open_model_picker(&mut self) {
-        let status = self.session.runtime_status();
-        let models = vec![(status.provider.clone(), status.model.clone())];
-        self.model_picker = Some(ModelPicker {
-            models,
-            filter: String::new(),
-            selected: 0,
-        });
-        let body = self.model_picker.as_ref().unwrap().render();
-        self.show_modal(body);
+        let picker = Rc::new(RefCell::new(PickerModelPicker::new(
+            self.model_entries.clone(),
+            self.picker_viewport_rows(),
+        )));
+        self.model_picker = Some(Rc::clone(&picker));
+        self.show_modal_component(picker as SharedComponent);
     }
 
-    /// Route a key to the model picker: filter/navigate/select/dismiss.
+    /// Route a key to the model picker.
+    ///
+    /// All the navigation, fuzzy filtering and clamping now lives in the
+    /// picker itself; this only has to act on the [`PickerAction`] it reports.
     fn handle_model_picker_key(&mut self, data: &str) {
-        if self.model_picker.is_none() {
+        let Some(picker) = self.model_picker.clone() else {
             return;
-        }
-        if pirust_tui::keys::matches_key(data, "escape") {
-            self.model_picker = None;
-            self.hide_modal();
-            return;
-        }
-        enum Action {
-            Move(i32),
-            Filter(char),
-            Backspace,
-        }
-        let action = match data {
-            "\r" => {
+        };
+        let action = picker.borrow_mut().handle_key(data);
+        match action {
+            PickerAction::None => self.repaint(),
+            PickerAction::Dismissed => {
                 self.model_picker = None;
                 self.hide_modal();
+            }
+            PickerAction::Selected(index) => {
+                let chosen = self
+                    .model_entries
+                    .get(index)
+                    .map(|entry| format!("{} / {}", entry.provider, entry.model_id));
+                self.model_picker = None;
+                self.hide_modal();
+                match chosen {
+                    // Switching the live model means rebuilding the `Agent`'s
+                    // provider adapter, which only `main.rs` can do — the
+                    // session seam exposes no setter. So the choice is
+                    // reported with the concrete flag that applies it, rather
+                    // than pretending the switch happened.
+                    Some(model) => self.show_notice(format!(
+                        "Selected {model}. Switching the live model is not wired to the running \
+                         agent yet — start pirust with `--model {model}` to use it."
+                    )),
+                    None => self.show_error("No model is available to select"),
+                }
                 self.refresh_status();
-                self.show_error(
-                    "Model selection is not changeable in this session (single-model runtime)",
-                );
-                None
-            }
-            "\u{1b}[A" | "up" => Some(Action::Move(-1)),
-            "\u{1b}[B" | "down" => Some(Action::Move(1)),
-            _ if pirust_tui::keys::matches_key(data, "backspace") => Some(Action::Backspace),
-            _ if data.chars().count() == 1 && !data.is_empty() => {
-                Some(Action::Filter(data.chars().next().unwrap()))
-            }
-            _ => None,
-        };
-        if let Some(action) = action {
-            match action {
-                Action::Move(delta) => {
-                    let picker = self.model_picker.as_mut().unwrap();
-                    if delta < 0 {
-                        picker.selected = picker.selected.saturating_sub(1);
-                    } else {
-                        picker.selected += 1;
-                    }
-                    let next = picker.render();
-                    self.show_modal(next);
-                }
-                Action::Filter(ch) => {
-                    let picker = self.model_picker.as_mut().unwrap();
-                    picker.filter.push(ch);
-                    picker.selected = 0;
-                    let next = picker.render();
-                    self.show_modal(next);
-                }
-                Action::Backspace => {
-                    let picker = self.model_picker.as_mut().unwrap();
-                    picker.filter.pop();
-                    picker.selected = 0;
-                    let next = picker.render();
-                    self.show_modal(next);
-                }
             }
         }
     }
 
-    /// Open the `/resume` picker.
+    /// Open the `/resume` picker over the real session store.
     fn open_resume_picker(&mut self) {
-        let current = self.session.header();
-        let sessions = match &current {
-            Some(h) => vec![(h.id.clone(), "current session".to_string(), h.cwd.clone())],
-            None => Vec::new(),
-        };
-        self.resume_picker = Some(ResumePicker {
-            sessions,
-            selected: 0,
-        });
-        let body = self.resume_picker.as_ref().unwrap().render();
-        self.show_modal(body);
+        let entries = self.session.session_entries();
+        let picker = Rc::new(RefCell::new(SessionPicker::new(
+            entries,
+            self.picker_viewport_rows(),
+        )));
+        self.resume_picker = Some(Rc::clone(&picker));
+        self.show_modal_component(picker as SharedComponent);
     }
 
-    /// Route a key to the resume picker: navigate/resume/dismiss.
+    /// How many list rows a picker may occupy.
+    ///
+    /// The pickers render inside the bottom band, above the editor, so every
+    /// row they take is a row of transcript pushed off-screen. `RESERVED`
+    /// covers the picker's own header and hint lines plus the editor and
+    /// status line beneath it; the clamp keeps the list usable at 80×24 (the
+    /// spec's floor) without letting a 200-model list swallow a tall terminal.
+    fn picker_viewport_rows(&self) -> usize {
+        /// Rows the band needs for everything that is not list content.
+        const RESERVED: usize = 8;
+        /// Never show fewer than this, even on a very short terminal.
+        const MIN_ROWS: usize = 3;
+        /// Never show more than this, however tall the terminal.
+        const MAX_ROWS: usize = 15;
+
+        let rows = self.tui.borrow().terminal_rows() as usize;
+        rows.saturating_sub(RESERVED).clamp(MIN_ROWS, MAX_ROWS)
+    }
+
+    /// Route a key to the session picker.
     fn handle_resume_picker_key(&mut self, data: &str) {
-        if self.resume_picker.is_none() {
+        let Some(picker) = self.resume_picker.clone() else {
             return;
-        }
-        if pirust_tui::keys::matches_key(data, "escape") {
-            self.resume_picker = None;
-            self.hide_modal();
-            return;
-        }
-        match data {
-            "\r" => {
+        };
+        let action = picker.borrow_mut().handle_key(data);
+        match action {
+            PickerAction::None => self.repaint(),
+            PickerAction::Dismissed => {
                 self.resume_picker = None;
                 self.hide_modal();
-                self.show_error(
-                    "Session resume is not available in this session (single-session runtime)",
-                );
             }
-            "\u{1b}[A" | "up" => {
-                let picker = self.resume_picker.as_mut().unwrap();
-                picker.selected = picker.selected.saturating_sub(1);
-                let next = picker.render();
-                self.show_modal(next);
+            PickerAction::Selected(_) => {
+                let chosen = picker
+                    .borrow()
+                    .selected_entry()
+                    .map(|entry| (entry.id.clone(), entry.cwd.clone()));
+                self.resume_picker = None;
+                self.hide_modal();
+                match chosen {
+                    // Resuming replaces the whole agent + session manager,
+                    // which is `main.rs`'s job — `PrintModeSession` has no
+                    // swap-session method. The id is echoed with the exact
+                    // command that resumes it, which is genuinely useful,
+                    // unlike the old flat "not available".
+                    Some((id, cwd)) => self.show_notice(format!(
+                        "Session {id} ({cwd}). Resuming in-place is not wired to the running \
+                         agent yet — run `pirust --resume {id}` to open it."
+                    )),
+                    None => self.show_error("No session is available to resume"),
+                }
             }
-            "\u{1b}[B" | "down" => {
-                let picker = self.resume_picker.as_mut().unwrap();
-                picker.selected += 1;
-                let next = picker.render();
-                self.show_modal(next);
-            }
-            _ => {}
         }
     }
 
@@ -1502,7 +2149,7 @@ fn session_status(
     header: Option<&pirust_agent_core::harness::types::SessionHeader>,
     status: &TuiRuntimeStatus,
     turn_state: TurnState,
-    _turn_id: u64,
+    queued: usize,
 ) -> String {
     let state_word = match turn_state {
         TurnState::Idle => "ready",
@@ -1523,12 +2170,20 @@ fn session_status(
     } else {
         "no-tools"
     };
+    // `queued` is the design spec's "queued" response state. It is appended
+    // rather than replacing `state_word` because both are true at once: the
+    // current turn is still running *and* N prompts are waiting behind it.
+    let queue = if queued > 0 {
+        format!(" · +{queued} queued")
+    } else {
+        String::new()
+    };
     match header {
         Some(header) => format!(
-            "cwd: {} · session: {} · {} · {} · {} · {state_word}",
+            "cwd: {} · session: {} · {} · {} · {} · {state_word}{queue}",
             header.cwd, header.id, model, context, tools
         ),
-        None => format!("session: unavailable · {model} · {context} · {state_word}"),
+        None => format!("session: unavailable · {model} · {context} · {state_word}{queue}"),
     }
 }
 
@@ -1606,6 +2261,13 @@ pub fn slash_command_available(name: &str) -> bool {
             | "resume"
             | "refresh-model-list"
             | "reload-extensions"
+            | "debug"
+            | "thinking"
+            | "name"
+            | "export"
+            | "copy"
+            | "trust"
+            | "changelog"
             | "quit"
     )
 }
@@ -1684,4 +2346,17 @@ pub const BUILTIN_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         None,
     ),
     ("quit", "Quit pi", None),
+    // pirust-only additions, not in Pi's `BUILTIN_SLASH_COMMANDS`: the design
+    // spec requires an optional debug panel and expandable reasoning, and both
+    // need a discoverable way in besides a key nobody guesses.
+    (
+        "debug",
+        "Show/hide the debug panel (recent events, timings, request id)",
+        None,
+    ),
+    (
+        "thinking",
+        "Expand or collapse all reasoning blocks (Ctrl+O toggles the latest)",
+        Some("[on|off]"),
+    ),
 ];

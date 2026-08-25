@@ -328,6 +328,16 @@ async fn run(parsed: args::Args) -> i32 {
     ) {
         Ok(runtime) => runtime,
         Err(error) => {
+            // `docs/tui-design-samples.html` §1 "Missing configuration": in an
+            // interactive terminal this must be an actionable in-TUI screen
+            // naming the file to edit, not a bare line on stderr — the spec's
+            // acceptance bar is "actionable error · no stack trace · exit
+            // remains available". Non-interactive callers (pipes, --print, CI)
+            // still get the plain stderr line, which is what they can parse.
+            if app_mode == AppMode::Interactive && stdout_is_tty {
+                guard.restore_stdout();
+                return run_setup_help_screen(&models_path, &format!("{error}"));
+            }
             guard.error(&format!("Error: {error}"));
             return 1;
         }
@@ -521,7 +531,15 @@ async fn run(parsed: args::Args) -> i32 {
     // Step 29 (`main.ts:811-858`): interactive mode launches the TUI; rpc
     // already exited above; everything else runs print mode.
     let run_exit_code = if app_mode == AppMode::Interactive {
-        run_interactive_mode(session).await
+        // The `/model` picker's catalogue. Built here because this is the only
+        // scope that holds the `ModelRuntime` — `SingleTurnSession` gets an
+        // `Agent`, and `Agent::model()` is the single model in use, not the
+        // list. Composed once at startup rather than on each `/model` press:
+        // the composition is already done, and re-walking every provider on a
+        // keypress would be pure waste.
+        let model_entries =
+            pirust_coding_agent::interactive_pickers::load_model_entries(model_runtime.providers());
+        run_interactive_mode(session, model_entries).await
     } else {
         let print_output_mode = print_mode::to_print_output_mode(app_mode);
         print_mode::run_print_mode(
@@ -545,6 +563,96 @@ async fn run(parsed: args::Args) -> i32 {
     run_exit_code
 }
 
+/// The "Missing configuration" screen (`docs/tui-design-samples.html` §1).
+///
+/// A deliberately tiny TUI: no session, no agent, no model — there *is* no
+/// model, which is the whole point, so `InteractiveMode` cannot be used here.
+/// It mounts one component, pumps keys until the user picks `[Open setup help]`
+/// or `[Quit]`, and restores the terminal on the way out.
+///
+/// Runs on the current thread with a plain blocking read loop rather than the
+/// async machinery: there is nothing to await, and a `tokio` loop here would
+/// only add a way to get the shutdown wrong.
+///
+/// Returns 1 — the configuration really is missing, and a script that
+/// mistakenly reaches this path should still see a failure.
+fn run_setup_help_screen(models_path: &str, error: &str) -> i32 {
+    use pirust_coding_agent::interactive_welcome::{SetupChoice, SetupHelpScreen};
+    use pirust_tui::terminal::Terminal;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::mpsc;
+
+    let mut terminal: Box<dyn Terminal> = Box::new(pirust_tui::terminal::ProcessTerminal::new());
+    let (tx, rx) = mpsc::channel::<String>();
+    terminal.start(
+        Box::new(move |data: &str| {
+            let _ = tx.send(data.to_string());
+        }),
+        Box::new(|| {}),
+    );
+
+    let tui = Rc::new(RefCell::new(pirust_tui::tui::TUI::new(
+        terminal,
+        Some(false),
+    )));
+    tui.borrow_mut().start();
+
+    let screen = Rc::new(RefCell::new(SetupHelpScreen::new(models_path)));
+    tui.borrow_mut()
+        .add_child(Rc::clone(&screen) as pirust_tui::tui::SharedComponent);
+    tui.borrow_mut().request_render(true);
+    tui.borrow_mut().poll();
+
+    let mut help_path: Option<String> = None;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(data) => {
+                // Ctrl+C and Ctrl+D quit here too. A screen whose only job is
+                // to report a misconfiguration must never be a trap.
+                if pirust_tui::keys::matches_key(&data, "ctrl+c")
+                    || pirust_tui::keys::matches_key(&data, "ctrl+d")
+                {
+                    break;
+                }
+                match screen.borrow_mut().handle_key(&data) {
+                    Some(SetupChoice::Quit) => break,
+                    Some(SetupChoice::OpenHelp) => {
+                        help_path = Some(models_path.to_string());
+                        break;
+                    }
+                    None => {}
+                }
+                tui.borrow_mut().request_render(false);
+                tui.borrow_mut().poll();
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                tui.borrow_mut().poll();
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    tui.borrow_mut().stop();
+
+    // Printed *after* the TUI has restored the terminal, so it survives on
+    // screen instead of being wiped by the teardown.
+    eprintln!("Error: {error}");
+    if let Some(path) = help_path {
+        eprintln!("Add a provider to: {path}");
+        eprintln!("Docs: {}", get_docs_path_display());
+    }
+    1
+}
+
+/// Where the provider/model docs live, for the setup screen's closing hint.
+/// Falls back to a plain description rather than failing — this runs on an
+/// error path and must not introduce a second error.
+fn get_docs_path_display() -> String {
+    let docs = pirust_coding_agent::config::get_docs_path();
+    docs.join("providers.md").to_string_lossy().into_owned()
+}
+
 /// `runInteractiveMode` (`main.ts:811-858`) — launch the TUI and loop.
 ///
 /// The TUI loop runs asynchronously; model turns are spawned so input and
@@ -553,7 +661,10 @@ async fn run(parsed: args::Args) -> i32 {
 ///
 /// `bindCurrentSessionExtensions` (interactive-mode.ts:1858-1860) — the
 /// interactive session binds extensions with `mode: "tui"` before the loop.
-async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
+async fn run_interactive_mode(
+    session: Arc<SingleTurnSession>,
+    model_entries: Vec<pirust_coding_agent::interactive_pickers::ModelEntry>,
+) -> i32 {
     use pirust_coding_agent::interactive_mode::{InteractiveMode, InteractiveSession};
     use pirust_coding_agent::print_mode::PrintModeSession;
 
@@ -575,6 +686,7 @@ async fn run_interactive_mode(session: Arc<SingleTurnSession>) -> i32 {
     let terminal = Box::new(pirust_tui::terminal::ProcessTerminal::new());
     let session: Arc<dyn InteractiveSession> = session;
     let mut mode = InteractiveMode::new(terminal, session, runtime);
+    mode.set_model_entries(model_entries);
     mode.run_async().await;
     0
 }

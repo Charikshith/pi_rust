@@ -673,6 +673,22 @@ impl PrintModeSession for SingleTurnSession {
         runner.extensions.extend(newly_added);
         Ok(count)
     }
+
+    /// `/name <name>` — write the session label through the `SessionManager`
+    /// this session already owns.
+    ///
+    /// Returns the *sanitized* name `append_session_info` actually wrote (it
+    /// collapses each run of newlines to one space, then trims), not the raw
+    /// argument, so the TUI can echo what really landed on disk.
+    fn set_session_name(&self, name: &str) -> Result<String, String> {
+        let mut manager = self
+            .session_manager
+            .lock()
+            .map_err(|_| "session store is unavailable".to_string())?;
+        manager
+            .append_session_info(name)
+            .map_err(|error| format!("{error}"))
+    }
 }
 
 /// Wave 5: the pure merge step behind `reload_wasm_extensions` — which
@@ -723,6 +739,35 @@ impl TuiRuntimeInfo for SingleTurnSession {
             cost,
             tools_enabled,
         }
+    }
+
+    /// The agent's currently-active tool names, for the first-run welcome
+    /// block. `Agent::tool_names` (`agent.rs:390`) is the same source
+    /// `runtime_status`'s `tools_enabled` already reduces to a boolean.
+    fn tool_names(&self) -> Vec<String> {
+        self.agent.tool_names()
+    }
+
+    /// Every resumable session on disk, newest first.
+    ///
+    /// `SessionEnv::list_all` (reached via `SessionManager::list_sessions`)
+    /// already sorts by `modified` descending, so no re-sorting here. A store that
+    /// cannot be read yields an empty list rather than an error: `/resume` with
+    /// nothing to resume is a normal state, and the picker says so.
+    ///
+    /// The model column is left blank. `SessionInfo` carries no model — a
+    /// session's model only exists as `model_change` entries inside its
+    /// transcript, so filling this in would mean opening every session file on
+    /// disk just to render a list. That trade is not worth it, and an empty
+    /// column is honest.
+    fn session_entries(&self) -> Vec<crate::interactive_pickers::SessionEntry> {
+        let Ok(manager) = self.session_manager.lock() else {
+            return Vec::new();
+        };
+        let Ok(infos) = manager.list_sessions() else {
+            return Vec::new();
+        };
+        crate::interactive_pickers::load_session_entries(&infos, &std::collections::HashMap::new())
     }
 }
 

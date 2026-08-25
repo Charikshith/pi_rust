@@ -2100,6 +2100,19 @@ impl SessionManager {
 
     /// `appendSessionInfo(name)` (`session-manager.ts:1065-1076`): newlines collapse to
     /// spaces (`/[\r\n]+/g` → one space each run), then `trim()`.
+    /// Every session in the store, newest first — what the TUI's `/resume`
+    /// picker lists.
+    ///
+    /// [`SessionEnv::list_all`] is where the real work lives; this exists only
+    /// because `env` is private, and the interactive layer reaches a
+    /// `SessionManager` (through `SingleTurnSession`) but never a
+    /// `SessionEnv`. Deliberately *not* `list()`: `/resume` should show
+    /// sessions from other working directories too, which is exactly the
+    /// difference between the two (`session-manager.ts:1564-1622`).
+    pub fn list_sessions(&self) -> Result<Vec<SessionInfo>, SessionError> {
+        self.env.list_all(None, None)
+    }
+
     pub fn append_session_info(&mut self, name: &str) -> Result<String, SessionError> {
         let mut sanitized = String::with_capacity(name.len());
         let mut in_run = false;

@@ -12,32 +12,24 @@
 
 use pirust_tui::components::ColorFn;
 
-/// `theme.fg(name, text)` — a `ColorFn` that wraps text in a truecolor fg
-/// sequence.
+/// `theme.fg(name, text)` — a `ColorFn` for a foreground colour.
+///
+/// Delegates to [`crate::interactive_a11y::fg`] rather than emitting a
+/// truecolor sequence unconditionally, because this is the single place the
+/// interactive TUI produces colour: every tool box, notice, welcome line and
+/// picker row goes through here. Routing it through the accessibility layer is
+/// what makes `NO_COLOR`, `TERM=dumb`, a 256-colour terminal and a non-TTY
+/// pipe all behave correctly, instead of each caller having to remember to ask.
+///
+/// The degradation ladder lives there: truecolor → nearest xterm-256 →
+/// nearest of the basic 16 → identity (no escape bytes at all).
 pub fn fg(hex: &str) -> ColorFn {
-    let hex = hex.to_string();
-    Box::new(move |text: &str| {
-        let (r, g, b) = hex_to_rgb(&hex);
-        format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m")
-    })
+    crate::interactive_a11y::fg(hex)
 }
 
-/// `theme.bg(name, text)` — a `ColorFn` that wraps text in a truecolor bg
-/// sequence.
+/// `theme.bg(name, text)` — a `ColorFn` for a background colour. See [`fg`].
 pub fn bg(hex: &str) -> ColorFn {
-    let hex = hex.to_string();
-    Box::new(move |text: &str| {
-        let (r, g, b) = hex_to_rgb(&hex);
-        format!("\x1b[48;2;{r};{g};{b}m{text}\x1b[0m")
-    })
-}
-
-fn hex_to_rgb(hex: &str) -> (u32, u32, u32) {
-    let normalized = hex.strip_prefix('#').unwrap_or(hex);
-    let r = u32::from_str_radix(&normalized[0..2], 16).unwrap_or(0);
-    let g = u32::from_str_radix(&normalized[2..4], 16).unwrap_or(0);
-    let b = u32::from_str_radix(&normalized[4..6], 16).unwrap_or(0);
-    (r, g, b)
+    crate::interactive_a11y::bg(hex)
 }
 
 /// Semantic color values (dark.json `vars` + `colors` resolution) used this
@@ -57,16 +49,57 @@ pub mod dark {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interactive_a11y::{with_settings, A11ySettings, ColorMode};
+
+    /// The theme now consults the process-wide accessibility policy, so every
+    /// test here pins it through the shared serialising helper.
+    fn colored<R>(mode: ColorMode, body: impl FnOnce() -> R) -> R {
+        with_settings(
+            A11ySettings {
+                color: mode,
+                ..A11ySettings::default()
+            },
+            body,
+        )
+    }
 
     #[test]
     fn fg_emits_truecolor_sequence() {
-        let f = fg(dark::TEXT);
-        assert_eq!(f("hi"), "\x1b[38;2;212;212;212mhi\x1b[0m");
+        colored(ColorMode::Truecolor, || {
+            assert_eq!(fg(dark::TEXT)("hi"), "\x1b[38;2;212;212;212mhi\x1b[0m");
+        });
     }
 
     #[test]
     fn bg_emits_truecolor_sequence() {
-        let f = bg(dark::TOOL_PENDING_BG);
-        assert_eq!(f("x"), "\x1b[48;2;40;40;50mx\x1b[0m");
+        colored(ColorMode::Truecolor, || {
+            assert_eq!(
+                bg(dark::TOOL_PENDING_BG)("x"),
+                "\x1b[48;2;40;40;50mx\x1b[0m"
+            );
+        });
+    }
+
+    /// The whole point of routing the theme through the a11y layer: a
+    /// `NO_COLOR` run must emit no escape bytes at all, not colour text and
+    /// hope the terminal ignores it.
+    #[test]
+    fn no_color_emits_no_escape_bytes() {
+        colored(ColorMode::None, || {
+            assert_eq!(fg(dark::TEXT)("hi"), "hi");
+            assert_eq!(bg(dark::TOOL_ERROR_BG)("hi"), "hi");
+        });
+    }
+
+    #[test]
+    fn ansi256_quantises_instead_of_truecolor() {
+        colored(ColorMode::Ansi256, || {
+            let painted = fg(dark::TEXT)("hi");
+            assert!(
+                painted.starts_with("\x1b[38;5;"),
+                "expected a 256-colour index, got {painted:?}"
+            );
+            assert!(painted.ends_with("mhi\x1b[0m"));
+        });
     }
 }

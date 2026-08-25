@@ -527,6 +527,24 @@ impl TUI {
         self.full_redraw_count
     }
 
+    /// Write a raw sequence straight to the terminal, outside the render
+    /// pipeline.
+    ///
+    /// For control sequences the *terminal emulator* consumes rather than
+    /// displays — OSC 52 clipboard writes being the motivating case. Such a
+    /// sequence must not go through a component, because it occupies no rows
+    /// and the line-diff renderer has nothing to diff about it.
+    ///
+    /// Call this between frames. It does not touch `previous_lines`, so
+    /// emitting something that *does* move the cursor or print visible text
+    /// would desynchronise the diff state from the screen.
+    pub fn write_raw(&mut self, data: &str) {
+        if data.is_empty() {
+            return;
+        }
+        self.terminal.write(data);
+    }
+
     /// `this.tui.terminal.rows` — the editor (editor.ts:500) and page-scroll
     /// (editor.ts:1871) read the terminal height through the TUI. The Rust
     /// `Terminal` trait exposes `rows()`; this is the editor's accessor.
