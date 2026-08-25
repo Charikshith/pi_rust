@@ -62,6 +62,7 @@
 //!   `panic!` (after the same crash-log-and-stop sequence) matches more
 //!   faithfully than a recoverable error type.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
@@ -275,6 +276,37 @@ impl Container {
     pub fn clear(&mut self) {
         self.children.clear();
     }
+
+    /// How many children are mounted.
+    pub fn len(&self) -> usize {
+        self.children.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    /// Drop leading children while doing so removes no more than `budget`
+    /// rendered lines; returns how many lines were actually removed.
+    ///
+    /// A child is dropped only if it fits *entirely* within the budget, so the
+    /// caller can guarantee it never discards a line that is still on screen.
+    /// Cost is proportional to the children removed, not to the container
+    /// length: the walk stops at the first child that does not fit.
+    pub fn drop_leading_children(&mut self, width: usize, budget: usize) -> usize {
+        let mut removed_lines = 0;
+        let mut removed_children = 0;
+        for child in &self.children {
+            let lines = child.borrow_mut().render(width).len();
+            if removed_lines + lines > budget {
+                break;
+            }
+            removed_lines += lines;
+            removed_children += 1;
+        }
+        self.children.drain(..removed_children);
+        removed_lines
+    }
 }
 
 impl Component for Container {
@@ -437,6 +469,42 @@ impl TUI {
         self.container.render(width)
     }
 
+    /// How many document lines have scrolled above the viewport, i.e. are no
+    /// longer addressable by the differential renderer. Any change to them
+    /// forces a full redraw, so in practice they are frozen in the terminal's
+    /// own scrollback. This is the budget a caller may
+    /// [`forget_leading_lines`](Self::forget_leading_lines) from.
+    pub fn lines_above_viewport(&self) -> usize {
+        self.previous_viewport_top.max(0) as usize
+    }
+
+    /// Tell the renderer that `count` leading document lines have been removed
+    /// from the component tree, so it can shift its diff state to match.
+    ///
+    /// Without this, dropping old children would renumber every remaining row:
+    /// the next frame would compare row `i` of the shortened document against
+    /// row `i` of the old one, find everything different, and fall back to a
+    /// full redraw (and a visibly duplicated transcript). Shifting
+    /// `previous_lines` and the cursor/viewport counters by the same amount
+    /// keeps the two sides aligned, so pruning costs nothing on screen.
+    ///
+    /// Refuses to forget more than [`lines_above_viewport`](Self::lines_above_viewport):
+    /// a row that is still on screen has to stay addressable.
+    pub fn forget_leading_lines(&mut self, count: usize) {
+        let count = count
+            .min(self.previous_lines.len())
+            .min(self.lines_above_viewport());
+        if count == 0 {
+            return;
+        }
+        let shift = count as i64;
+        self.previous_lines.drain(..count);
+        self.previous_viewport_top -= shift;
+        self.cursor_row = (self.cursor_row - shift).max(0);
+        self.hardware_cursor_row = (self.hardware_cursor_row - shift).max(0);
+        self.max_lines_rendered = (self.max_lines_rendered - shift).max(0);
+    }
+
     /// `invalidate` (tui.ts:630, `override`).
     pub fn invalidate(&mut self) {
         self.container.invalidate();
@@ -454,6 +522,14 @@ impl TUI {
     /// `this.tui.terminal.rows` — the editor (editor.ts:500) and page-scroll
     /// (editor.ts:1871) read the terminal height through the TUI. The Rust
     /// `Terminal` trait exposes `rows()`; this is the editor's accessor.
+    /// The terminal width the renderer lays out against — the companion to
+    /// [`terminal_rows`](Self::terminal_rows), needed by callers that render a
+    /// component themselves (transcript pruning measures line counts at the
+    /// same width the frame will use).
+    pub fn terminal_columns(&self) -> u16 {
+        self.terminal.columns()
+    }
+
     pub fn terminal_rows(&self) -> u16 {
         self.terminal.rows()
     }
@@ -1624,17 +1700,30 @@ impl TUI {
         None
     }
 
-    fn apply_line_resets(&self, lines: Vec<String>) -> Vec<String> {
-        lines
-            .into_iter()
-            .map(|line| {
-                if is_image_line(&line) {
-                    line
-                } else {
-                    format!("{}{}", normalize_terminal_output(&line), SEGMENT_RESET)
-                }
-            })
-            .collect()
+    /// The wire form of one rendered line: tab / Thai-Lao normalization plus
+    /// the trailing segment reset. Image lines pass through untouched (their
+    /// payload is not text and must not be rewritten).
+    ///
+    /// This used to be `apply_line_resets`, mapped over the *whole document*
+    /// once per frame — two allocations and two full copies per line, for
+    /// every line in the transcript, on every frame, even though a frame only
+    /// ever writes the handful of lines that actually changed. It is now
+    /// applied lazily at each write site instead, which makes the cost
+    /// proportional to the changed lines rather than to the session length.
+    ///
+    /// `previous_lines` consequently stores lines in their *raw* form, so the
+    /// diff below compares raw against raw — consistent, and the same answer,
+    /// because the reset suffix is a constant and normalization is applied to
+    /// both sides or to neither.
+    fn line_for_output(line: &str) -> Cow<'_, str> {
+        if is_image_line(line) {
+            return Cow::Borrowed(line);
+        }
+        let normalized = normalize_terminal_output(line);
+        let mut out = String::with_capacity(normalized.len() + SEGMENT_RESET.len());
+        out.push_str(&normalized);
+        out.push_str(SEGMENT_RESET);
+        Cow::Owned(out)
     }
 
     // -- The render loop ----------------------------------------------------
@@ -1667,7 +1756,7 @@ impl TUI {
             new_lines = self.composite_overlays(new_lines, width, height);
         }
         let cursor_pos = self.extract_cursor_position(&mut new_lines, height);
-        let new_lines = self.apply_line_resets(new_lines);
+        let new_lines = new_lines;
 
         // First render.
         if self.previous_lines.is_empty() && !width_changed && !height_changed {
@@ -1694,8 +1783,15 @@ impl TUI {
         let mut last_changed: i64 = -1;
         let max_lines = new_lines.len().max(self.previous_lines.len());
         for i in 0..max_lines {
-            let old_line = self.previous_lines.get(i).map(String::as_str).unwrap_or("");
-            let new_line = new_lines.get(i).map(String::as_str).unwrap_or("");
+            // Compare as `Option`, NOT with `""` as the missing-row stand-in.
+            // A row past the end of one side must always count as changed, and
+            // a blank row is a legitimate value: `previous_lines` holds raw
+            // lines now (see `line_for_output`), so an empty row really is
+            // `""` and would otherwise compare equal to "no such row" and be
+            // skipped. It never collided before only because every processed
+            // line carried a non-empty reset suffix.
+            let old_line = self.previous_lines.get(i).map(String::as_str);
+            let new_line = new_lines.get(i).map(String::as_str);
             if old_line != new_line {
                 if first_changed == -1 {
                     first_changed = i as i64;
@@ -1850,7 +1946,7 @@ impl TUI {
                     buffer.push_str("\r\n\x1b[2K");
                 }
                 buffer.push_str(&format!("\x1b[{}A", image_reserved_rows - 1));
-                buffer.push_str(&line);
+                buffer.push_str(&Self::line_for_output(&line));
                 buffer.push_str(&format!("\x1b[{}B", image_reserved_rows - 1));
                 i += image_reserved_rows - 1;
                 i += 1;
@@ -1858,17 +1954,18 @@ impl TUI {
             }
 
             buffer.push_str("\x1b[2K");
-            if !is_image && visible_width(&line) as i64 > width {
+            let out = Self::line_for_output(&line);
+            if !is_image && visible_width(&out) as i64 > width {
                 self.write_crash_log(i, width, &new_lines);
                 self.stop();
                 panic!(
                     "Rendered line {i} exceeds terminal width ({} > {width}). This is likely caused by a custom TUI \
                      component not truncating its output. Use visible_width() to measure and truncate_to_width() to \
                      truncate lines.",
-                    visible_width(&line)
+                    visible_width(&out)
                 );
             }
-            buffer.push_str(&line);
+            buffer.push_str(&out);
             i += 1;
         }
 
@@ -1907,13 +2004,17 @@ impl TUI {
         let dir = home.join(".pirust").join("agent");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("pi-crash.log");
+        // Widths are measured on the wire form, matching the check that
+        // tripped the panic (`new_lines` holds raw lines — see
+        // `line_for_output`).
         let mut data = format!(
             "Crash at {:?}\nTerminal width: {width}\nLine {line_index} visible width: {}\n\n=== All rendered lines ===\n",
             std::time::SystemTime::now(),
-            visible_width(&new_lines[line_index as usize])
+            visible_width(&Self::line_for_output(&new_lines[line_index as usize]))
         );
         for (idx, l) in new_lines.iter().enumerate() {
-            data.push_str(&format!("[{idx}] (w={}) {l}\n", visible_width(l)));
+            let out = Self::line_for_output(l);
+            data.push_str(&format!("[{idx}] (w={}) {out}\n", visible_width(&out)));
         }
         let _ = std::fs::write(path, data);
     }
@@ -1949,11 +2050,11 @@ impl TUI {
                     buffer.push_str("\r\n");
                 }
                 buffer.push_str(&format!("\x1b[{}A", image_reserved_rows - 1));
-                buffer.push_str(line);
+                buffer.push_str(&Self::line_for_output(line));
                 buffer.push_str(&format!("\x1b[{}B", image_reserved_rows - 1));
                 continue;
             }
-            buffer.push_str(line);
+            buffer.push_str(&Self::line_for_output(line));
         }
         buffer.push_str("\x1b[?2026l");
         self.terminal.write(&buffer);

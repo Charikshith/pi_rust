@@ -11,7 +11,13 @@ pub struct Text {
     padding_x: usize,
     padding_y: usize,
     custom_bg_fn: Option<super::ColorFn>,
-    cached_text: Option<String>,
+    /// The width `cached_lines` was wrapped for, or `None` when the cache is
+    /// cold. The TS also memoizes the *text* and compares it on every render;
+    /// that comparison can never fail here, because `text` is private and both
+    /// mutators (`set_text`, `set_custom_bg_fn`) call `clear_cache`. Keeping it
+    /// would mean a second full copy of every string on screen — the whole
+    /// chat transcript stored twice — plus a full string compare per component
+    /// per frame, to answer a question the type system already answers.
     cached_width: Option<usize>,
     cached_lines: Option<Vec<String>>,
 }
@@ -24,7 +30,6 @@ impl Text {
             padding_x,
             padding_y,
             custom_bg_fn: None,
-            cached_text: None,
             cached_width: None,
             cached_lines: None,
         }
@@ -41,7 +46,6 @@ impl Text {
             padding_x,
             padding_y,
             custom_bg_fn: Some(custom_bg_fn),
-            cached_text: None,
             cached_width: None,
             cached_lines: None,
         }
@@ -64,7 +68,6 @@ impl Text {
     }
 
     fn clear_cache(&mut self) {
-        self.cached_text = None;
         self.cached_width = None;
         self.cached_lines = None;
     }
@@ -73,20 +76,16 @@ impl Text {
 impl Component for Text {
     /// `render` (text.ts:45).
     fn render(&mut self, width: usize) -> Vec<String> {
-        if let (Some(cached_lines), Some(cached_text), Some(cached_width)) =
-            (&self.cached_lines, &self.cached_text, self.cached_width)
-        {
-            if cached_text == &self.text && cached_width == width {
+        if let (Some(cached_lines), Some(cached_width)) = (&self.cached_lines, self.cached_width) {
+            if cached_width == width {
                 return cached_lines.clone();
             }
         }
 
         if self.text.trim().is_empty() {
-            let result: Vec<String> = Vec::new();
-            self.cached_text = Some(self.text.clone());
             self.cached_width = Some(width);
-            self.cached_lines = Some(result.clone());
-            return result;
+            self.cached_lines = Some(Vec::new());
+            return Vec::new();
         }
 
         let normalized_text = self.text.replace('\t', "   ");
@@ -124,7 +123,6 @@ impl Component for Text {
         result.extend(content_lines);
         result.extend(empty_lines);
 
-        self.cached_text = Some(self.text.clone());
         self.cached_width = Some(width);
         self.cached_lines = Some(result.clone());
 

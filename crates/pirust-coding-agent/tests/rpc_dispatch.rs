@@ -396,6 +396,48 @@ async fn prompt_runs_end_to_end_and_is_queryable() {
     assert_eq!(messages.len(), 2); // user + assistant
 }
 
+/// The model id this `llama-server` will accept in a `/v1/messages` request,
+/// or `None` when nothing is listening.
+///
+/// This test used to hardcode `"local"`, which worked only against
+/// single-model `llama-server` builds — those ignore the request's `model`
+/// field entirely. Router-mode builds (what `--hf-repo` starts now) resolve it
+/// against the loaded model list and reject anything else with
+/// `400 model 'local' not found` in ~3ms. That arrived here not as an obvious
+/// connection error but as a *successful* prompt command followed by an
+/// assistant message with zero content blocks, so the failure looked like a
+/// model quirk rather than a bad request. Ask the server for the id instead of
+/// guessing it.
+///
+/// Hand-rolled HTTP because the alternative is a `reqwest` dev-dependency for
+/// one unauthenticated localhost GET.
+fn live_model_id(addr: &std::net::SocketAddr) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect_timeout(addr, Duration::from_millis(500)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    // No `Accept-Encoding`, so the body comes back uncompressed.
+    stream
+        .write_all(
+            b"GET /v1/models HTTP/1.1\r\n\
+              Host: 127.0.0.1\r\n\
+              Accept: application/json\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .ok()?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).ok()?;
+    let body = String::from_utf8_lossy(&raw);
+    // The first `"id":"…"` in the `data` array is the loaded model.
+    let start = body.find("\"id\":\"")? + "\"id\":\"".len();
+    let rest = body.get(start..)?;
+    let end = rest.find('"')?;
+    let id = &rest[..end];
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 /// LIVE — drives a real turn against `ggml-org/Qwen3.5-0.8B-GGUF` at
 /// `127.0.0.1:8080` (Anthropic-compatible `/v1/messages`) through the SAME
 /// dispatch loop `pirust --mode rpc` will use once Wave 3 wires it into
@@ -404,14 +446,16 @@ async fn prompt_runs_end_to_end_and_is_queryable() {
 #[tokio::test]
 async fn live_prompt_against_local_llama_server() {
     let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err() {
+    let Some(model_id) = live_model_id(&addr) else {
         eprintln!("no server on 127.0.0.1:8080; skipping live RPC test (not a failure)");
         return;
-    }
+    };
+    eprintln!("live server model id: {model_id}");
 
     let model = Model {
-        id: "local".into(),
-        name: "local".into(),
+        // Must be the id the server reports, not a placeholder — see `live_model_id`.
+        id: model_id.clone(),
+        name: model_id,
         api: Api::from("anthropic-messages"),
         provider: ProviderId::from("anthropic"),
         base_url: "http://127.0.0.1:8080".into(),

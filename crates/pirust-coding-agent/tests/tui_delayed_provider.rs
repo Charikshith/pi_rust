@@ -298,6 +298,67 @@ fn delayed_submit_streams_then_completes() {
     );
 }
 
+/// A streamed turn must repaint through the TUI's line diff, not by throwing
+/// the diff away and rewriting the whole screen.
+///
+/// `request_render(true)` clears `previous_lines`/`previous_width`, which sends
+/// the next `poll()` down `do_render`'s `full_render` path. Every content
+/// update in `InteractiveMode` used to pass `true`, so a single turn — user
+/// line, message start, each stream delta, message end, separator, status
+/// refreshes — cost one full-screen repaint each. `docs/tui-design-audit.md`
+/// names this directly: "Rust does not guarantee speed if every stream update
+/// causes a full terminal redraw."
+///
+/// Measured on this scenario (a one-message turn, 80x24): forcing gives 3 full
+/// redraws / 4046 bytes written, every run; diffing gives 1 / 2681-3878. The
+/// one remaining full redraw is the startup frame, which the loop's own resize
+/// check legitimately forces. The saving grows with the transcript, because a
+/// full redraw rewrites every row on screen while the diff rewrites only the
+/// rows that changed.
+#[test]
+fn streaming_a_turn_does_not_force_full_redraws() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let prompt_seen = Arc::clone(&session.prompt_seen);
+    let release = Arc::clone(&session.release);
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        type_and_submit(&mut on_input);
+        for _ in 0..200 {
+            if prompt_seen.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        release.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(200));
+        on_input("\u{4}"); // quit
+    });
+
+    runtime.block_on(mode.run_async());
+
+    let writes = handles.writes.lock().unwrap().clone();
+    assert!(
+        writes.contains("Hello from the delayed provider"),
+        "the turn must still render its streamed text, got: {writes:?}"
+    );
+    let full_redraws = mode.full_redraws();
+    assert!(
+        full_redraws <= 2,
+        "a streamed turn should repaint through the line diff, not force \
+         full-screen redraws; got {full_redraws} full redraws"
+    );
+}
+
 #[test]
 fn delayed_submit_cancel_aborts_before_release() {
     let terminal = Box::new(DriveTerminal::new());

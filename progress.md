@@ -2842,3 +2842,225 @@ Verification: fmt clean, clippy `-D warnings` clean, all 5 black-box tests
   differential against real Pi's own `--mode rpc` binary; `killTrackedDetachedChildren()`
   on signal; RPC sessions remain in-memory only (no on-disk v4 session file);
   SIGTERM/SIGHUP exit codes unverified on this Windows dev machine.
+
+## 2026-08-25 — TUI performance + feature-correctness pass (no new feature)
+
+Requested: make pirust faster / lighter, and check the already-implemented TUI
+features are actually correct. Scope kept to `InteractiveMode` + the one TUI
+component it leans on hardest; no new commands, flags, modes, or abstractions.
+
+### Performance / memory
+
+- **Full-screen repaints on every content change.** `InteractiveMode` called
+  `TUI::request_render(true)` for every chat append, stream delta, status
+  refresh and modal keystroke. The force flag clears `previous_lines` /
+  `previous_width`, which is the differential renderer's entire line-diff
+  cache, so the next `poll()` fell through to `do_render`'s `full_render` path
+  and rewrote every row on screen. Replaced with a documented `repaint()`
+  helper (`request_render(false)`); components already clear their own caches
+  on mutation (`Text::set_text` -> `clear_cache`), so the diff still sees fresh
+  lines. Force is now used in exactly one place — the loop's resize branch,
+  where the cache genuinely is stale — plus `run_turn_sync`, whose next
+  statement blocks the thread.
+  Measured on the one-message delayed-provider turn at 80x24, 5 runs each:
+  forced = 3 full redraws / 4046 bytes written, every run; diffed = 1 full
+  redraw / 2681-3878 bytes. The remaining redraw is the startup frame. The
+  saving scales with transcript length, since a full redraw rewrites every row
+  and the diff rewrites only changed rows.
+  Pinned by `streaming_a_turn_does_not_force_full_redraws`
+  (`tests/tui_delayed_provider.rs`), which fails at 3 with the fix reverted.
+  Needed a new `InteractiveMode::full_redraws()` seam over the TUI's existing
+  `full_redraw_count`.
+
+- **`Text` stored every string twice.** `cached_text` held a full clone of
+  `self.text` and was compared on every render. That comparison can never
+  fail: `text` is private and both mutators call `clear_cache`. Dropped the
+  field — one fewer full copy of every string on screen (i.e. of the whole
+  chat transcript) and one fewer full string compare per component per frame.
+  Cache key is now just the width.
+
+### Correctness (features that were present but wrong)
+
+- **Ctrl+C was swallowed by every modal.** `run_async` routes input to the
+  model picker / resume picker / approval prompt *instead of*
+  `TUI::handle_input`, and the global Ctrl+C/Ctrl+D listener lives inside the
+  TUI. So with any modal open, neither key reached anything: the turn could
+  not be cancelled and the process could not be quit — Esc was the only exit
+  from a picker, and there was no exit at all from the approval prompt. Added
+  a Ctrl+C bypass ahead of the modal routing, sharing one `last_ctrl_c` window
+  with the TUI listener so Pi's 500ms double-press-quits rule means the same
+  thing on both paths. Ctrl+D during a modal is deliberately still inert —
+  double Ctrl+C covers it; flagged below rather than built.
+  Test: `ctrl_c_is_not_swallowed_by_an_open_model_picker`.
+
+- **Esc did nothing on the approval prompt.** `handle_approval_key` ignored
+  every key that was not `r`/`a`/`d`. Since the agent loop is parked on the
+  approval oneshot, this deadlocks the whole session — verified: with the fix
+  reverted the test hangs rather than fails. Esc now resolves as Deny.
+  Test: `escape_denies_a_pending_tool_approval` (carries its own escape hatch
+  so a regression fails instead of hanging the suite).
+
+- **Command registry drift (audit #22).** `/help`, `/models`, `/restart` and
+  `/refresh-model-list` were dispatchable but absent from
+  `BUILTIN_SLASH_COMMANDS`, so the editor's autocomplete — which is built from
+  that list — never offered them, and `/help` did not list itself. Registered
+  all four; `/help` and `/models` are in `docs/tui-design-samples.html`'s own
+  command list and `restart`/`refresh-model-list` are visible in the real-Pi
+  palette screenshot the same doc embeds, so this is oracle-backed, not
+  invented. Conversely 13 of the registered commands have no handler and were
+  offered as if they worked; added `slash_command_available()` (one source of
+  truth, checked by `every_available_command_is_registered`) and both the
+  dropdown and `/help` now append "(unavailable in this session)".
+
+- **`/name` reported a rename that never happened.** It answered "Session
+  renamed to: X" for any argument, but `PrintModeSession` has no rename, so
+  nothing was written and the next `/session` still showed the old name. Now
+  says it is not wired, and reports unavailable like the rest.
+
+- **Informational output was rendered as errors.** `/help`, `/session`,
+  `/models`, compaction notices, retry notices, extension-reload results and
+  approval confirmations all went through `show_error`, so they printed with a
+  `✗`. Added `show_notice` for these; `show_error` keeps the `✗` for real
+  errors.
+
+- **The stale-event guard was dead code.** `streaming_turn` was written in two
+  places and read in none, under a comment claiming events from a cancelled or
+  completed turn were dropped by turn id. They were not. `AgentSessionEvent`
+  carries no turn id, so the guard is now built from what the loop does know:
+  an assistant `MessageStart` is ignored unless a turn is actually live (a
+  late one used to leave a zombie streaming component nothing ever filled in),
+  and `MessageUpdate`/`MessageEnd` only apply when `streaming_turn` still
+  matches `turn_id`. `run_turn_sync` now does the same `turn_state`/`turn_id`
+  bookkeeping as `start_turn` so the guard means the same thing on both paths.
+
+### Gate
+
+`cargo fmt --all` clean; `cargo clippy --workspace --all-targets -D warnings`
+clean apart from the same pre-existing, untouched `pirust-tui/src/latex.rs`
+`question_mark` finding earlier waves already documented; `cargo test
+--workspace` 96 suites, 0 failures (+5 tests: 1 perf regression, 4 correctness).
+
+### REMAINING (named, not built this pass)
+
+- **The chat container grows without bound and is re-rendered whole every
+  frame.** `Container::render` walks every child unconditionally, so a long
+  session rebuilds and copies its entire transcript on each frame; nothing is
+  ever removed from `chat`. This is the largest remaining speed *and* memory
+  item and it is the one the audit says needs a deliberate subsystem refactor
+  (viewport-aware rendering), not a local patch — deliberately not attempted
+  here.
+- **The loop still wakes every 10ms** (`tokio::time::sleep`) whether or not
+  anything happened; `docs/tui-design-audit.md` calls this out directly. The
+  real fix is tokio channels + `select!` so the loop sleeps until an actual
+  event, which is the same async-turn-runner refactor above.
+- Ctrl+D remains inert while a modal is open (double Ctrl+C is the way out).
+- `/model` and `/resume` open working pickers that cannot commit a selection;
+  they report so on Enter and are marked available because the command itself
+  dispatches.
+
+## 2026-08-25 (cont.) — bounded transcript rendering
+
+Follow-up to the pass above: the item it named as "largest remaining, needs a
+deliberate refactor". User chose to do it. Goal: the frame cost and the
+retained memory must stop growing with session length.
+
+### Measurement first
+
+Built a throwaway harness (`Container` of N one-line `Text` children on a
+24-row terminal, stream 100 updates into the tail, time only `poll()` — the
+throttle sleep sat outside the timer; including it measured Windows' ~15ms
+scheduler granularity, not the renderer). Release build, per frame:
+
+| entries | before | after lazy lines | after pruning |
+|--------:|-------:|-----------------:|--------------:|
+|     500 | 286 us |           182 us |        109 us |
+|   2,000 | 910 us |           529 us |        107 us |
+|   5,000 | 2.41ms |           1.37ms |        104 us |
+
+Linear before (~0.48us per entry per frame), flat after. 23x at 5,000 entries.
+Splitting the frame showed the component-tree walk was only ~15% of it, so the
+first fix went to the other 85%, not where it looked like it should.
+
+### 1. Per-line post-processing was O(document), now O(changed lines)
+
+`apply_line_resets` mapped `normalize_terminal_output` + a `format!` over
+*every line of the document, every frame* — two allocations and two full copies
+per line — even though a frame only ever writes the handful of rows that
+changed. Replaced with `TUI::line_for_output`, applied lazily at the four sites
+that actually write a line (plus the width-overflow check and the crash log, so
+both still measure the wire form).
+
+`previous_lines` therefore holds **raw** lines now, and the diff compares raw
+against raw — consistent, same answer, because the reset suffix is a constant.
+
+**This broke a golden test and I nearly shipped it.** `tui_golden`'s
+`overlay-show-focus-hide-restores-prior-focus` case started writing from row 4
+instead of row 0. Cause: the diff used `""` as its stand-in for "this row is
+past the end of `previous_lines`". That was safe only because a *processed*
+line always carried a non-empty reset suffix and so could never equal `""`. Raw
+lines can be genuinely empty, so blank rows started comparing equal to
+"no such row" and were skipped. Fixed by comparing `Option<&str>` instead of
+substituting a sentinel — exactly equivalent for the old processed lines, and
+correct for raw ones.
+
+Process note: I missed this for several steps because I piped `cargo test`
+through `head -20` and the failing suite was below the cut. Run the suite
+whole, or count the failures, rather than eyeballing the first screen.
+
+### 2. The transcript is now bounded
+
+`Container::drop_leading_children(width, budget)` drops leading children while
+they fit entirely inside a line budget (stops at the first that does not, so
+its cost is proportional to what it removes, not to container length).
+`TUI::forget_leading_lines(count)` then shifts `previous_lines`,
+`previous_viewport_top`, `cursor_row`, `hardware_cursor_row` and
+`max_lines_rendered` by the same amount.
+
+That second half is the whole trick: drop children without it and every
+remaining row renumbers, the next frame finds the entire document changed, and
+it falls back to a full redraw with a visibly duplicated transcript. Verified —
+disabling `forget_leading_lines` makes
+`pruning_scrolled_lines_costs_no_full_redraw_and_no_extra_output` fail with 2
+full redraws instead of 1.
+
+`InteractiveMode::prune_scrollback` drives it once per loop iteration, using
+`TUI::lines_above_viewport` (the renderer's own count of rows it can no longer
+address without a full redraw) minus `RETAINED_SCREENS = 10` screens of slack.
+So nothing within ten screens of the top of the terminal is ever dropped, and
+`forget_leading_lines` independently clamps to the viewport so a visible row
+cannot be discarded even if a caller asks.
+
+New: `TUI::terminal_columns`, `Container::len`/`is_empty`,
+`InteractiveMode::chat_entries` (the regression seam, like `full_redraws`).
+
+### Gate
+
+`cargo fmt --all` clean; `cargo clippy --workspace --all-targets -D warnings`
+clean apart from the same pre-existing untouched `pirust-tui/src/latex.rs`
+`question_mark` finding; `cargo test --workspace` 879 passed / 0 failed
+(874 -> 879, +5: 4 in `crates/pirust-tui/tests/transcript_pruning.rs`, 1
+`a_long_session_bounds_the_chat_container` driving the real loop). Each new
+test was checked to fail with its fix reverted.
+
+### NAMED TRADE-OFF (deliberate, not an oversight)
+
+Dropped entries live only in the terminal's own scrollback from then on. A
+resize full-redraws with `\x1b[3J`, which clears that scrollback and repaints
+from the retained document — so **resizing a session longer than ten screens
+loses the history beyond those ten screens**. Before this change the full
+transcript was re-emitted and survived. Ten screens is the knob
+(`RETAINED_SCREENS`); the flat ~105us/frame holds because the cost depends on
+the retained window, not the session.
+
+### REMAINING (still not built)
+
+- The loop still wakes every 10ms whether or not anything happened. Unchanged
+  by this pass; wants the tokio-channel + `select!` async turn runner.
+- The session event channel is a bounded `sync_channel(256)` whose `send`
+  **blocks** the producer. Hit this writing the long-session test: queueing
+  4,000 events before the loop started deadlocked the test. In production the
+  producer is the agent thread, so a stalled UI backpressures the agent. Named
+  in the audit as "bounded", but blocking-vs-dropping was never decided.
+- `Component::render` still returns an owned `Vec<String>`, so each frame
+  clones every retained child's cached lines. Bounded now, so it no longer
+  grows — but it is the remaining floor on frame cost.

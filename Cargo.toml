@@ -22,6 +22,34 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Iteration profile. `release` above is a ship-it profile: fat LTO funnels the
+# whole workspace through one LLVM module and `codegen-units = 1` refuses to
+# parallelise it, so a one-line edit costs ~4min on 8 cores. This profile keeps
+# the optimisation level (the TUI needs real-speed rendering to be worth
+# driving by hand) but drops both, plus `strip`, so the link is incremental and
+# parallel. `--release` stays byte-for-byte what we ship; use this for the
+# run-it-and-look-at-it loop:
+#
+#     cargo run --profile fast --bin pirust
+#
+# It also writes to `target/fast/`, so it never fights a running `pirust.exe`
+# for the `target/release/` output path (that lock surfaces as
+# "Access is denied. (os error 5)" at the end of an otherwise-complete build).
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+debug = 0
+# Our own crates are the ones that get recompiled, so they carry the whole
+# iteration cost — `opt-level = 1` is the sweet spot there (a TUI is
+# IO-latency-bound, not compute-bound). Third-party deps are compiled once and
+# then cached forever, so they stay at the inherited `opt-level = 3`.
+opt-level = 1
+
+[profile.fast.package."*"]
+opt-level = 3
+
 # Shared dependency versions. Ports mirror pi_space/pi (see docs/analysis/00-overview.md §5).
 [workspace.dependencies]
 pirust-ai = { path = "crates/pirust-ai" }

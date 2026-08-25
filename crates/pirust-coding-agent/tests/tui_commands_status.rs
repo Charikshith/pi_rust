@@ -276,6 +276,82 @@ fn status_line_shows_runtime_identity_and_model() {
     );
 }
 
+/// Block until `needle` shows up in the captured writes, or give up.
+///
+/// Fixed sleeps are not safe here: `cargo test` runs every suite in the
+/// workspace concurrently, so on a loaded machine the loop can take far longer
+/// than any sleep to drain one keystroke.
+fn wait_for(probe: &Arc<Mutex<String>>, needle: &str) -> bool {
+    for _ in 0..400 {
+        if probe.lock().unwrap().contains(needle) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+/// Regression: `/` is an ordinary character that goes into the editor, where
+/// the editor's own autocomplete offers the slash commands.
+///
+/// There used to be a hand-rolled `CommandPalette` that grabbed `/` globally
+/// before the editor saw it, and redrew itself by appending a fresh notice to
+/// the chat on every keystroke -- so `/mod` left four stacked copies of a
+/// "Command palette (filter: ...)" block that had no visual connection to the
+/// input box, and none of them were removed on close. Both the interception
+/// and that notice are gone. This pins down that they stay gone: every other
+/// test in this file pastes slash lines as one blob, so nothing else covers
+/// the flow of actually typing `/` key by key.
+#[test]
+fn typing_slash_goes_to_the_editor_not_a_palette() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let mut mode = rig.mode;
+    let writes = rig.writes;
+    let input = rig.input;
+
+    // The feeder cannot assert directly: it runs while the loop below owns the
+    // main thread, so a panic there would hang the test instead of failing it.
+    let frame: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+
+    let probe = writes.clone();
+    let out = frame.clone();
+    thread::spawn(move || {
+        let mut cb = take_on_input(&input);
+
+        // Type `/mod` one key at a time, confirming each keystroke reached the
+        // editor before sending the next.
+        for (key, expected) in [("/", "/"), ("m", "/m"), ("o", "/mo"), ("d", "/mod")] {
+            // Keep only the frames drawn for this keystroke, so the wait tests
+            // the current frame rather than the whole scrollback.
+            probe.lock().unwrap().clear();
+            cb(key);
+            wait_for(&probe, expected);
+        }
+        *out.lock().unwrap() = probe.lock().unwrap().clone();
+
+        // Clear the editor, then quit -- Ctrl+D only quits on an empty editor.
+        for _ in 0..4 {
+            probe.lock().unwrap().clear();
+            cb("\u{7f}");
+            thread::sleep(Duration::from_millis(60));
+        }
+        cb("\u{4}");
+    });
+
+    make_runtime().block_on(mode.run_async());
+
+    let frame = frame.lock().unwrap().clone();
+    assert!(
+        frame.contains("/mod"),
+        "`/` and the characters after it belong in the editor, got: {frame:?}"
+    );
+    assert!(
+        !frame.contains("Command palette"),
+        "the hand-rolled palette is gone; `/` must not open one, got: {frame:?}"
+    );
+}
+
 #[test]
 fn slash_help_opens_palette_and_lists_commands() {
     let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
@@ -461,5 +537,263 @@ fn long_tool_result_truncates_to_preview() {
     assert!(
         rendered.contains("more lines"),
         "long tool output should truncate with a hint, got: {rendered:?}"
+    );
+}
+
+/// A long session must not keep growing the chat container.
+///
+/// Every message, tool box, notice and separator used to stay mounted for the
+/// life of the process, and `Container::render` walks every child on every
+/// frame — so both the frame cost and the retained memory grew with the
+/// session, without limit. `InteractiveMode::prune_scrollback` now drops
+/// entries that have scrolled far past the top of the terminal (their rows
+/// live in the terminal's own scrollback), keeping the document bounded.
+///
+/// This drives the real loop rather than the pruning primitives, so it covers
+/// the wiring: pump 4,000 notices through and check the container settles.
+#[test]
+fn a_long_session_bounds_the_chat_container() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(Arc::clone(&session));
+    let mut mode = rig.mode;
+    let input = rig.input;
+
+    // Emit far more entries than a 24-row terminal could ever show, from a
+    // second thread: the event channel is a bounded `sync_channel`, so a
+    // producer that runs ahead of the loop blocks until the loop drains.
+    let emitter = Arc::clone(&session);
+    thread::spawn(move || {
+        let listener = {
+            let mut got = None;
+            for _ in 0..200 {
+                if let Some(l) = emitter.listener.lock().unwrap().clone() {
+                    got = Some(l);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            got.expect("the mode should have subscribed")
+        };
+        for i in 0..4000 {
+            listener(
+                &pirust_coding_agent::print_mode::AgentSessionEvent::AutoRetryStart {
+                    attempt: i,
+                    max_attempts: 4000,
+                    delay_ms: 0,
+                    error_message: String::new(),
+                },
+            );
+        }
+    });
+
+    thread::spawn(move || {
+        let mut cb = take_on_input(&input);
+        thread::sleep(Duration::from_millis(3000));
+        cb("\u{4}"); // quit
+    });
+    make_runtime().block_on(mode.run_async());
+
+    let entries = mode.chat_entries();
+    assert!(
+        entries > 0,
+        "the transcript should still hold what is on screen"
+    );
+    assert!(
+        entries < 4000,
+        "the chat container kept all {entries} entries; a long session must \
+         drop what has scrolled out of the renderer's reach"
+    );
+}
+
+/// Audit #22 / AGENTS.md ("slash-command autocomplete must use the same
+/// registered handlers as command execution"): a command the dispatcher can
+/// actually run must be in the registry, or the editor's autocomplete — which
+/// is built from that registry — will never offer it.
+///
+/// `/help`, `/models`, `/restart` and `/refresh-model-list` were dispatchable
+/// but unregistered, so they were invisible in the dropdown and `/help` did
+/// not even list itself.
+#[test]
+fn every_available_command_is_registered() {
+    use pirust_coding_agent::interactive_mode::{slash_command_available, BUILTIN_SLASH_COMMANDS};
+    let missing: Vec<&str> = [
+        "help",
+        "hotkeys",
+        "session",
+        "model",
+        "models",
+        "resume",
+        "refresh-model-list",
+        "reload-extensions",
+        "quit",
+    ]
+    .into_iter()
+    .filter(|name| {
+        assert!(
+            slash_command_available(name),
+            "{name} should report as available"
+        );
+        !BUILTIN_SLASH_COMMANDS
+            .iter()
+            .any(|(registered, _, _)| registered == name)
+    })
+    .collect();
+    assert!(
+        missing.is_empty(),
+        "dispatchable commands missing from the autocomplete registry: {missing:?}"
+    );
+}
+
+/// The other half of audit #22: a registered command with no handler must say
+/// so where the user chooses it, not only after they run it.
+#[test]
+fn unavailable_commands_are_marked_in_help() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/help");
+    assert!(
+        rendered.contains("unavailable in this session"),
+        "/help should mark commands with no handler, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("✗"),
+        "/help output is information, not an error, got: {rendered:?}"
+    );
+}
+
+/// Ctrl+C must not be swallowed by an open modal.
+///
+/// `run_async` routes input to the model picker / resume picker / approval
+/// prompt *instead of* `TUI::handle_input`, and the global Ctrl+C listener
+/// lives inside the TUI. So while any of those was open, Ctrl+C reached
+/// nothing at all: the turn could not be cancelled and the process could not
+/// be quit. (Ctrl+D is in the same listener, so it was dead too — leaving Esc
+/// as the only way out of a picker, and no way out of the approval prompt.)
+///
+/// Two presses within Pi's 500ms window quit, so this test asserts the loop
+/// exits from inside an open `/model` picker. If it does not, the feeder trips
+/// its own escape hatch and the assertion fails rather than hanging forever.
+#[test]
+fn ctrl_c_is_not_swallowed_by_an_open_model_picker() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let mut mode = rig.mode;
+    let writes = rig.writes;
+    let input = rig.input;
+
+    let exited = Arc::new(AtomicBool::new(false));
+    let used_escape_hatch = Arc::new(AtomicBool::new(false));
+
+    let probe = writes.clone();
+    let exited_feeder = Arc::clone(&exited);
+    let hatch = Arc::clone(&used_escape_hatch);
+    thread::spawn(move || {
+        let mut cb = take_on_input(&input);
+        // Open the picker and confirm it is actually up before pressing keys.
+        cb("/model");
+        thread::sleep(Duration::from_millis(30));
+        cb("\r");
+        assert!(
+            wait_for(&probe, "Select model"),
+            "the /model picker should have opened"
+        );
+
+        // Two Ctrl+C presses inside the 500ms window: cancel, then quit.
+        cb("\u{3}");
+        thread::sleep(Duration::from_millis(50));
+        cb("\u{3}");
+
+        // Give the loop a generous window to exit on its own.
+        for _ in 0..200 {
+            if exited_feeder.load(Ordering::SeqCst) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // It did not: unstick the test the long way so this fails instead of
+        // hanging the suite.
+        hatch.store(true, Ordering::SeqCst);
+        cb("\u{1b}"); // Esc closes the picker
+        thread::sleep(Duration::from_millis(50));
+        cb("\u{4}"); // Ctrl+D quits an empty editor
+    });
+
+    make_runtime().block_on(mode.run_async());
+    exited.store(true, Ordering::SeqCst);
+
+    assert!(
+        !used_escape_hatch.load(Ordering::SeqCst),
+        "double Ctrl+C should quit from inside an open picker; the loop only \
+         exited after Esc + Ctrl+D"
+    );
+}
+
+/// Esc must resolve the approval prompt rather than leave it up.
+///
+/// The agent loop is parked on the approval oneshot, so the prompt has to
+/// answer with *something*; `handle_approval_key` used to ignore every key
+/// that was not `r`/`a`/`d`, so Esc did nothing and there was no way to back
+/// out of the prompt.
+///
+/// Without the fix this scenario deadlocks outright rather than failing: the
+/// prompt stays up, so Ctrl+D stays swallowed by the same modal branch and the
+/// loop never exits. The feeder therefore keeps `d` in reserve as an escape
+/// hatch and the test asserts it was never needed.
+#[test]
+fn escape_denies_a_pending_tool_approval() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    session.ask_approval.store(true, Ordering::SeqCst);
+    let rig = make_rig(Arc::clone(&session));
+    let mut mode = rig.mode;
+    let writes = rig.writes;
+    let input = rig.input;
+
+    let used_escape_hatch = Arc::new(AtomicBool::new(false));
+    let probe = writes.clone();
+    let hatch = Arc::clone(&used_escape_hatch);
+    let decided = Arc::clone(&session.last_decision);
+    thread::spawn(move || {
+        let mut cb = take_on_input(&input);
+        cb("go");
+        thread::sleep(Duration::from_millis(30));
+        cb("\r");
+        assert!(
+            wait_for(&probe, "requires approval"),
+            "the approval prompt should have rendered"
+        );
+        cb("\u{1b}"); // Esc
+
+        // Wait for Esc to resolve the prompt on its own.
+        for _ in 0..200 {
+            if decided.lock().unwrap().is_some() {
+                thread::sleep(Duration::from_millis(100));
+                cb("\u{4}"); // quit
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // It did not: answer with `d` so the run ends and the assertion below
+        // reports the failure instead of the suite hanging.
+        hatch.store(true, Ordering::SeqCst);
+        cb("d");
+        thread::sleep(Duration::from_millis(150));
+        cb("\u{4}");
+    });
+
+    make_runtime().block_on(mode.run_async());
+
+    assert!(
+        !used_escape_hatch.load(Ordering::SeqCst),
+        "Esc left the approval prompt up; only `d` resolved it"
+    );
+    assert_eq!(
+        *session.last_decision.lock().unwrap(),
+        Some(ToolApprovalDecision::Deny),
+        "Esc on the approval prompt should resolve it as Deny"
+    );
+    let rendered = writes.lock().unwrap().clone();
+    assert!(
+        rendered.contains("denied"),
+        "the denial should be reported in the chat, got: {rendered:?}"
     );
 }

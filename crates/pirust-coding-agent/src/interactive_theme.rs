@@ -48,6 +48,10 @@ pub mod dark {
     pub const TOOL_PENDING_BG: &str = "#282832";
     pub const TOOL_SUCCESS_BG: &str = "#283228";
     pub const TOOL_ERROR_BG: &str = "#3c2828";
+    /// `userMessageBg` (dark.json:16, `userMsgBg`) — the box background a
+    /// typed user message renders on, distinguishing it from plain
+    /// (unboxed) assistant text and from the tool-call boxes above.
+    pub const USER_MESSAGE_BG: &str = "#343541";
 }
 
 #[cfg(test)]
