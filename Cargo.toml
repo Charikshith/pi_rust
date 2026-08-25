@@ -18,16 +18,25 @@ license = "MIT"
 rust-version = "1.90"
 
 [profile.release]
-lto = true
-codegen-units = 1
+# Thin LTO (not fat `lto = true`) + parallel codegen units: fat LTO funnels
+# each binary through one single-threaded LLVM module, which is what made a
+# one-line-edit `--release` rebuild of just `pirust-coding-agent` cost ~4min
+# on 8 cores. ThinLTO still does cross-crate inlining/dead-code elimination,
+# but splits it across codegen units, one per core, and loses only a sliver
+# of runtime performance vs fat LTO for a latency-bound TUI like this one
+# (not the compute-bound, tight-inner-loop case fat LTO exists for) — that
+# same one-line-edit rebuild dropped to ~1m20s on the same machine with this
+# profile (`cargo build --release --workspace`, which also relinks the
+# separate `pirust-orchestrator`/`xtask` binaries, costs more; build just
+# `-p pirust-coding-agent` for the `pirust` binary this app ships as).
+lto = "thin"
+codegen-units = 16
 strip = true
 
-# Iteration profile. `release` above is a ship-it profile: fat LTO funnels the
-# whole workspace through one LLVM module and `codegen-units = 1` refuses to
-# parallelise it, so a one-line edit costs ~4min on 8 cores. This profile keeps
-# the optimisation level (the TUI needs real-speed rendering to be worth
-# driving by hand) but drops both, plus `strip`, so the link is incremental and
-# parallel. `--release` stays byte-for-byte what we ship; use this for the
+# Iteration profile. Even ThinLTO still re-links the whole program on every
+# change. This profile drops LTO/`strip` entirely and lowers `opt-level` for
+# our own crates too (see its own comment), so the link is incremental and
+# parallel. `--release` stays the ship-it profile above; use this for the
 # run-it-and-look-at-it loop:
 #
 #     cargo run --profile fast --bin pirust
