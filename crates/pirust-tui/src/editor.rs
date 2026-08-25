@@ -26,10 +26,12 @@
 //!   residuals — `getAutocompleteDebounceMs` still returns the same value the
 //!   TS would, so the *trigger* logic is faithful; only the delay is elided.
 //! - **`tui.requestRender()` is a no-op.** The editor calls
-//!   `this.tui.requestRender()` after autocomplete updates. `Editor` holds a
-//!   `Rc<RefCell<TUI>>`-style reference only for `terminal.rows` and to fire
-//!   the render request; in this wave the render request is elided (the
-//!   caller-driven `TUI::poll()` model means a parent loop re-renders anyway).
+//!   `this.tui.requestRender()` after autocomplete updates. This port has no
+//!   equivalent call — the caller-driven `TUI::poll()` model means a parent
+//!   loop re-renders anyway — so `Editor` only needs `terminal.rows`, read
+//!   through an `Rc<Cell<u16>>` handle (see [`Editor::terminal_rows`]) that
+//!   `TUI` refreshes on every render, rather than a `Rc<RefCell<TUI>>` that
+//!   would deadlock a re-borrow from inside the render pass it's called from.
 //! - **`focused` drives the hardware-cursor marker** exactly like the TS's
 //!   `emitCursorMarker = this.focused`.
 //!
@@ -39,7 +41,7 @@
 //! `escapeCharacterClass`; this port builds the same character classes as
 //! fixed matchers over the UTF-16 slices.
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -52,7 +54,7 @@ use crate::components::select_list::{
 use crate::keybindings::{get_keybindings, Keybinding};
 use crate::keys::{decode_printable_key, matches_key};
 use crate::kill_ring::KillRing;
-use crate::tui::{Component, Focusable, CURSOR_MARKER, TUI};
+use crate::tui::{Component, Focusable, CURSOR_MARKER};
 use crate::undo_stack::UndoStack;
 use crate::utils::{is_cjk_break_char, is_whitespace_char, slice_by_column, visible_width};
 use crate::word_navigation::{find_word_backward, find_word_forward, WordNavigationOptions};
@@ -366,7 +368,7 @@ pub struct EditorOptions {
 pub struct Editor {
     state: EditorState,
     focused: bool,
-    tui: Rc<RefCell<TUI>>,
+    terminal_rows: Rc<Cell<u16>>,
     border_color: crate::components::ColorFn,
     padding_x: usize,
     last_width: usize,
@@ -393,16 +395,12 @@ pub struct Editor {
     pub on_submit: Option<OnTextFnMut>,
     pub on_change: Option<OnTextFnMut>,
     pub disable_submit: bool,
-    /// Cached `terminal_rows` for reads that happen mid-render (when the
-    /// TUI that renders this editor is already mutably borrowed — a
-    /// re-entrant `RefCell::borrow` would panic). See [`Editor::terminal_rows`].
-    cached_terminal_rows: u16,
 }
 
 impl Editor {
     /// `constructor` (editor.ts:345).
     pub fn new(
-        tui: Rc<RefCell<TUI>>,
+        terminal_rows: Rc<Cell<u16>>,
         border_color: crate::components::ColorFn,
         options: EditorOptions,
     ) -> Self {
@@ -415,7 +413,7 @@ impl Editor {
                 cursor_col: 0,
             },
             focused: false,
-            tui,
+            terminal_rows,
             border_color,
             padding_x,
             last_width: 80,
@@ -442,7 +440,6 @@ impl Editor {
             on_submit: None,
             on_change: None,
             disable_submit: false,
-            cached_terminal_rows: 24,
         }
     }
 
@@ -586,24 +583,17 @@ impl Editor {
         }
     }
 
-    /// `getText` (editor.ts:993).
-    /// `terminalRows()` (editor.ts:500,1871) — reads the terminal height
-    /// through the TUI handle. The TUI that renders this editor holds a
-    /// mutable borrow of itself during `render`; a plain `RefCell::borrow`
-    /// here would panic re-entrantly. `try_borrow` with a cached fallback
-    /// keeps the read working (rows don't change mid-render) without
-    /// fighting the borrow checker.
-    pub fn terminal_rows(&mut self) -> u16 {
-        match self.tui.try_borrow() {
-            Ok(tui) => {
-                let rows = tui.terminal_rows();
-                self.cached_terminal_rows = rows;
-                rows
-            }
-            Err(_) => self.cached_terminal_rows,
-        }
+    /// `terminalRows()` (editor.ts:500,1871) — reads the terminal height.
+    /// Backed by a `Cell` shared with `TUI` (see
+    /// [`TUI::terminal_rows_handle`](crate::tui::TUI::terminal_rows_handle))
+    /// rather than a `Rc<RefCell<TUI>>` re-borrow, which would panic: the
+    /// `TUI` that renders this editor is already mutably borrowed for the
+    /// whole render pass this method is called from.
+    pub fn terminal_rows(&self) -> u16 {
+        self.terminal_rows.get()
     }
 
+    /// `getText` (editor.ts:993).
     pub fn get_text(&self) -> String {
         self.state.lines.join("\n")
     }

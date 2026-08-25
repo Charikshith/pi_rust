@@ -156,8 +156,8 @@ fn reexported_components_render_deterministic_output() {
     let terminal = Box::new(MockTerminal {
         writes: writes.clone(),
     });
-    let tui = Rc::new(RefCell::new(TUI::new(terminal, Some(false))));
-    let mut editor = Editor::new(tui, id_fn(), Default::default());
+    let tui = TUI::new(terminal, Some(false));
+    let mut editor = Editor::new(tui.terminal_rows_handle(), id_fn(), Default::default());
     let lines = editor.render(40);
     assert!(!lines.is_empty());
 

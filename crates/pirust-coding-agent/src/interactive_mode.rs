@@ -433,7 +433,7 @@ impl InteractiveMode {
             .add_child(Rc::clone(&chat) as SharedComponent);
 
         let editor = Rc::new(RefCell::new(Editor::new(
-            Rc::clone(&tui),
+            tui.borrow().terminal_rows_handle(),
             Box::new(|s| s.to_string()),
             Default::default(),
         )));

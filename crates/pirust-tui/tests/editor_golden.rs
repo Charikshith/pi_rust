@@ -79,9 +79,9 @@ fn make_editor(width: u16, rows: u16) -> Editor {
         rows,
         writes: RefCell::new(Vec::new()),
     });
-    let tui = Rc::new(RefCell::new(TUI::new(terminal, Some(false))));
+    let tui = TUI::new(terminal, Some(false));
     Editor::new(
-        tui,
+        tui.terminal_rows_handle(),
         Box::new(|s| s.to_string()),
         pirust_tui::editor::EditorOptions::default(),
     )

@@ -63,7 +63,7 @@
 //!   faithfully than a recoverable error type.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -402,6 +402,12 @@ pub struct TUI {
     next_overlay_id: u64,
     overlay_stack: Vec<OverlayStackEntry>,
     overlay_focus_restore: OverlayFocusRestoreState,
+    /// Live terminal row count, readable by a child component (e.g.
+    /// `Editor`) from inside its own `render` even though `TUI` itself is
+    /// already mutably borrowed for the render pass — a plain
+    /// `Rc<RefCell<TUI>>` re-borrow would fail there. Refreshed at the top
+    /// of every [`Self::do_render`].
+    terminal_rows_cell: Rc<Cell<u16>>,
 }
 
 impl TUI {
@@ -411,6 +417,7 @@ impl TUI {
         let default_show_hardware_cursor =
             std::env::var("PI_HARDWARE_CURSOR").as_deref() == Ok("1");
         let default_clear_on_shrink = std::env::var("PI_CLEAR_ON_SHRINK").as_deref() == Ok("1");
+        let terminal_rows_cell = Rc::new(Cell::new(terminal.rows()));
         Self {
             container: Container::new(),
             terminal,
@@ -448,6 +455,7 @@ impl TUI {
             next_overlay_id: 0,
             overlay_stack: Vec::new(),
             overlay_focus_restore: OverlayFocusRestoreState::Inactive,
+            terminal_rows_cell,
         }
     }
 
@@ -532,6 +540,14 @@ impl TUI {
 
     pub fn terminal_rows(&self) -> u16 {
         self.terminal.rows()
+    }
+
+    /// A live handle to the terminal row count, safe for a child component
+    /// to read from inside its own `render` even while this `TUI` is
+    /// already mutably borrowed for that render pass. See
+    /// [`Editor::terminal_rows`](crate::editor::Editor::terminal_rows).
+    pub fn terminal_rows_handle(&self) -> Rc<Cell<u16>> {
+        self.terminal_rows_cell.clone()
     }
 
     pub fn get_show_hardware_cursor(&self) -> bool {
@@ -1736,6 +1752,7 @@ impl TUI {
         }
         let width = self.terminal.columns() as i64;
         let height = self.terminal.rows() as i64;
+        self.terminal_rows_cell.set(height as u16);
         let width_changed = self.previous_width != 0 && self.previous_width != width;
         let height_changed = self.previous_height != 0 && self.previous_height != height;
         let previous_buffer_length = if self.previous_height > 0 {
