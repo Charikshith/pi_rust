@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use pirust_agent_core::harness::types::{SessionHeader, SessionHeaderTag};
 use pirust_coding_agent::interactive_mode::InteractiveSession;
+use pirust_coding_agent::interactive_pickers::SessionEntry;
 use pirust_coding_agent::print_mode::{
     Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession, PromptOptions,
     SessionEventListener, SessionStateView, Subscription, ThrownValue, ToolApprovalDecider,
@@ -88,6 +89,19 @@ struct StatusSession {
     decider: Arc<Mutex<Option<ToolApprovalDecider>>>,
     last_decision: Arc<Mutex<Option<ToolApprovalDecision>>>,
     pub header: Option<SessionHeader>,
+    /// `TuiRuntimeInfo::session_entries` (`print_mode.rs`) — the `/resume`
+    /// picker's rows. Empty by default (the trait's own default), set by
+    /// resume tests that need at least one selectable row.
+    resume_entries: Vec<SessionEntry>,
+    /// How long `prompt` sleeps before resolving, in milliseconds. Zero (the
+    /// default) resolves immediately, as before this field existed. A
+    /// nonzero value holds `active_turn` (`interactive_mode.rs`) `Some` for
+    /// that long — the "mid-turn" window `resume_is_refused_while_a_turn_is_active`
+    /// needs to attempt a resume while a turn is genuinely in flight, without
+    /// the approval-prompt detour (`pending_approval` steals key routing from
+    /// the editor, which would make `/resume` unreachable — see that test's
+    /// own doc comment).
+    prompt_delay_ms: u64,
 }
 
 impl StatusSession {
@@ -106,6 +120,8 @@ impl StatusSession {
                 parent_session: None,
                 metadata: None,
             }),
+            resume_entries: Vec::new(),
+            prompt_delay_ms: 0,
         }
     }
 }
@@ -123,6 +139,9 @@ impl PrintModeSession for StatusSession {
         Subscription::new(|| {})
     }
     async fn prompt(&self, _text: &str, _o: Option<PromptOptions>) -> Result<(), ThrownValue> {
+        if self.prompt_delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(self.prompt_delay_ms)).await;
+        }
         if self.ask_approval.load(Ordering::SeqCst) {
             let request = ToolApprovalRequest {
                 tool_name: "bash".to_string(),
@@ -169,6 +188,9 @@ impl TuiRuntimeInfo for StatusSession {
             cost: 0.0042,
             tools_enabled: true,
         }
+    }
+    fn session_entries(&self) -> Vec<SessionEntry> {
+        self.resume_entries.clone()
     }
 }
 
@@ -626,6 +648,15 @@ fn every_available_command_is_registered() {
         "refresh-model-list",
         "reload-extensions",
         "quit",
+        "new",
+        "clone",
+        "fork",
+        "import",
+        "tree",
+        "settings",
+        "scoped-models",
+        "restart",
+        "share",
     ]
     .into_iter()
     .filter(|name| {
@@ -658,6 +689,185 @@ fn unavailable_commands_are_marked_in_help() {
     assert!(
         !rendered.contains("✗"),
         "/help output is information, not an error, got: {rendered:?}"
+    );
+}
+
+/// `/fork` with no argument must refuse rather than guess a fork point:
+/// `interactive_mode.rs`'s `run_fork` has no notion of a "current" or "last"
+/// entry id to fall back to (that would be a silent, possibly-wrong guess),
+/// so an empty/missing argument is rejected before ever touching the session.
+#[test]
+fn fork_without_argument_refuses_instead_of_guessing() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/fork");
+    assert!(
+        rendered.contains("Usage: /fork <entry-id>"),
+        "/fork with no argument should refuse instead of guessing a fork point, got: {rendered:?}"
+    );
+}
+
+/// `/import` with no argument must refuse the same way: there is no sensible
+/// default path to import from.
+#[test]
+fn import_without_argument_refuses() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/import");
+    assert!(
+        rendered.contains("Usage: /import <path>"),
+        "/import with no argument should refuse instead of guessing a path, got: {rendered:?}"
+    );
+}
+
+/// `/tree` against a session with no fork points must say so as a plain
+/// notice, not silently open an empty picker and not render as an error.
+/// `StatusSession` never overrides `TuiRuntimeInfo::branch_entries`, so the
+/// trait default (an empty list, see `print_mode.rs`) applies here — this is
+/// the honest "no branches" case, not a broken one.
+#[test]
+fn tree_with_no_branches_says_so() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/tree");
+    assert!(
+        rendered.contains("No branches — this session has no fork points yet"),
+        "/tree with no branches should say so honestly, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("✗"),
+        "an empty branch list is not an error, got: {rendered:?}"
+    );
+}
+
+/// "No fake success": `StatusSession` does not override `start_new_session`,
+/// so `/new` hits `PrintModeSession`'s default body, which returns `Err`
+/// (`print_mode.rs`). The TUI must render that as an error — never a
+/// "Started a new session." notice — no matter how plausible a success
+/// message would look.
+#[test]
+fn new_session_default_err_renders_as_error_not_success() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/new");
+    assert!(
+        rendered.contains("Could not start a new session"),
+        "a stub session's default Err must be surfaced as an error, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Started a new session."),
+        "no fake success text may appear when start_new_session fails, got: {rendered:?}"
+    );
+}
+
+/// In-place `/resume`: selecting the one row in the picker must not fabricate
+/// success. `StatusSession` does not override `PrintModeSession::
+/// switch_to_session_file`, so the trait default (`print_mode.rs`) returns
+/// `Err`, and `resume_to` (`interactive_mode.rs`) must surface that as an
+/// error — never a "Resumed session from ..." notice.
+#[test]
+fn resume_picker_selection_with_failing_switch_renders_error_not_success() {
+    let mut session = StatusSession::with_cwd("/proj", "s1");
+    session.resume_entries = vec![SessionEntry {
+        id: "session-x".to_string(),
+        title: "Some session".to_string(),
+        cwd: "/proj".to_string(),
+        modified: None,
+        model: None,
+        path: "/sessions/x.jsonl".to_string(),
+    }];
+    let session = Arc::new(session);
+    let rig = make_rig(session);
+    let mut mode = rig.mode;
+    let writes = rig.writes;
+    let input = rig.input;
+
+    let probe = writes.clone();
+    thread::spawn(move || {
+        let mut cb = take_on_input(&input);
+        cb("/resume");
+        thread::sleep(Duration::from_millis(30));
+        cb("\r"); // submit -> opens the picker
+        assert!(
+            wait_for(&probe, "Resume a session"),
+            "the /resume picker should have opened"
+        );
+        cb("\r"); // select the only row
+        thread::sleep(Duration::from_millis(150));
+        cb("\u{4}");
+    });
+
+    make_runtime().block_on(mode.run_async());
+    let rendered = writes.lock().unwrap().clone();
+    assert!(
+        rendered.contains("Could not resume session"),
+        "a stub session's default Err must be surfaced as an error, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Resumed session from"),
+        "no fake success text may appear when switch_to_session_file fails, got: {rendered:?}"
+    );
+}
+
+/// Guard against swapping the live session out from under a running turn:
+/// `resume_to` (`interactive_mode.rs`) is only reached past
+/// `refuse_while_turn_active`, the same guard `/fork`/`/import`/`/new` use.
+///
+/// This cannot reuse the tool-approval flow (`ask_approval`/`decider`) to
+/// hold the turn open: while `pending_approval` is set, key routing goes to
+/// `handle_approval_key` instead of the editor (`interactive_mode.rs`'s input
+/// router), so `/resume` could never be typed. Instead `prompt_delay_ms`
+/// holds `active_turn` `Some` for a plain turn with no approval involved,
+/// leaving the editor reachable while it runs — slash commands dispatch even
+/// mid-turn (`dispatch_command`'s own doc comment), so `/resume` opens the
+/// picker fine; only the picker's `Selected` action is expected to refuse.
+#[test]
+fn resume_is_refused_while_a_turn_is_active() {
+    let mut session = StatusSession::with_cwd("/proj", "s1");
+    session.resume_entries = vec![SessionEntry {
+        id: "session-x".to_string(),
+        title: "Some session".to_string(),
+        cwd: "/proj".to_string(),
+        modified: None,
+        model: None,
+        path: "/sessions/x.jsonl".to_string(),
+    }];
+    session.prompt_delay_ms = 300;
+    let session = Arc::new(session);
+    let rig = make_rig(session);
+    let mut mode = rig.mode;
+    let writes = rig.writes;
+    let input = rig.input;
+
+    let probe = writes.clone();
+    thread::spawn(move || {
+        let mut cb = take_on_input(&input);
+        // Start a turn that stays active for `prompt_delay_ms`.
+        cb("go");
+        cb("\r");
+        thread::sleep(Duration::from_millis(60));
+        // Try to resume while it is still running.
+        cb("/resume");
+        thread::sleep(Duration::from_millis(30));
+        cb("\r"); // submit -> opens the picker, even mid-turn
+        assert!(
+            wait_for(&probe, "Resume a session"),
+            "the /resume picker should open even while a turn is active"
+        );
+        cb("\r"); // select the only row -> should be refused, not applied
+        thread::sleep(Duration::from_millis(300));
+        cb("\u{4}");
+    });
+
+    make_runtime().block_on(mode.run_async());
+    let rendered = writes.lock().unwrap().clone();
+    assert!(
+        rendered.contains("Cannot resume a session while a request is in progress"),
+        "resume must be refused while a turn is active, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Resumed session from"),
+        "no fake success may appear when resume is refused mid-turn, got: {rendered:?}"
     );
 }
 
@@ -795,5 +1005,162 @@ fn escape_denies_a_pending_tool_approval() {
     assert!(
         rendered.contains("denied"),
         "the denial should be reported in the chat, got: {rendered:?}"
+    );
+}
+
+/// `/settings` used to always render a fixed placeholder error ("...needs the
+/// SettingsManager, which the TUI does not hold") because `InteractiveMode` had nowhere
+/// to keep one. `Self::settings_manager` (`interactive_mode.rs`) now builds and caches an
+/// independent `SettingsManager` for exactly this command, and `CommandOutcome::OpenSettings`
+/// no longer renders the stale placeholder.
+///
+/// Safe to run for real: `settings_summary` only reads (`SettingsManager::create` /
+/// `FileSettingsStorage::with_lock` never writes on a load — see `settings.rs:1224-1260`),
+/// so this cannot mutate any settings file on the machine running the test, whatever it
+/// finds there.
+#[test]
+fn settings_renders_a_real_summary_not_the_placeholder() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/settings");
+    assert!(
+        rendered.contains("Settings (text view"),
+        "/settings should render the real summary, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("does not hold"),
+        "/settings should no longer report the placeholder error, got: {rendered:?}"
+    );
+}
+
+/// `/scoped-models` with no argument is the read side of the same command
+/// (`interactive_commands::scoped_models_summary`) — also read-only, so also safe to run
+/// for real. Accepts any of the three summary shapes `scoped_models_summary` can render
+/// ("no scope set" / "scoped to zero" / an explicit list) since which one appears depends
+/// on whatever `enabledModels` the machine running this test happens to have on disk.
+#[test]
+fn scoped_models_with_no_argument_renders_a_summary() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/scoped-models");
+    assert!(
+        rendered.contains("Enabled models"),
+        "/scoped-models with no argument should render the scope summary, got: {rendered:?}"
+    );
+}
+
+/// `/scoped-models <model>` (the write side, `toggle_scoped_model`) is deliberately NOT
+/// exercised here. It ends in `SettingsManager::set_global_field` → `save()` — a real
+/// write to the *global* settings file at whatever path `ConfigEnv::from_process_env`
+/// resolves on the machine running this test. There is no in-process way to redirect
+/// that path: this crate is `#![forbid(unsafe_code)]`, and `std::env::set_var` (the only
+/// way to override the env var `ConfigEnv` reads) is `unsafe`. Rather than risk mutating
+/// the developer's real `~/.pirust` settings, this test instead exercises the error
+/// surface `apply_outcome` renders when `Self::settings_manager` cannot be built at all
+/// (no session header, hence no cwd) — proving a real `CommandOutcome`-shaped error from
+/// this command reaches the screen intact, without ever reaching the write. The genuine
+/// per-argument toggle/write path remains untested for the reason above.
+#[test]
+fn scoped_models_with_an_argument_renders_an_actionable_error_when_settings_are_unreachable() {
+    let mut session = StatusSession::with_cwd("/proj", "s1");
+    session.header = None;
+    let rig = make_rig(Arc::new(session));
+    let rendered = run_async_rig(rig, "/scoped-models anthropic/claude-3-5-sonnet");
+    assert!(
+        rendered.contains("need a session cwd"),
+        "/scoped-models should surface the real settings error, got: {rendered:?}"
+    );
+}
+
+/// `/restart` — the last two dead slash commands were `/share` and this one.
+///
+/// This test only drives `InteractiveMode`, never `main.rs`, so it can never actually
+/// spawn a re-exec'd process: `restart_process` (the only thing that calls
+/// `std::process::Command::spawn`) lives in `main.rs::run_interactive_mode`, is not
+/// exposed to `InteractiveMode` or this test, and only ever runs after `run_async`
+/// returns in the real binary. What this test can and does check is the one contract
+/// `main.rs` actually depends on: `/restart` flips `restart_requested()` and quits the
+/// loop through the exact same path `/quit` uses, with no fake "restarted" success
+/// rendered anywhere along the way (there is nothing to promise success of yet — the
+/// process has not even asked to restart from `main.rs`'s point of view until this loop
+/// exits).
+#[test]
+fn restart_sets_the_flag_and_quits_without_spawning_anything() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let mut mode = rig.mode;
+    let writes = rig.writes;
+    let input = rig.input;
+
+    thread::spawn(move || {
+        let mut cb = take_on_input(&input);
+        cb("/restart");
+        thread::sleep(Duration::from_millis(30));
+        cb("\r");
+        // No Ctrl+D here: `/restart` must quit the loop on its own, exactly like `/quit`
+        // does, with no further input required. If it did not, this call would hang
+        // instead of failing cleanly — the same tradeoff every other quit-path test in
+        // this file accepts, since `InteractiveMode` has no bounded "did the loop exit"
+        // primitive to poll instead.
+    });
+
+    make_runtime().block_on(mode.run_async());
+
+    assert!(
+        mode.restart_requested(),
+        "/restart should set restart_requested so main.rs knows to re-exec"
+    );
+    let rendered = writes.lock().unwrap().clone();
+    // Not `!rendered.contains("restart")`: the editor legitimately echoes the typed
+    // `/restart` text back to the terminal before it is submitted, so that substring is
+    // expected to appear. What must never appear is a *claim* that the restart already
+    // happened — `run_restart` renders no notice at all (see its own doc comment for
+    // why), so nothing past-tense like this should show up.
+    assert!(
+        !rendered.contains("Restarting")
+            && !rendered.contains("Restarted")
+            && !rendered.contains("restart complete"),
+        "no restart notice should render \u{2014} interactive_mode.rs::run_restart stays \
+         silent by design, since only main.rs::restart_process (which this test never \
+         reaches) can honestly report whether a restart happened, got: {rendered:?}"
+    );
+}
+
+/// `/share` alone must never touch `gh` or publish anything: it only explains what
+/// `/share confirm` would do. See `interactive_commands::share_confirmation_notice`'s doc
+/// comment for why this is the confirmation gate chosen over reusing the `r`/`a`/`d`
+/// tool-approval prompt shape.
+#[test]
+fn share_without_confirm_only_explains_and_never_calls_gh() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/share");
+    assert!(
+        rendered.contains("/share confirm"),
+        "/share alone should name the confirmation command, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Shared as a secret gist"),
+        "a bare /share must never report a publish that never happened, got: {rendered:?}"
+    );
+}
+
+/// `/share confirm` against an empty transcript must refuse before ever shelling out to
+/// `gh`. `StatusSession::state()` always returns `Vec::new()` (this stub never tracks
+/// message history), so this is the one `/share confirm` path this test file can
+/// exercise safely without a real `gh` invocation: `run_gist_share`'s empty-session guard
+/// returns before `Command::new("gh")` runs, so there is no way for this test to spawn a
+/// process or touch the network. The path that actually calls `gh` is exercised directly
+/// against `interactive_commands::run_gist_share` in `interactive_commands.rs`'s own test
+/// module instead (the `gh`-not-installed case, which this machine can exercise for
+/// real) — see that module's `run_gist_share_reports_actionable_error_when_gh_is_absent`.
+#[test]
+fn share_confirm_on_an_empty_session_refuses_before_touching_gh() {
+    let session = Arc::new(StatusSession::with_cwd("/proj", "s1"));
+    let rig = make_rig(session);
+    let rendered = run_async_rig(rig, "/share confirm");
+    assert!(
+        rendered.contains("Nothing to share"),
+        "/share confirm with no messages should refuse, got: {rendered:?}"
     );
 }

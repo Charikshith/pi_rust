@@ -55,7 +55,7 @@ use crate::interactive_debug::{DebugLog, DebugPanel, RequestId, TurnTimings};
 use crate::interactive_diff::{parse_file_change, DiffPreview};
 use crate::interactive_markdown::MarkdownText;
 use crate::interactive_pickers::{
-    ModelEntry, ModelPicker as PickerModelPicker, PickerAction, SessionPicker,
+    BranchPicker, ModelEntry, ModelPicker as PickerModelPicker, PickerAction, SessionPicker,
 };
 use crate::interactive_theme::{self, dark};
 use crate::interactive_thinking::{thinking_text, ThinkingComponent, ThinkingRegistry};
@@ -63,6 +63,7 @@ use crate::print_mode::{
     AgentSessionEvent, PrintModeSession, ToolApprovalDecision, ToolApprovalRequest, TuiRuntimeInfo,
     TuiRuntimeStatus,
 };
+use crate::settings::{SettingsManager, SettingsManagerCreateOptions};
 
 /// A session the TUI drives: the [`PrintModeSession`] turn API plus the
 /// [`TuiRuntimeInfo`] status projection. Every real session (`SingleTurnSession`)
@@ -197,6 +198,12 @@ pub struct InteractiveMode {
     pending_prompts: VecDeque<String>,
     /// Set when the user quits (Ctrl+D on an empty editor).
     quit: Arc<AtomicBool>,
+    /// Set by `/restart` alongside `quit` (see [`Self::run_restart`]). A plain `bool`,
+    /// not an `Arc<AtomicBool>` like `quit`: only `dispatch_command` ever writes it and
+    /// only `main.rs::run_interactive_mode` ever reads it, and both happen on this same
+    /// thread, strictly before and after `run_async`'s single `.await` — no other thread
+    /// or task touches this field, so there is nothing for an atomic to protect here.
+    restart_requested: bool,
     /// Set by Ctrl+C/Esc and consumed by the async turn loop.
     cancel_requested: Arc<AtomicBool>,
     /// When Ctrl+C was last pressed, shared with the TUI's global input
@@ -211,6 +218,14 @@ pub struct InteractiveMode {
     active_turn: Option<JoinHandle<Result<(), crate::print_mode::ThrownValue>>>,
     /// The turn state machine (plan.md step 2).
     turn_state: TurnState,
+    /// Whether `active_turn` currently holds a `/compact` task rather than a
+    /// prompt turn. Read-and-reset at the join site to route the completion
+    /// to `finish_compaction` instead of `finish_turn` — the two cannot
+    /// share a handler because `finish_turn` unconditionally re-marks and
+    /// logs `self.timings`, which is never reset to `None` after the first
+    /// real prompt turn (see `finish_compaction`'s doc comment for why that
+    /// makes reuse a real bug, not just noise).
+    is_compacting: bool,
     /// Monotonic turn counter — attached to events so stale events from a
     /// cancelled/completed turn cannot bleed into the next one.
     turn_id: u64,
@@ -273,6 +288,8 @@ pub struct InteractiveMode {
     model_picker: Option<Rc<RefCell<PickerModelPicker>>>,
     /// The session picker, `Some` while it is open.
     resume_picker: Option<Rc<RefCell<SessionPicker>>>,
+    /// The `/tree` branch picker, `Some` while it is open.
+    branch_picker: Option<Rc<RefCell<BranchPicker>>>,
     /// The first-run block, dismissed on the first submitted prompt so it
     /// stops occupying rows once there is a conversation to read.
     welcome: Rc<RefCell<crate::interactive_welcome::WelcomeScreen>>,
@@ -292,6 +309,23 @@ pub struct InteractiveMode {
     /// `EditorStatusBand`), directly above the editor, rather than floating
     /// as an independent centered overlay disconnected from the input box.
     modal_text: Rc<RefCell<Modal>>,
+    /// The TUI's own `SettingsManager`, for `/settings` and `/scoped-models` only.
+    ///
+    /// `main.rs` holds a *different* `SettingsManager` as an immutable `Arc<SettingsManager>`,
+    /// and that same `Arc` is moved by value into the agent's long-lived `stream_fn` closure
+    /// at construction — so by the time `InteractiveMode` exists there are already ≥2 `Arc`
+    /// owners, `Arc::get_mut` can never succeed, and `Arc<SettingsManager>` has no interior
+    /// mutability. Widening that shared type to something mutable would ripple into `sdk.rs`
+    /// and agent construction, neither of which this module owns or should touch for a text
+    /// settings view. So the TUI builds and keeps an independent `SettingsManager` of its
+    /// own — see [`Self::settings_manager`] — reading and writing the same on-disk files.
+    /// **Do not "simplify" this back into a shared reference to the `main.rs` copy**: no such
+    /// mutable reference can exist while the agent closure is alive.
+    ///
+    /// `None` until the first `/settings`/`/scoped-models` call ([`Self::settings_manager`]
+    /// builds and caches it there); `main.rs`/`sdk.rs` never construct one for this field —
+    /// see `InteractiveMode::new`.
+    settings_manager: Option<SettingsManager>,
 }
 
 /// `ToolExecutionComponent` (tool-execution.ts) — a simplified but faithful
@@ -782,12 +816,14 @@ impl InteractiveMode {
             loop_iterations: 0,
             pending_prompts: VecDeque::new(),
             quit,
+            restart_requested: false,
             cancel_requested,
             last_ctrl_c,
             session,
             runtime,
             active_turn: None,
             turn_state: TurnState::Idle,
+            is_compacting: false,
             turn_id: 0,
             streaming_turn: None,
             subscription: Some(subscription),
@@ -808,9 +844,13 @@ impl InteractiveMode {
             pending_approval: None,
             model_picker: None,
             resume_picker: None,
+            branch_picker: None,
             welcome,
             model_entries: Vec::new(),
             modal_text,
+            // Built lazily on first `/settings`/`/scoped-models` — see the field's doc
+            // comment and `Self::settings_manager`. `new` itself does no settings I/O.
+            settings_manager: None,
         }
     }
 
@@ -861,6 +901,7 @@ impl InteractiveMode {
                 // with no way to cancel the turn or quit from inside one.
                 if (self.model_picker.is_some()
                     || self.resume_picker.is_some()
+                    || self.branch_picker.is_some()
                     || self.pending_approval.is_some())
                     && pirust_tui::keys::matches_key(&data, "ctrl+c")
                 {
@@ -872,6 +913,8 @@ impl InteractiveMode {
                     self.handle_model_picker_key(&data);
                 } else if self.resume_picker.is_some() {
                     self.handle_resume_picker_key(&data);
+                } else if self.branch_picker.is_some() {
+                    self.handle_branch_picker_key(&data);
                 } else if self.pending_approval.is_some() {
                     // While a tool awaits approval, a single decision key routes to
                     // the approval instead of the editor/loop.
@@ -941,28 +984,55 @@ impl InteractiveMode {
                 did_work = true;
                 let handle = self.active_turn.take().unwrap();
                 let cancelled = self.turn_state == TurnState::Cancelling;
+                // Read-and-reset: `active_turn` may hold either a prompt
+                // turn or a `/compact` task (`run_compact`), and the two
+                // must not share a completion handler — see
+                // `finish_compaction`'s doc comment for why reusing
+                // `finish_turn` here would mislabel stale timings.
+                let compacting = self.is_compacting;
+                self.is_compacting = false;
                 match handle.await {
                     Ok(Ok(())) => {
-                        self.finish_turn(if cancelled {
+                        let outcome = if cancelled {
                             TurnState::Cancelled
                         } else {
                             TurnState::Completed
-                        });
+                        };
+                        if compacting {
+                            self.finish_compaction(outcome);
+                        } else {
+                            self.finish_turn(outcome);
+                        }
                     }
                     Ok(Err(error)) => {
-                        self.finish_turn(TurnState::Failed);
-                        if !cancelled {
-                            self.show_error(error.console_message());
+                        if compacting {
+                            self.finish_compaction(TurnState::Failed);
+                            // No show_error: `SingleTurnSession::compact`
+                            // already emitted CompactionEnd { aborted: true,
+                            // .. } before returning this Err, and
+                            // render_event's CompactionEnd handling already
+                            // surfaces the failure — calling show_error here
+                            // too would duplicate the notice.
                         } else {
-                            self.show_error("Request cancelled");
+                            self.finish_turn(TurnState::Failed);
+                            if !cancelled {
+                                self.show_error(error.console_message());
+                            } else {
+                                self.show_error("Request cancelled");
+                            }
                         }
                     }
                     Err(_) => {
-                        self.finish_turn(if cancelled {
+                        let outcome = if cancelled {
                             TurnState::Cancelled
                         } else {
                             TurnState::Failed
-                        });
+                        };
+                        if compacting {
+                            self.finish_compaction(outcome);
+                        } else {
+                            self.finish_turn(outcome);
+                        }
                         if cancelled {
                             self.show_error("Request cancelled");
                         }
@@ -1142,6 +1212,28 @@ impl InteractiveMode {
         self.repaint();
     }
 
+    /// Finish a `/compact` task held in `active_turn`.
+    ///
+    /// Deliberately NOT `finish_turn`: a compaction task streams nothing (no
+    /// `MessageStart`/thinking/tool events), so there is no streaming state
+    /// or pending tool/diff/approval state to clear, and — the actual bug
+    /// this avoids — `self.timings` is only ever set in `start_turn` and is
+    /// never reset to `None` afterward (grep confirms exactly one
+    /// `self.timings = ` assignment in this file). Once any real prompt turn
+    /// has completed, `finish_turn`'s timings branch would still be `Some`
+    /// on every later call; reusing it here would re-log and re-display a
+    /// stale, unrelated "elapsed time" summary mislabeled as this
+    /// compaction's own timing. The join site's own notice for what actually
+    /// happened comes from `render_event`'s `CompactionEnd` handling, driven
+    /// by the event `SingleTurnSession::compact` emits — this method only
+    /// clears turn bookkeeping.
+    fn finish_compaction(&mut self, outcome: TurnState) {
+        self.active_turn = None;
+        self.turn_state = outcome;
+        self.refresh_status();
+        self.repaint();
+    }
+
     /// Append one line to the bounded debug log.
     ///
     /// Swallows a poisoned mutex rather than propagating it: the log is
@@ -1237,9 +1329,12 @@ impl InteractiveMode {
             "models" => self.show_models_list(),
             "resume" => self.open_resume_picker(),
             "compact" => self.run_compact(),
-            "restart" | "new" => self.show_error(
-                "/restart is not available in this session — start a new `pirust` process",
-            ),
+            "new" => self.run_new_session(),
+            "clone" => self.run_clone_session(),
+            "fork" => self.run_fork(arg),
+            "import" => self.run_import(arg),
+            "tree" => self.open_branch_picker(),
+            "restart" => self.run_restart(),
             "refresh-model-list" => self.refresh_models(),
             "reload-extensions" => self.reload_extensions(),
             "debug" => self.toggle_debug_panel(),
@@ -1248,6 +1343,9 @@ impl InteractiveMode {
             "copy" => self.run_copy(),
             "trust" => self.run_trust(arg),
             "changelog" => self.run_changelog(arg),
+            "settings" => self.run_settings(),
+            "scoped-models" => self.run_scoped_models(arg),
+            "share" => self.run_share(arg),
             "quit" => {
                 self.quit.store(true, Ordering::Relaxed);
             }
@@ -1362,9 +1460,163 @@ impl InteractiveMode {
         }
     }
 
-    /// `/compact` — run the harness compaction seam.
+    /// `/compact` — run the harness compaction seam
+    /// (`SingleTurnSession::compact`, `runtime_host.rs`) as a spawned task,
+    /// reusing `active_turn`/`TurnState` so a compaction and a prompt turn
+    /// can never run concurrently.
+    ///
+    /// Slash commands normally dispatch even mid-turn — `dispatch_command`'s
+    /// own comment explains why: they're UI-local and instant, so only
+    /// prompts queue. A `/compact` racing a live prompt turn is not one of
+    /// those safe-to-run-mid-turn commands: both sides read and rewrite
+    /// `Agent`'s message list (`Agent::messages`/`set_messages`,
+    /// agent.rs:345,360), so this guards explicitly rather than inheriting
+    /// the generic mid-turn dispatch behaviour.
     fn run_compact(&mut self) {
-        self.show_error("/compact is not available in this session (manual compaction is not wired to the agent loop)");
+        if self.active_turn.is_some() {
+            self.show_error(
+                "Cannot compact while a request is in progress; try again once it finishes.",
+            );
+            return;
+        }
+        self.turn_state = TurnState::Running;
+        self.is_compacting = true;
+        self.refresh_status();
+        self.repaint();
+
+        let session = Arc::clone(&self.session);
+        self.active_turn = Some(self.runtime.spawn(async move {
+            session
+                .compact(crate::print_mode::CompactionReason::Manual)
+                .await
+                .map_err(crate::print_mode::ThrownValue::Error)
+        }));
+    }
+
+    /// Guard shared by every session-mutation command below (`/new`, `/clone`,
+    /// `/fork`, `/import`, and the branch picker's `Selected` action): each of
+    /// their real implementations is expected to call `Agent::set_messages`
+    /// (`agent.rs:360`), the same call a live turn's `prompt()` future is
+    /// concurrently reading/writing — the identical hazard `run_compact`
+    /// guards against above, for the identical reason. Returns `true` if the
+    /// caller already reported the refusal and should stop.
+    fn refuse_while_turn_active(&mut self, verb: &str) -> bool {
+        if self.active_turn.is_some() {
+            self.show_error(format!(
+                "Cannot {verb} while a request is in progress; try again once it finishes."
+            ));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear the on-screen chat and per-turn state after a command that
+    /// points the live session at different content than what is currently
+    /// rendered (`/new`, `/fork`, `/import`, in-place `/resume`, and the
+    /// branch picker's `Selected` action).
+    ///
+    /// `/clone` does NOT call this: it branches at the *current* leaf
+    /// (`PrintModeSession::clone_session`'s doc comment), so the transcript
+    /// already on screen is exactly what the new file holds — nothing to
+    /// invalidate.
+    ///
+    /// This does not replay the new/changed session's own history back into
+    /// the chat: nothing in this crate renders a batch `Vec<AgentMessage>`
+    /// into chat components — the container is built up incrementally from
+    /// live `AgentSessionEvent`s as a turn streams (`render_event`). An empty
+    /// transcript is therefore the honest result of a session swap; a stale
+    /// or fabricated one is not.
+    fn reset_transcript_view(&mut self) {
+        self.chat.borrow_mut().clear();
+        self.pending_prompts.clear();
+        self.finish_turn(TurnState::Idle);
+    }
+
+    /// `/new` — discard the transcript and start a fresh, empty session in
+    /// place (`PrintModeSession::start_new_session`, `print_mode.rs:993`).
+    fn run_new_session(&mut self) {
+        if self.refuse_while_turn_active("start a new session") {
+            return;
+        }
+        match self.session.start_new_session() {
+            Ok(()) => {
+                self.reset_transcript_view();
+                self.show_notice("Started a new session.");
+            }
+            Err(error) => self.show_error(format!("Could not start a new session: {error}")),
+        }
+    }
+
+    /// `/clone` — duplicate the session at its current position into a new
+    /// session file, and switch the live session to it
+    /// (`PrintModeSession::clone_session`, `print_mode.rs:1022`).
+    fn run_clone_session(&mut self) {
+        if self.refuse_while_turn_active("clone the session") {
+            return;
+        }
+        match self.session.clone_session() {
+            Ok(Some(path)) => self.show_notice(format!("Cloned session to {path}")),
+            Ok(None) => self.show_notice("Cloned session (in-memory; no file was written)"),
+            Err(error) => self.show_error(format!("Could not clone the session: {error}")),
+        }
+    }
+
+    /// `/fork <entry-id>` — branch a new session off an earlier point in this
+    /// session's history and switch the live session to it
+    /// (`PrintModeSession::fork_from`, `print_mode.rs:1052`). Requires an
+    /// explicit entry id: guessing a fork point is worse than refusing it —
+    /// `/tree` is what lists the ids that are valid to fork from.
+    fn run_fork(&mut self, arg: Option<&str>) {
+        let Some(entry_id) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            self.show_error(
+                "Usage: /fork <entry-id> — /tree lists the entry ids you can fork from",
+            );
+            return;
+        };
+        if self.refuse_while_turn_active("fork the session") {
+            return;
+        }
+        self.fork_to(entry_id);
+    }
+
+    /// Shared by [`Self::run_fork`] and [`Self::handle_branch_picker_key`]:
+    /// call `PrintModeSession::fork_from`, reset the transcript view on
+    /// success (the branched entries are not replayed — see
+    /// [`Self::reset_transcript_view`]), and report the outcome.
+    fn fork_to(&mut self, entry_id: &str) {
+        match self.session.fork_from(entry_id) {
+            Ok(Some(path)) => {
+                self.reset_transcript_view();
+                self.show_notice(format!("Forked session to {path}"));
+            }
+            Ok(None) => {
+                self.reset_transcript_view();
+                self.show_notice("Forked session (in-memory; no file was written)");
+            }
+            Err(error) => self.show_error(format!("Could not fork from {entry_id}: {error}")),
+        }
+    }
+
+    /// `/import <path>` — load a different session file into the live
+    /// session (`PrintModeSession::switch_to_session_file`,
+    /// `print_mode.rs:1086`). Requires the path; there is no default file to
+    /// guess.
+    fn run_import(&mut self, arg: Option<&str>) {
+        let Some(path) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            self.show_error("Usage: /import <path>");
+            return;
+        };
+        if self.refuse_while_turn_active("import a session") {
+            return;
+        }
+        match self.session.switch_to_session_file(path) {
+            Ok(()) => {
+                self.reset_transcript_view();
+                self.show_notice(format!("Imported session from {path}"));
+            }
+            Err(error) => self.show_error(format!("Could not import {path}: {error}")),
+        }
     }
 
     /// `/refresh-model-list` — re-read the runtime's model status.
@@ -1382,9 +1634,13 @@ impl InteractiveMode {
             CommandOutcome::Quit => self.quit.store(true, Ordering::Relaxed),
             CommandOutcome::OpenModelPicker => self.open_model_picker(),
             CommandOutcome::OpenSessionPicker => self.open_resume_picker(),
-            CommandOutcome::OpenSettings => {
-                self.show_error("/settings needs the SettingsManager, which the TUI does not hold")
-            }
+            // No `interactive_commands` function actually returns `OpenSettings` today —
+            // `open_settings` returns `Notice(settings_summary(..))` directly (see
+            // `Self::run_settings`) — but the arm must still be honest, not the old
+            // "the TUI does not hold a SettingsManager" placeholder, which stopped being
+            // true once `Self::settings_manager` was added. If anything ever does
+            // construct this variant, route it through the same real path `/settings` uses.
+            CommandOutcome::OpenSettings => self.run_settings(),
             CommandOutcome::ToggleDebug => self.toggle_debug_panel(),
             // OSC 52: written straight to the terminal, not into the
             // transcript — it is a control sequence, not text to display.
@@ -1412,6 +1668,59 @@ impl InteractiveMode {
     fn run_copy(&mut self) {
         let state = self.session.state();
         let outcome = crate::interactive_commands::copy_last_message(&state.messages);
+        self.apply_outcome(outcome);
+    }
+
+    /// `/restart` — request a re-exec of the whole `pirust` process.
+    ///
+    /// Does **not** call `std::process::Command::spawn` itself. It only flips
+    /// `restart_requested` and then quits through the *exact* path `/quit` already uses
+    /// (`self.quit.store(true, ..)`, the `"quit"` arm above) — reusing that path is the
+    /// point, not an implementation detail: it is what guarantees `run_async`'s normal
+    /// exit, `Drop`, and `TUI::stop` (which restores the terminal out of raw mode) all
+    /// run before anything re-execs. The actual `Command::new(current_exe).spawn()` lives
+    /// one layer up, in `main.rs::run_interactive_mode`, strictly *after* `run_async`
+    /// returns. Doing it here instead — synchronously, mid-keystroke-handling, with the
+    /// terminal still in raw mode and the TUI still holding the alternate screen — would
+    /// start a second process fighting the first over the same console, which is a wedged
+    /// terminal, not a restart. See `run_interactive_mode`'s doc comment for the rest of
+    /// this seam (argv round-trip, spawn-vs-wait, error reporting).
+    fn run_restart(&mut self) {
+        // No `show_notice` here, deliberately: `/quit`'s own arm prints nothing either,
+        // because anything drawn into the chat container now would be wiped the instant
+        // `TUI::stop` leaves the alternate screen a few iterations later (the same fact
+        // `run_setup_help_screen`'s doc comment in `main.rs` calls out for its own
+        // post-teardown `eprintln!`). `main.rs::run_interactive_mode` is where a restart
+        // failure gets reported, specifically because stderr survives past teardown and a
+        // chat notice would not.
+        self.restart_requested = true;
+        self.quit.store(true, Ordering::Relaxed);
+    }
+
+    /// `/share [confirm]` — publish the transcript as a secret GitHub gist via `gh gist
+    /// create` (no HTTP client dependency needed — see
+    /// `interactive_commands::run_gist_share`'s doc comment).
+    ///
+    /// A bare `/share` never calls `gh`: it publishes the *entire* conversation,
+    /// including anything the model quoted from the user's files, to a URL anyone who
+    /// gets it can read (secret gists are unlisted, not access-controlled). That is worth
+    /// a confirmation step, so `/share` alone only explains what would happen and names
+    /// the exact command — `/share confirm` — that actually publishes. See
+    /// `interactive_commands::share_confirmation_notice`'s doc comment for why this repo's
+    /// existing `r`/`a`/`d` tool-approval prompt shape (`show_approval`/
+    /// `handle_approval_key`) was not reused for this instead.
+    fn run_share(&mut self, arg: Option<&str>) {
+        let confirmed = arg
+            .map(str::trim)
+            .is_some_and(|a| a.eq_ignore_ascii_case("confirm"));
+        if !confirmed {
+            self.apply_outcome(crate::interactive_commands::share_confirmation_notice());
+            return;
+        }
+        let state = self.session.state();
+        let session_id = self.session.header().map(|h| h.id);
+        let outcome =
+            crate::interactive_commands::run_gist_share(&state.messages, session_id.as_deref());
         self.apply_outcome(outcome);
     }
 
@@ -1444,6 +1753,101 @@ impl InteractiveMode {
         };
         let path = crate::interactive_commands::trust_store_path(&agent_dir);
         let outcome = crate::interactive_commands::set_project_trust(&path, &cwd, trusted);
+        self.apply_outcome(outcome);
+    }
+
+    /// Lazily build and cache this TUI's own `SettingsManager` — see the
+    /// [`Self::settings_manager`] field's doc comment for why it is a second,
+    /// independent `SettingsManager` rather than a reference to `main.rs`'s.
+    ///
+    /// Cached rather than rebuilt on every `/settings`/`/scoped-models` call: rebuilding
+    /// would re-read the on-disk files each time, which (a) is needless I/O for a value
+    /// that only this same TUI process ever writes, and (b) would silently discard any
+    /// unsaved in-memory write this manager already made (`SettingsManager::set_global_field`
+    /// mutates `self.settings`/`modified_fields` before it persists — a fresh `create` call
+    /// would replace that in-memory state with whatever was last flushed to disk).
+    ///
+    /// `cwd` and the trust decision come from the same seams `/trust` uses just above:
+    /// the session header's `cwd`, and `is_project_trusted` read from the same trust-store
+    /// file `/trust` itself writes — so a project the user has already trusted via `/trust`
+    /// is honestly reported as trusted here too, rather than defaulting to `true` (Pi's own
+    /// default, `settings.rs:1277`) or `false` regardless of the real decision on disk.
+    fn settings_manager(&mut self) -> Result<&mut SettingsManager, String> {
+        if self.settings_manager.is_none() {
+            let cwd = match self.session.header().map(|h| h.cwd) {
+                Some(cwd) => cwd,
+                None => {
+                    return Err(
+                        "Settings need a session cwd, and this session reports none".to_string()
+                    )
+                }
+            };
+            let env = crate::config::ConfigEnv::from_process_env();
+            let agent_dir = env.agent_dir().map_err(|error| {
+                format!("Could not resolve the agent directory for settings: {error}")
+            })?;
+            let trust_path = crate::interactive_commands::trust_store_path(&agent_dir);
+            let project_trusted =
+                crate::interactive_commands::is_project_trusted(&trust_path, &cwd);
+            let options = SettingsManagerCreateOptions { project_trusted };
+            let mgr = SettingsManager::create(&env, std::path::Path::new(&cwd), options)
+                .map_err(|error| format!("Could not open settings for {cwd}: {error}"))?;
+            self.settings_manager = Some(mgr);
+        }
+        Ok(self
+            .settings_manager
+            .as_mut()
+            .expect("just set to Some above"))
+    }
+
+    /// `/settings` — a text rendering of the TUI's own `SettingsManager`
+    /// ([`crate::interactive_commands::open_settings`]). Read-only: this command never
+    /// writes anything, so there is no "takes effect later" caveat to report.
+    fn run_settings(&mut self) {
+        match self.settings_manager() {
+            Ok(mgr) => {
+                let outcome = crate::interactive_commands::open_settings(mgr);
+                self.apply_outcome(outcome);
+            }
+            Err(error) => self.show_error(error),
+        }
+    }
+
+    /// `/scoped-models [provider/model]` — with no argument, show the current
+    /// `enabledModels` scope; with one, toggle that model in it.
+    ///
+    /// The write really lands on disk (`toggle_scoped_model` ends in
+    /// `SettingsManager::set_global_field` → `save()`), but nothing in this process reads
+    /// `enabledModels` back afterward: confirmed by grep — the interactive TUI's model
+    /// list (`InteractiveMode::model_entries`) is set once, at startup, from
+    /// `main.rs::run_interactive_mode`'s `load_model_entries(model_runtime.providers())`,
+    /// which never consults `SettingsManager::get_enabled_models`, and nothing else in this
+    /// crate does either. So — unlike a command that mutates state the running session
+    /// still reads — a toggle here has **no live effect on this session's model list or
+    /// cycling**; it only takes effect the next time `pirust` starts and re-reads settings.
+    /// The success text says so plainly rather than implying an immediate effect.
+    fn run_scoped_models(&mut self, arg: Option<&str>) {
+        let model_id = arg.map(str::trim).filter(|s| !s.is_empty());
+        let mgr = match self.settings_manager() {
+            Ok(mgr) => mgr,
+            Err(error) => {
+                self.show_error(error);
+                return;
+            }
+        };
+        let outcome = match model_id {
+            None => CommandOutcome::Notice(crate::interactive_commands::scoped_models_summary(mgr)),
+            Some(model_id) => {
+                match crate::interactive_commands::toggle_scoped_model(mgr, model_id) {
+                    CommandOutcome::Notice(text) => CommandOutcome::Notice(format!(
+                        "{text} Saved to settings; this session does not re-read \
+                         `enabledModels`, so it takes effect on the next `pirust` run, \
+                         not this one."
+                    )),
+                    other => other,
+                }
+            }
+        };
         self.apply_outcome(outcome);
     }
 
@@ -1960,8 +2364,26 @@ impl InteractiveMode {
                     glyph("♻", "[compacting]")
                 ));
             }
-            AgentSessionEvent::CompactionEnd { .. } => {
-                self.show_notice(format!("{} Compaction finished", glyph("♻", "[compacted]")));
+            AgentSessionEvent::CompactionEnd {
+                aborted,
+                error_message,
+                ..
+            } => {
+                // Pre-existing bug fixed here: this arm used to ignore every
+                // field and always show "Compaction finished", even when
+                // `aborted` was true — the exact "reports success and
+                // changes nothing" failure mode compaction must not have.
+                if *aborted {
+                    let reason = error_message
+                        .clone()
+                        .unwrap_or_else(|| "Compaction failed".to_string());
+                    self.show_error(format!(
+                        "{} Compaction failed: {reason}",
+                        glyph("♻", "[compacted]")
+                    ));
+                } else {
+                    self.show_notice(format!("{} Compaction finished", glyph("♻", "[compacted]")));
+                }
             }
             AgentSessionEvent::AutoRetryStart { attempt, .. } => {
                 self.show_notice(format!(
@@ -2006,6 +2428,14 @@ impl InteractiveMode {
         self.model_entries = entries;
     }
 
+    /// Whether `/restart` was invoked this run. `main.rs::run_interactive_mode` reads
+    /// this **after** `run_async` returns — i.e. after the TUI has already torn down and
+    /// restored the terminal — and only then decides whether to re-exec. See
+    /// [`Self::run_restart`] for why the re-exec itself cannot happen any earlier.
+    pub fn restart_requested(&self) -> bool {
+        self.restart_requested
+    }
+
     /// Open the `/model` picker.
     fn open_model_picker(&mut self) {
         let picker = Rc::new(RefCell::new(PickerModelPicker::new(
@@ -2032,22 +2462,27 @@ impl InteractiveMode {
                 self.hide_modal();
             }
             PickerAction::Selected(index) => {
-                let chosen = self
-                    .model_entries
-                    .get(index)
-                    .map(|entry| format!("{} / {}", entry.provider, entry.model_id));
+                let chosen = self.model_entries.get(index).cloned();
                 self.model_picker = None;
                 self.hide_modal();
                 match chosen {
-                    // Switching the live model means rebuilding the `Agent`'s
-                    // provider adapter, which only `main.rs` can do — the
-                    // session seam exposes no setter. So the choice is
-                    // reported with the concrete flag that applies it, rather
-                    // than pretending the switch happened.
-                    Some(model) => self.show_notice(format!(
-                        "Selected {model}. Switching the live model is not wired to the running \
-                         agent yet — start pirust with `--model {model}` to use it."
-                    )),
+                    // `TuiRuntimeInfo::set_model_by_name` (print_mode.rs) mutates
+                    // the running `Agent`'s model in place — see its doc comment
+                    // for why this is a name lookup rather than passing a real
+                    // `Model` (which `ModelEntry` does not carry).
+                    Some(entry) => match self
+                        .session
+                        .set_model_by_name(&entry.provider, &entry.model_id)
+                    {
+                        Ok(()) => self.show_notice(format!(
+                            "Switched to {} / {}",
+                            entry.provider, entry.model_id
+                        )),
+                        Err(error) => self.show_error(format!(
+                            "Could not switch to {} / {}: {error}",
+                            entry.provider, entry.model_id
+                        )),
+                    },
                     None => self.show_error("No model is available to select"),
                 }
                 self.refresh_status();
@@ -2063,6 +2498,26 @@ impl InteractiveMode {
             self.picker_viewport_rows(),
         )));
         self.resume_picker = Some(Rc::clone(&picker));
+        self.show_modal_component(picker as SharedComponent);
+    }
+
+    /// Open the `/tree` picker over `TuiRuntimeInfo::branch_entries`
+    /// (`print_mode.rs`).
+    ///
+    /// An empty list renders a plain notice instead of an empty picker —
+    /// "no branches" is the honest state for a session with no fork points
+    /// yet, not an error and not a picker with a header and zero rows.
+    fn open_branch_picker(&mut self) {
+        let entries = self.session.branch_entries();
+        if entries.is_empty() {
+            self.show_notice("No branches — this session has no fork points yet");
+            return;
+        }
+        let picker = Rc::new(RefCell::new(BranchPicker::new(
+            entries,
+            self.picker_viewport_rows(),
+        )));
+        self.branch_picker = Some(Rc::clone(&picker));
         self.show_modal_component(picker as SharedComponent);
     }
 
@@ -2085,7 +2540,12 @@ impl InteractiveMode {
         rows.saturating_sub(RESERVED).clamp(MIN_ROWS, MAX_ROWS)
     }
 
-    /// Route a key to the session picker.
+    /// Route a key to the session picker. `Selected` resumes the chosen
+    /// session in place via [`Self::resume_to`] — the same
+    /// `switch_to_session_file` seam `/import` (`run_import`) already uses,
+    /// now reachable from the picker because `SessionEntry::path`
+    /// (`interactive_pickers.rs`) carries a real session file path through
+    /// from `SessionInfo::path` (`session.rs:1705`).
     fn handle_resume_picker_key(&mut self, data: &str) {
         let Some(picker) = self.resume_picker.clone() else {
             return;
@@ -2101,20 +2561,96 @@ impl InteractiveMode {
                 let chosen = picker
                     .borrow()
                     .selected_entry()
-                    .map(|entry| (entry.id.clone(), entry.cwd.clone()));
+                    .map(|entry| entry.path.clone());
                 self.resume_picker = None;
                 self.hide_modal();
                 match chosen {
-                    // Resuming replaces the whole agent + session manager,
-                    // which is `main.rs`'s job — `PrintModeSession` has no
-                    // swap-session method. The id is echoed with the exact
-                    // command that resumes it, which is genuinely useful,
-                    // unlike the old flat "not available".
-                    Some((id, cwd)) => self.show_notice(format!(
-                        "Session {id} ({cwd}). Resuming in-place is not wired to the running \
-                         agent yet — run `pirust --resume {id}` to open it."
-                    )),
+                    Some(path) => {
+                        if !self.refuse_while_turn_active("resume a session") {
+                            self.resume_to(&path);
+                        }
+                    }
                     None => self.show_error("No session is available to resume"),
+                }
+            }
+        }
+    }
+
+    /// Shared by [`Self::handle_resume_picker_key`]: switch the live session
+    /// onto `path` in place (`PrintModeSession::switch_to_session_file`,
+    /// `print_mode.rs:1086` — the same call `run_import` makes for
+    /// `/import`), then bring the screen back in sync with the swapped-in
+    /// session.
+    ///
+    /// `path` is `SessionEntry::path`, sourced from `SessionInfo::path`
+    /// (`session.rs:1705`), which is populated from a real directory listing
+    /// (`build_session_info`/`list_sessions_from_dir`, `session.rs`) — never
+    /// synthesized here. An empty `path` would only mean a malformed store
+    /// entry slipped through, so it is refused rather than handed to
+    /// `switch_to_session_file`, which would otherwise fail on it anyway but
+    /// with a far less useful error.
+    ///
+    /// On success the on-screen transcript belongs to the *old* session and
+    /// is stale, so it is cleared the same way `/new`/`/import` clear theirs
+    /// (`reset_transcript_view`, which also resets turn state to `Idle`).
+    /// The status line is refreshed too: the session id, cwd, and token
+    /// counts it reports all just changed under it. On failure nothing here
+    /// is touched — no transcript clear, no status refresh, no success
+    /// notice — the switch never happened.
+    fn resume_to(&mut self, path: &str) {
+        if path.is_empty() {
+            self.show_error(
+                "This session has no file path on record, so it cannot be resumed in place.",
+            );
+            return;
+        }
+        match self.session.switch_to_session_file(path) {
+            Ok(()) => {
+                self.reset_transcript_view();
+                self.refresh_status();
+                self.show_notice(format!("Resumed session from {path}"));
+            }
+            Err(error) => self.show_error(format!("Could not resume session from {path}: {error}")),
+        }
+    }
+
+    /// Route a key to the `/tree` branch picker. `Selected` forks a new
+    /// session from the chosen entry via `PrintModeSession::fork_from`
+    /// (print_mode.rs:1052) — the same seam `run_fork`/`fork_to` use for
+    /// `/fork <entry-id>` — rather than `navigate_tree`
+    /// (print_mode.rs:876): `navigate_tree` is print mode's own
+    /// `session.navigateTree` pass-through and carries no documented
+    /// contract for rebuilding `Agent`'s in-memory transcript to match the
+    /// new position, whereas `fork_from`'s doc comment explicitly spells out
+    /// the `SessionManager::create_branched_session` +
+    /// `entries_to_agent_messages` + `Agent::set_messages` chain its real
+    /// implementer is expected to follow — the one seam on this trait
+    /// guaranteed to leave the screen consistent with the store afterward.
+    fn handle_branch_picker_key(&mut self, data: &str) {
+        let Some(picker) = self.branch_picker.clone() else {
+            return;
+        };
+        let action = picker.borrow_mut().handle_key(data);
+        match action {
+            PickerAction::None => self.repaint(),
+            PickerAction::Dismissed => {
+                self.branch_picker = None;
+                self.hide_modal();
+            }
+            PickerAction::Selected(_) => {
+                let chosen = picker
+                    .borrow()
+                    .selected_entry()
+                    .map(|entry| entry.id.clone());
+                self.branch_picker = None;
+                self.hide_modal();
+                match chosen {
+                    Some(id) => {
+                        if !self.refuse_while_turn_active("switch branches") {
+                            self.fork_to(&id);
+                        }
+                    }
+                    None => self.show_error("No branch is available to select"),
                 }
             }
         }
@@ -2248,8 +2784,11 @@ fn result_text(content: &[ToolResultContent]) -> String {
 /// user must have a capability/handler or be clearly marked unavailable").
 ///
 /// This list must stay in step with `dispatch_command`'s match arms;
-/// `every_dispatched_command_is_registered` in `tests/tui_commands_status.rs`
-/// fails if either side gains a name the other does not have.
+/// `every_available_command_is_registered` in `tests/tui_commands_status.rs`
+/// checks a subset of it against the autocomplete registry — there is no
+/// exhaustive reflective check that every `dispatch_command` arm has a name
+/// here (Rust match arms are not enumerable at runtime), so any command added
+/// to one must be added to the other by hand, in the same edit.
 pub fn slash_command_available(name: &str) -> bool {
     matches!(
         name,
@@ -2268,7 +2807,17 @@ pub fn slash_command_available(name: &str) -> bool {
             | "copy"
             | "trust"
             | "changelog"
+            | "settings"
+            | "scoped-models"
             | "quit"
+            | "compact"
+            | "new"
+            | "clone"
+            | "fork"
+            | "import"
+            | "tree"
+            | "restart"
+            | "share"
     )
 }
 
@@ -2298,7 +2847,11 @@ pub const BUILTIN_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         "Import and resume a session from a JSONL file",
         None,
     ),
-    ("share", "Share session as a secret GitHub gist", None),
+    (
+        "share",
+        "Share session as a secret GitHub gist",
+        Some("confirm"),
+    ),
     ("copy", "Copy last agent message to clipboard", None),
     ("name", "Set session display name", None),
     ("session", "Show session info and stats", None),

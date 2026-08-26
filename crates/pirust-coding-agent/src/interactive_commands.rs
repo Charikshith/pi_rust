@@ -20,11 +20,29 @@
 //!
 //! # Reachability ledger (18 previously-dead commands)
 //!
-//! - Bucket A (fully self-contained): `export`, `copy`.
+//! - Bucket A (fully self-contained): `export`, `copy`, `share` (`gh gist create`,
+//!   shelled out to — see [`run_gist_share`] — rather than an HTTP dependency).
 //! - Bucket B (pure logic here, needs a caller-supplied capability): `settings`,
 //!   `scoped-models`, `changelog`, `trust`, `login`, `logout`, `reload`.
-//! - Bucket C (no reachable seam today — [`unavailable_reason`] explains why): `import`,
-//!   `share`, `name`, `fork`, `clone`, `tree`, `new`, `restart`, `compact`.
+//! - Bucket C (no reachable seam today — [`unavailable_reason`] explains why): none
+//!   remain.
+//!   (`name` and `compact` were promoted out of this bucket earlier; `new`, `fork`,
+//!   `clone`, `import` and `tree` were promoted together, once `PrintModeSession` grew
+//!   `start_new_session`/`clone_session`/`fork_from`/`switch_to_session_file`
+//!   (`print_mode.rs`) and `TuiRuntimeInfo` grew `branch_entries` — see the comments
+//!   above their `unavailable_reason` match arms, or lack thereof, and
+//!   `interactive_mode.rs`'s `dispatch_command`/`run_new_session`/`run_clone_session`/
+//!   `run_fork`/`run_import`/`open_branch_picker`, which call those methods directly on
+//!   `self.session`, exactly like `/name` and `/compact` already did — never through
+//!   `CommandContextActions`, whatever this file's now-removed `unavailable_reason` arms
+//!   for those five used to claim. `share` and `restart` were the last two: `share`
+//!   turned out not to need the HTTP client the original arm assumed — shelling out to
+//!   the already-installed-on-many-machines `gh` CLI needs no Rust dependency at all —
+//!   and `restart` turned out not to need a session-level seam, because it was never a
+//!   session operation: `std::process::Command::new(current_exe).spawn()` is a process
+//!   operation, gated only on running it after the TUI's normal shutdown has already
+//!   restored the terminal (`interactive_mode.rs::run_restart`,
+//!   `main.rs::run_interactive_mode`).)
 
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write as _};
@@ -142,35 +160,48 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Start a new session",
         argument_hint: None,
         category: CommandCategory::Session,
-        reachable: false,
+        // Promoted from bucket C: `PrintModeSession::start_new_session`
+        // (print_mode.rs:993), wired by `interactive_mode.rs::run_new_session`.
+        reachable: true,
     },
     CommandSpec {
         name: "restart",
         description: "Restart the current session",
         argument_hint: None,
         category: CommandCategory::Session,
-        reachable: false,
+        // Promoted from bucket C: `std::process::Command::new(current_exe).spawn()`
+        // (std alone — no `CommandExt::exec`, which is Unix-only) re-execs the process,
+        // wired by `interactive_mode.rs::run_restart` + `main.rs::run_interactive_mode`.
+        reachable: true,
     },
     CommandSpec {
         name: "fork",
         description: "Fork the session at this point",
         argument_hint: None,
         category: CommandCategory::Session,
-        reachable: false,
+        // Promoted from bucket C: `PrintModeSession::fork_from` (print_mode.rs:1052),
+        // wired by `interactive_mode.rs::run_fork` (requires an entry id — see
+        // `unavailable_reason`'s removed arm and `run_fork`'s doc comment).
+        reachable: true,
     },
     CommandSpec {
         name: "clone",
         description: "Clone the session into a new one",
         argument_hint: None,
         category: CommandCategory::Session,
-        reachable: false,
+        // Promoted from bucket C: `PrintModeSession::clone_session` (print_mode.rs:1022),
+        // wired by `interactive_mode.rs::run_clone_session`.
+        reachable: true,
     },
     CommandSpec {
         name: "tree",
         description: "Browse the session's branch tree",
         argument_hint: None,
         category: CommandCategory::Session,
-        reachable: false,
+        // Promoted from bucket C: `TuiRuntimeInfo::branch_entries` (print_mode.rs) feeds
+        // `interactive_pickers::BranchPicker`, wired by
+        // `interactive_mode.rs::open_branch_picker`.
+        reachable: true,
     },
     CommandSpec {
         name: "resume",
@@ -184,7 +215,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Compact the conversation history",
         argument_hint: None,
         category: CommandCategory::Session,
-        reachable: false,
+        reachable: true,
     },
     CommandSpec {
         name: "reload",
@@ -240,14 +271,21 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Import a session file",
         argument_hint: Some("<path>"),
         category: CommandCategory::Storage,
-        reachable: false,
+        // Promoted from bucket C: `PrintModeSession::switch_to_session_file`
+        // (print_mode.rs:1086), wired by `interactive_mode.rs::run_import` (requires a
+        // path — see `unavailable_reason`'s removed arm and `run_import`'s doc comment).
+        reachable: true,
     },
     CommandSpec {
         name: "share",
         description: "Share the session as a hosted link",
-        argument_hint: None,
+        argument_hint: Some("confirm"),
         category: CommandCategory::Storage,
-        reachable: false,
+        // Promoted from bucket C: shelling out to `gh gist create` (see
+        // `run_gist_share`) needs no HTTP dependency — wired by
+        // `interactive_mode.rs::run_share`, gated behind an explicit `/share confirm`
+        // (see `share_confirmation_notice`'s doc comment for why).
+        reachable: true,
     },
     CommandSpec {
         name: "copy",
@@ -658,6 +696,122 @@ pub fn export_session(
 }
 
 // =============================================================================
+// `/share` (bucket A) — `gh gist create`, shelled out to (no HTTP dependency)
+// =============================================================================
+
+/// `/share` with no `confirm` argument — never touches `gh`, never writes a temp file.
+///
+/// `/share` publishes the *entire* transcript — including anything the model quoted from
+/// the user's files — to a URL anyone who obtains it can read (a "secret" gist is
+/// unlisted, not access-controlled: GitHub will serve it to anyone with the link). That
+/// is worth gating behind an explicit confirmation, the same judgment call this file's
+/// `interactive_mode.rs` counterpart already made for tool calls via `show_approval`/
+/// `handle_approval_key` (`interactive_mode.rs:2021-2085`, `r`/`a`/`d` decision keys on a
+/// oneshot channel the agent loop is parked on).
+///
+/// That oneshot shape is not reused here: it exists to block an in-flight tool call until
+/// the user answers, and by the time this function runs, `dispatch_command` has already
+/// finished handling `/share` synchronously — there is no call left in flight to park.
+/// Requiring a second, explicit slash command instead (`/share confirm`) gets the same
+/// "no accidental publish" property with none of the pending-state machinery: a bare
+/// `/share` is inert by construction, and only the literal argument `confirm` reaches
+/// [`run_gist_share`] (see `interactive_mode.rs::run_share`, which is the only caller of
+/// either function and is what actually enforces this gate).
+pub fn share_confirmation_notice() -> CommandOutcome {
+    CommandOutcome::Notice(
+        "/share publishes this entire conversation as a secret GitHub gist (via `gh gist \
+         create`), including any file contents the model quoted. Secret gists are \
+         unlisted, not private \u{2014} anyone with the link can read it. Run `/share \
+         confirm` to publish, or do nothing to cancel."
+            .to_string(),
+    )
+}
+
+/// `/share confirm` — write the transcript to a temp file via [`export_html`] and hand it
+/// to `gh gist create`.
+///
+/// Reuses [`export_html`] rather than inventing a third transcript format: the existing
+/// self-contained, already-escaped HTML document this crate already produces for
+/// `/export session.html` is exactly what a gist viewer (which renders `.html` files as
+/// plain text, not live HTML — GitHub Gist has never executed gist content) should show.
+///
+/// Verified against `gh gist create --help` (`gh` version 2.x) rather than trusted on
+/// faith: gists are secret by default, `--public` is the *opt-out* flag, and there is no
+/// `--secret` flag to pass — passing a flag that does not exist would just make the
+/// invocation fail — so this call passes neither `--public` nor a nonexistent `--secret`.
+///
+/// The temp file is removed on every return path (success, `gh` failure, and `gh` not
+/// found alike) — it is scratch input to `gh`, not an artifact the user asked to keep
+/// (`/export` is the command for that).
+pub fn run_gist_share(messages: &[AgentMessage], session_id: Option<&str>) -> CommandOutcome {
+    if messages.is_empty() {
+        return CommandOutcome::Error(
+            "Nothing to share yet \u{2014} the session has no messages.".to_string(),
+        );
+    }
+    let html = export_html(messages, session_id);
+    let path = std::env::temp_dir().join(format!(
+        "pirust-share-{}.html",
+        session_id.unwrap_or("session")
+    ));
+    if let Err(err) = write_text_file(&html, &path) {
+        return CommandOutcome::Error(format!(
+            "Failed to write the share export to {}: {err}",
+            path.display()
+        ));
+    }
+    let desc = match session_id {
+        Some(id) => format!("pirust session {id}"),
+        None => "pirust session export".to_string(),
+    };
+    let outcome = match std::process::Command::new("gh")
+        .args(["gist", "create", "--desc", &desc])
+        .arg(&path)
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            // `gh gist create`'s entire useful output on success is the gist URL on
+            // stdout — that is the whole point of the command, so it is the whole
+            // notice.
+            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if url.is_empty() {
+                CommandOutcome::Error(
+                    "gh gist create exited successfully but printed no URL \u{2014} nothing \
+                     to report."
+                        .to_string(),
+                )
+            } else {
+                CommandOutcome::Notice(format!("Shared as a secret gist: {url}"))
+            }
+        }
+        Ok(output) => {
+            // Pass `gh`'s own stderr through verbatim instead of inventing wording: the
+            // not-authenticated case already tells the user to run `gh auth login`, and
+            // duplicating that message here would just be a second place for it to go
+            // stale against `gh`'s actual text.
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            CommandOutcome::Error(if stderr.is_empty() {
+                format!(
+                    "gh gist create exited with {:?} and printed nothing to stderr",
+                    output.status.code()
+                )
+            } else {
+                format!("gh gist create failed: {stderr}")
+            })
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => CommandOutcome::Error(
+            "/share needs the GitHub CLI (`gh`), which is not installed (or not on PATH) \
+             on this machine. Install it from https://cli.github.com, run `gh auth \
+             login`, then retry `/share confirm`."
+                .to_string(),
+        ),
+        Err(err) => CommandOutcome::Error(format!("Failed to launch `gh gist create`: {err}")),
+    };
+    let _ = std::fs::remove_file(&path);
+    outcome
+}
+
+// =============================================================================
 // `/changelog` (bucket B — caller supplies the markdown source)
 // =============================================================================
 
@@ -922,18 +1076,25 @@ pub async fn run_reload(session: &dyn crate::print_mode::PrintModeSession) -> Co
 ///
 /// Every reason cites the concrete seam that is missing, not a vague "not available in
 /// this session" — the whole point of this function.
+///
+/// The `match` below has decayed to a single `_ => None` arm now that every command that
+/// once lived here has been promoted out of bucket C — deliberately kept as a `match`
+/// rather than collapsed to a bare `None`, because the arm comments are the ledger of
+/// *why* each promotion happened and a future bucket-C command belongs as a real arm
+/// right alongside them, not bolted on after an early return.
+#[allow(clippy::match_single_binding)]
 pub fn unavailable_reason(name: &str) -> Option<&'static str> {
     match name {
-        "import" => Some(
-            "/import needs CommandContextActions::new_session (or a session-switch \
-             capability); the interactive TUI never constructs a CommandContextActions \
-             (print_mode.rs:783-805) — only the print-mode extension-binding path does.",
-        ),
-        "share" => Some(
-            "/share needs an HTTP client to publish a gist/paste; pirust-coding-agent's \
-             Cargo.toml has no HTTP dependency (no reqwest/hyper/ureq), so there is \
-             nothing to call it with.",
-        ),
+        // `/share` was bucket C when this module was written: the assumption was that
+        // publishing a gist needed an HTTP client, and pirust-coding-agent's Cargo.toml
+        // has none (no reqwest/hyper/ureq). That assumption was wrong — `gh gist create`
+        // is a process to shell out to, not an HTTP call to make, and shelling out needs
+        // no Rust dependency at all. See [`run_gist_share`] and
+        // [`share_confirmation_notice`]. Hence no reason to report: it works (once `gh`
+        // is installed and authenticated — see `run_gist_share`'s own error paths for
+        // what happens when it is not, which is not a bucket-C gap, just a runtime
+        // precondition the command reports honestly).
+        //
         // `/name` was bucket C when this module was written: the only thing
         // `PrintModeSession` exposed was the *outbound* `SessionInfoChanged`
         // event, with no way for a caller to *request* a rename. It has since
@@ -941,37 +1102,47 @@ pub fn unavailable_reason(name: &str) -> Option<&'static str> {
         // routes to `SessionManager::append_session_info`, which always existed
         // on the store side and merely had no route out to the interactive
         // layer. Hence no reason to report: it works.
-        "fork" => Some(
-            "/fork needs CommandContextActions::fork, which the interactive TUI never \
-             constructs (print_mode.rs:783-805) \u{2014} same gap as /import.",
-        ),
-        "clone" => Some(
-            "/clone needs CommandContextActions::fork or ::new_session, unreachable from \
-             the TUI for the same reason as /import.",
-        ),
-        "tree" => Some(
-            "/tree: PrintModeSession::navigate_tree(target_id, options) exists and is \
-             callable, but nothing on the trait lists which branch ids exist to navigate \
-             to \u{2014} there is a jump-by-id primitive but no browsing/listing seam.",
-        ),
-        "new" => Some(
-            "/new needs CommandContextActions::new_session, unreachable from the TUI \u{2014} \
-             same gap as /import.",
-        ),
-        "restart" => Some(
-            "/restart has no seam anywhere: neither PrintModeSession nor TuiRuntimeInfo \
-             exposes a process/session restart, and CommandContextActions (itself \
-             unreachable from the TUI) does not define one either.",
-        ),
-        "compact" => Some(
-            "/compact: AgentHarness::compact() is real and working \
-             (pirust-agent-core/src/harness/mod.rs:665, calls \
-             compaction_v4::prepare_compaction) and CompactionReason::Manual plus the \
-             CompactionStart/CompactionEnd events exist as vocabulary \
-             (print_mode.rs:444-563), but PrintModeSession \u{2014} the TUI's entire session \
-             capability surface \u{2014} has no method that reaches AgentHarness::compact(). \
-             The trigger exists one layer below what the TUI can see.",
-        ),
+        //
+        // `/new`, `/fork`, `/clone`, `/import` and `/tree` were all bucket C when this
+        // module was written, and all five arms here made the same wrong claim: that
+        // they needed `CommandContextActions`, which the interactive TUI never
+        // constructs (print_mode.rs:783-805) — that struct is print mode's extension-
+        // binding path, not something `dispatch_command` has ever gone through. The
+        // real gap was that `PrintModeSession` had no `start_new_session`/
+        // `clone_session`/`fork_from`/`switch_to_session_file` methods at all (`/tree`'s
+        // gap was narrower: `navigate_tree` existed but nothing listed which ids were
+        // valid to navigate to). Now that `print_mode.rs` provides all five —
+        // `start_new_session`, `clone_session`, `fork_from`, `switch_to_session_file`,
+        // and `TuiRuntimeInfo::branch_entries` for the listing `/tree` was missing —
+        // `interactive_mode.rs` calls them directly on `self.session`, exactly like
+        // `/name` and `/compact` above. Hence no reason to report for any of the five:
+        // they work.
+        // `/restart` was bucket C when this module was written: the search was for a
+        // *session*-level seam (a `PrintModeSession`/`TuiRuntimeInfo`/
+        // `CommandContextActions` method), and none existed, correctly — restarting the
+        // whole `pirust` process was never something a session object could expose in the
+        // first place. It needed a *process*-level seam instead:
+        // `std::process::Command::new(std::env::current_exe()?).args(std::env::args()
+        // .skip(1)).spawn()`, gated on running only after the TUI has torn down and
+        // restored the terminal (`interactive_mode.rs::run_restart` sets the flag,
+        // `main.rs::run_interactive_mode` re-execs once `run_async` returns — see both
+        // doc comments for why the ordering is load-bearing). Hence no reason to report:
+        // it works.
+        //
+        // `/compact` was bucket C when this module was written: the
+        // deterministic half of compaction (`compaction_v4::prepare_compaction`,
+        // `harness/compaction/v4.rs`) was real and working, and
+        // `CompactionReason`/`CompactionStart`/`CompactionEnd` already
+        // existed as vocabulary (print_mode.rs), but `PrintModeSession` —
+        // the TUI's entire session capability surface — had no method that
+        // reached it; the trigger existed one layer below what the TUI
+        // could see. It has since been promoted to bucket A —
+        // `PrintModeSession::compact` bridges the flat `Agent` message list
+        // `SingleTurnSession` actually holds to that same deterministic
+        // logic via `compaction_v4::prepare_compaction_from_messages`
+        // (`harness/compaction/v4.rs`), and `run_compact`
+        // (`interactive_mode.rs`) now spawns it as a real turn-mutually-
+        // exclusive task. Hence no reason to report: it works.
         _ => None,
     }
 }
@@ -1173,6 +1344,76 @@ mod tests {
     fn export_session_errors_on_empty_transcript() {
         let outcome = export_session(&[], None, None);
         assert!(matches!(outcome, CommandOutcome::Error(_)));
+    }
+
+    // -------------------------------------------------------------------------
+    // share
+    //
+    // The success path (a real `gh gist create` call that actually publishes) is
+    // untestable in this environment: `gh` is not installed here, and a test suite must
+    // never depend on a network call succeeding, let alone one that publishes a gist to
+    // a real GitHub account, even if `gh` happened to be present. What *is* testable for
+    // real, without a mock, is exactly what this machine's environment provides: the
+    // confirmation gate (no `gh` call at all), the empty-session guard (same, no `gh`
+    // call), and the "gh not installed" branch, which this machine hits genuinely, not
+    // via a stub.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn share_confirmation_notice_names_the_confirm_argument_and_never_touches_gh() {
+        // No temp file, no `gh` invocation — just a `String` build, so this needs no
+        // cleanup and cannot leave anything behind on disk.
+        match share_confirmation_notice() {
+            CommandOutcome::Notice(text) => {
+                assert!(text.contains("/share confirm"));
+                assert!(text.contains("secret"));
+            }
+            other => panic!("expected Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_gist_share_errors_on_empty_transcript_without_touching_gh_or_disk() {
+        // Mirrors `export_session_errors_on_empty_transcript` above: the empty-messages
+        // guard returns before `write_text_file`/`Command::new("gh")` run at all, so this
+        // is safe to run with no temp-dir cleanup and no `gh` on PATH.
+        let outcome = run_gist_share(&[], Some("test-session"));
+        match outcome {
+            CommandOutcome::Error(text) => assert!(text.contains("Nothing to share")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_gist_share_reports_actionable_error_when_gh_is_absent() {
+        // This machine genuinely has no `gh` on PATH — confirmed, not assumed — so this
+        // exercises the real `ErrorKind::NotFound` branch, not a mock of it. If `gh` is
+        // ever installed in whatever environment runs this suite, the assertions below
+        // would need `gh`'s actual (also actionable) stderr instead; that gap is the
+        // documented cost of not depending on a fake process boundary for `Command`.
+        assert!(
+            std::process::Command::new("gh")
+                .arg("--version")
+                .output()
+                .is_err(),
+            "this test assumes `gh` is not on PATH; skip/update it in an environment where it is"
+        );
+        let messages = vec![user_text_message("hello from a test")];
+        let outcome = run_gist_share(&messages, Some("share-test-session"));
+        match outcome {
+            CommandOutcome::Error(text) => {
+                assert!(text.contains("gh"));
+                assert!(text.contains("https://cli.github.com"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // The temp file `run_gist_share` wrote must not survive a failed share — cleanup
+        // runs on every return path, including this one.
+        let leftover = std::env::temp_dir().join("pirust-share-share-test-session.html");
+        assert!(
+            !leftover.exists(),
+            "run_gist_share must remove its temp file even when `gh` is absent"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1379,18 +1620,66 @@ Some preamble that should be dropped.
     // -------------------------------------------------------------------------
 
     #[test]
-    fn unavailable_reason_covers_every_bucket_c_command_with_specifics() {
-        // `name` is deliberately absent: it was promoted out of bucket C once
-        // `PrintModeSession::set_session_name` was added (see
-        // `name_is_no_longer_a_bucket_c_gap` below).
-        for name in [
-            "import", "share", "fork", "clone", "tree", "new", "restart", "compact",
-        ] {
-            let reason =
-                unavailable_reason(name).unwrap_or_else(|| panic!("missing reason for {name}"));
-            assert!(
-                reason.len() > 20,
-                "reason for {name} should be specific, got: {reason}"
+    fn bucket_c_is_now_empty() {
+        // Bucket C had two members left when this test was last named
+        // `unavailable_reason_covers_every_bucket_c_command_with_specifics` — `share` and
+        // `restart` — both promoted out (see `share_is_no_longer_a_bucket_c_gap` and
+        // `restart_is_no_longer_a_bucket_c_gap` below). Every other former bucket-C
+        // command was promoted earlier: `name`/`compact` individually
+        // (`name_is_no_longer_a_bucket_c_gap`/`compact_is_no_longer_a_bucket_c_gap`
+        // below) and `new`/`fork`/`clone`/`import`/`tree` together
+        // (`session_control_commands_are_no_longer_bucket_c_gaps` below). So rather than
+        // collecting reasons for a named list the way this test used to, it now asserts
+        // the ledger's claim directly: no name in [`COMMANDS`] gets a reason at all.
+        for spec in COMMANDS {
+            assert_eq!(
+                unavailable_reason(spec.name),
+                None,
+                "{} should not report a bucket-C gap \u{2014} bucket C is empty now",
+                spec.name
+            );
+        }
+    }
+
+    /// `/share` really shells out to `gh gist create` now (once `gh` is installed and
+    /// authenticated — see `run_gist_share`'s error paths for the honest report when it
+    /// is not), so it must not still be reported as a bucket-C gap. A bare `/share` still
+    /// never calls `gh` — see `share_confirmation_notice` — but that is a confirmation
+    /// gate, not an unreachable seam, and `unavailable_reason`/`reachable` are about the
+    /// latter.
+    #[test]
+    fn share_is_no_longer_a_bucket_c_gap() {
+        assert_eq!(unavailable_reason("share"), None);
+        assert_eq!(command_spec("share").map(|s| s.reachable), Some(true));
+    }
+
+    /// `/restart` really re-execs now, via `std::process::Command` in
+    /// `main.rs::run_interactive_mode`, strictly after the TUI's normal shutdown has
+    /// restored the terminal — see `interactive_mode.rs::run_restart`'s doc comment for
+    /// why running it any earlier would wedge the terminal instead of restarting it.
+    #[test]
+    fn restart_is_no_longer_a_bucket_c_gap() {
+        assert_eq!(unavailable_reason("restart"), None);
+        assert_eq!(command_spec("restart").map(|s| s.reachable), Some(true));
+    }
+
+    /// `/new`, `/fork`, `/clone`, `/import` and `/tree` really work now, so none of
+    /// them may still be reported as a bucket-C gap — mirrors
+    /// `name_is_no_longer_a_bucket_c_gap` below, one command at a time so a future
+    /// regression on any single command fails with its own name rather than a
+    /// combined loop assertion.
+    #[test]
+    fn session_control_commands_are_no_longer_bucket_c_gaps() {
+        for name in ["new", "fork", "clone", "import", "tree"] {
+            assert_eq!(
+                unavailable_reason(name),
+                None,
+                "{name} should no longer report a bucket-C gap"
+            );
+            assert_eq!(
+                command_spec(name).map(|s| s.reachable),
+                Some(true),
+                "{name}'s CommandSpec should report reachable: true"
             );
         }
     }
@@ -1406,6 +1695,17 @@ Some preamble that should be dropped.
     fn name_is_no_longer_a_bucket_c_gap() {
         assert_eq!(unavailable_reason("name"), None);
         assert_eq!(command_spec("name").map(|s| s.reachable), Some(true));
+    }
+
+    /// `/compact` really compacts now, so it must not still be reported as a
+    /// gap. The deterministic logic (`compaction_v4::prepare_compaction`)
+    /// always existed; what was missing was a route from `PrintModeSession`
+    /// down to it, which `PrintModeSession::compact` +
+    /// `compaction_v4::prepare_compaction_from_messages` now provide.
+    #[test]
+    fn compact_is_no_longer_a_bucket_c_gap() {
+        assert_eq!(unavailable_reason("compact"), None);
+        assert_eq!(command_spec("compact").map(|s| s.reachable), Some(true));
     }
 
     #[test]

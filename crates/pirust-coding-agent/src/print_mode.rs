@@ -721,6 +721,71 @@ pub trait TuiRuntimeInfo: Send + Sync {
     fn session_entries(&self) -> Vec<crate::interactive_pickers::SessionEntry> {
         Vec::new()
     }
+
+    /// `/model` (live switch) — replace the running model in place, taking effect on
+    /// the very next turn.
+    ///
+    /// Defaulted, not required, for the same reason as [`Self::tool_names`] and
+    /// [`Self::session_entries`]: three suites hand-implement `TuiRuntimeInfo`
+    /// directly (`tests/print_mode_golden.rs`, `tests/tui_commands_status.rs`,
+    /// `tests/interactive_mode_smoke.rs`) and have no model to switch, so a
+    /// required method would break all three for a capability they cannot honor.
+    ///
+    /// This is honest to default, unlike a cosmetic stub, because the real
+    /// implementer's job is genuinely simple: `Agent::set_model(&self, model:
+    /// &Model)` (`crates/pirust-agent-core/src/agent.rs:370`) already exists and
+    /// mutates `AgentInner`'s `Mutex<MutableAgentState>` in place — copy-on-assign,
+    /// mirroring `agent.ts:82-84`. `Agent` is `#[derive(Clone)]` over an
+    /// `Arc<AgentInner>` (`agent.rs:295-298`), so every clone of the `Agent` the
+    /// session holds observes the mutation immediately; there is nothing to
+    /// rebuild or swap. In particular `build_stream_fn` (`sdk.rs:246-314`) takes
+    /// `model` as a **call-time argument** to its returned closure and dispatches
+    /// on `model.api.0.as_str()` fresh on every call (`sdk.rs:295`) — there is no
+    /// cached per-model provider adapter anywhere to invalidate — so flipping
+    /// `AgentInner`'s `model` field is sufficient by itself; no session
+    /// reconstruction, no adapter rebuild. The default reports the switch
+    /// unavailable, for sessions with no underlying `Agent` to set it on.
+    fn set_model(&self, _model: &pirust_ai::types::Model) -> Result<(), String> {
+        Err("model switching is not wired to this session".to_string())
+    }
+
+    /// `/model` (live switch), selected from
+    /// [`crate::interactive_pickers::ModelPicker`] — resolve a `provider`/`model_id`
+    /// string pair into a real `pirust_ai::types::Model` and apply it via
+    /// [`Self::set_model`].
+    ///
+    /// A second seam rather than widening [`Self::set_model`]'s signature or
+    /// `ModelEntry` itself: `ModelEntry` (`interactive_pickers.rs`) is deliberately
+    /// string-only (see its own doc comment) — the real `Model` value lives in the
+    /// `ModelRuntime` `main.rs` composes and never hands to the session, the same gap
+    /// [`Self::set_model`]'s doc comment describes. The alternative — carrying the real
+    /// `Model` alongside every `ModelEntry` — would change
+    /// `InteractiveMode::set_model_entries`'s signature from `Vec<ModelEntry>` to
+    /// something `Model`-shaped, and `main.rs` is the only caller of that setter and is
+    /// off limits this wave. Resolving by name here instead keeps `main.rs` untouched:
+    /// whichever implementer holds (or can reach) the provider list can look
+    /// `provider`/`model_id` up and delegate to [`Self::set_model`]. The default reports
+    /// this unavailable, for sessions with nothing to resolve against — same as every
+    /// other capability-gated default in this trait.
+    fn set_model_by_name(&self, _provider: &str, _model_id: &str) -> Result<(), String> {
+        Err("model switching is not wired to this session".to_string())
+    }
+
+    /// `/tree` — the session's branch tree, pre-order, for
+    /// [`crate::interactive_pickers::BranchPicker`].
+    ///
+    /// Defaulted to empty for the same reason as [`Self::session_entries`]: the golden
+    /// stubs (`tests/print_mode_golden.rs`, `tests/tui_commands_status.rs`,
+    /// `tests/interactive_mode_smoke.rs`) have no session store to walk. The real
+    /// implementer is expected to call
+    /// `crate::interactive_pickers::load_branch_entries(&session_manager.list_branches())`
+    /// over the `SessionManager` it already holds (`session.rs::SessionManager::list_branches`,
+    /// a pre-order walk — see `load_branch_entries`'s own doc comment on why that order
+    /// must not be re-sorted). An empty result renders "no branches" honestly in the TUI
+    /// rather than opening a picker with nothing in it.
+    fn branch_entries(&self) -> Vec<crate::interactive_pickers::BranchEntry> {
+        Vec::new()
+    }
 }
 
 /// `session.subscribe`'s return value: the unsubscribe thunk.
@@ -894,6 +959,170 @@ pub trait PrintModeSession: Send + Sync {
     /// The default still reports that, for sessions with no store behind them.
     fn set_session_name(&self, _name: &str) -> Result<String, String> {
         Err("renaming is not wired to the session store".to_string())
+    }
+
+    /// `/compact` — manually summarize and shrink the conversation history,
+    /// making `/compact` genuinely work rather than reporting itself
+    /// unavailable.
+    ///
+    /// The deterministic half of compaction (boundary detection, cut-point
+    /// selection, token-budget accounting) already existed and was fully
+    /// working — `harness::compaction::v4::prepare_compaction`
+    /// (`harness/compaction/v4.rs:216`) — but it consumes a v4 session-tree
+    /// `Entry` path, and `SingleTurnSession` (the TUI's only
+    /// `PrintModeSession` implementer with a real `Agent` behind it,
+    /// `runtime_host.rs`) has no `Entry` tree: it holds conversation state as
+    /// a flat `Vec<AgentMessage>` on `Agent` (`agent.rs:345,360`). The
+    /// missing piece this method's implementer is expected to use is
+    /// `harness::compaction::v4::prepare_compaction_from_messages`
+    /// (`harness/compaction/v4.rs`), which synthesizes a minimal `Entry`
+    /// path from that flat list so the existing cut-point logic can run
+    /// unmodified — no v4 tree state is added anywhere.
+    ///
+    /// An implementer that performs a real compaction is expected to emit
+    /// `AgentSessionEvent::CompactionStart { reason }` before starting and
+    /// `AgentSessionEvent::CompactionEnd { reason, aborted, .. }` after
+    /// finishing (successfully or not) through its own listener — mirroring
+    /// how `prompt()` emits synthetic `AgentSettled` — so the TUI's existing
+    /// `render_event` handling for those two variants (which predates this
+    /// method and was previously unreachable dead code) has something to
+    /// react to. `Err` returned here is a delivery failure (e.g. compaction
+    /// genuinely found nothing to compact); it does not by itself imply no
+    /// `CompactionEnd` was emitted.
+    ///
+    /// The default reports compaction unavailable, matching every other
+    /// capability-gated default in this trait, for sessions with no
+    /// underlying `Agent`/store to compact.
+    async fn compact(&self, _reason: CompactionReason) -> Result<(), String> {
+        Err("manual compaction is not wired to this session".to_string())
+    }
+
+    /// `/new` — discard the current transcript and start a fresh, empty session in
+    /// place, as if the process had just been launched.
+    ///
+    /// Mutates the live session directly: nothing is swapped out from under the
+    /// caller, so any already-held reference (e.g. this same `Arc<dyn
+    /// PrintModeSession>`) keeps working and now reflects the fresh session.
+    ///
+    /// Defaulted, not required, for the same reason as [`Self::set_session_name`]
+    /// and [`Self::compact`]: four suites hand-implement `PrintModeSession`
+    /// directly (`tests/print_mode_golden.rs`'s `StubSession`,
+    /// `tests/tui_commands_status.rs`'s `StatusSession`,
+    /// `tests/interactive_mode_smoke.rs`'s `StubSession`,
+    /// `tests/tui_delayed_provider.rs`'s `DelayedSession`) and have no session
+    /// store to reset — a required method would break all four for a capability
+    /// they cannot honor.
+    ///
+    /// The real implementer is expected to call `SessionManager::new_session`
+    /// (`session.rs:2165`, `&mut self, options: Option<&NewSessionOptions>) ->
+    /// Result<Option<String>, SessionError>`) with `None` to reset the store's
+    /// buffer/index/leaf and (in persisting mode) compute the fresh file path, and
+    /// `Agent::set_messages(&self, messages: &[AgentMessage])`
+    /// (`agent.rs:360`) with an empty slice so the in-memory transcript the
+    /// `Agent` actually replays from (`agent.rs:345`) matches the now-empty store.
+    /// Note this is unrelated to the `interactive_commands.rs::unavailable_reason`
+    /// entry for `"new"`, which currently (wrongly) says it needs
+    /// `CommandContextActions::new_session` — the TUI reaches session control
+    /// through `PrintModeSession` directly, exactly like `/name` and `/compact`
+    /// already do, never through `CommandContextActions`.
+    ///
+    /// The default reports this unavailable, for sessions with no underlying
+    /// store to reset.
+    fn start_new_session(&self) -> Result<(), String> {
+        Err("starting a new session is not wired to this session".to_string())
+    }
+
+    /// `/clone` — duplicate the session at its current position (the current leaf,
+    /// not the whole tree) into a new session file, and switch the live session to
+    /// it. `Ok(Some(path))` carries the new session file's path; `Ok(None)` is the
+    /// in-memory (non-persisting) case, matching
+    /// `SessionManager::create_branched_session`'s own `None`-on-no-file contract.
+    ///
+    /// Defaulted, not required, for the same reason as [`Self::start_new_session`]:
+    /// the same four hand-implemented test-suite stubs have no session store to
+    /// clone.
+    ///
+    /// The real implementer is expected to call
+    /// `SessionManager::create_branched_session(&mut self, leaf_id: &str) ->
+    /// Result<Option<String>, SessionError>` (`session.rs:2775`) with the store's
+    /// *current* leaf id (branching from "now" rather than an earlier point is what
+    /// distinguishes `/clone` from `/fork`, below), then rebuild the `Agent`'s
+    /// transcript for the new file with `crate::session::entries_to_agent_messages
+    /// (entries: &[&FileEntry]) -> Vec<AgentMessage>` (`session.rs:1595`, `pub(crate)`)
+    /// over the branched path's entries, and hand the result to
+    /// `Agent::set_messages` (`agent.rs:360`). Per the note on
+    /// [`Self::start_new_session`], `interactive_commands.rs::unavailable_reason`'s
+    /// `"clone"` entry (citing `CommandContextActions::fork`/`::new_session`) is
+    /// now stale for the same reason — this method is the real seam.
+    ///
+    /// The default reports this unavailable, for sessions with no underlying store
+    /// to clone.
+    fn clone_session(&self) -> Result<Option<String>, String> {
+        Err("cloning is not wired to this session".to_string())
+    }
+
+    /// `/fork <entry_id>` — branch a new session off an *earlier* point in this
+    /// session's history (`entry_id`, not the current leaf — that is
+    /// [`Self::clone_session`]'s job) and switch the live session to it.
+    /// `Ok(Some(path))` carries the new session file's path; `Ok(None)` is the
+    /// in-memory (non-persisting) case, matching
+    /// `SessionManager::create_branched_session`'s own `None`-on-no-file contract.
+    ///
+    /// Defaulted, not required, for the same reason as [`Self::start_new_session`]:
+    /// the same four hand-implemented test-suite stubs have no session store to
+    /// fork from.
+    ///
+    /// The real implementer is expected to call the same
+    /// `SessionManager::create_branched_session(&mut self, leaf_id: &str) ->
+    /// Result<Option<String>, SessionError>` (`session.rs:2775`) used by
+    /// [`Self::clone_session`], but passing the caller-supplied `entry_id` instead
+    /// of the store's current leaf — that one argument is the entire difference
+    /// between `/fork` and `/clone` at this layer. As with `clone_session`, the
+    /// transcript rebuild for the branched entries is
+    /// `crate::session::entries_to_agent_messages` (`session.rs:1595`) followed by
+    /// `Agent::set_messages` (`agent.rs:360`). Per the note on
+    /// [`Self::start_new_session`], `interactive_commands.rs::unavailable_reason`'s
+    /// `"fork"` entry (citing `CommandContextActions::fork`) is now stale for the
+    /// same reason — this method is the real seam.
+    ///
+    /// The default reports this unavailable, for sessions with no underlying store
+    /// to fork from.
+    fn fork_from(&self, _entry_id: &str) -> Result<Option<String>, String> {
+        Err("forking is not wired to this session".to_string())
+    }
+
+    /// Load a different session file into the *live* session, replacing its
+    /// transcript and store state in place.
+    ///
+    /// This one seam is deliberately shared by two distinct commands so a second,
+    /// near-duplicate method never needs to exist:
+    /// - `/import <path>` — an arbitrary, caller-supplied file path.
+    /// - `/resume` (in-place variant) — a path drawn from
+    ///   [`TuiRuntimeInfo::session_entries`]'s own listing.
+    ///
+    /// Both are "point the live session at this file on disk" and nothing more;
+    /// the only difference is where the path string came from, which is the
+    /// caller's concern, not this method's.
+    ///
+    /// Defaulted, not required, for the same reason as [`Self::start_new_session`]:
+    /// the same four hand-implemented test-suite stubs have no session store to
+    /// repoint.
+    ///
+    /// The real implementer is expected to call
+    /// `SessionManager::set_session_file(&mut self, session_file: &str) ->
+    /// Result<(), SessionError>` (`session.rs:2113`) with `path`, then rebuild the
+    /// `Agent`'s transcript from the newly loaded entries via
+    /// `crate::session::entries_to_agent_messages` (`session.rs:1595`) and
+    /// `Agent::set_messages` (`agent.rs:360`), the same two-step pattern as
+    /// [`Self::clone_session`] and [`Self::fork_from`]. Per the note on
+    /// [`Self::start_new_session`], `interactive_commands.rs::unavailable_reason`'s
+    /// `"import"` entry (citing `CommandContextActions::new_session`) is now stale
+    /// for the same reason — this method is the real seam, exactly like `/name`.
+    ///
+    /// The default reports this unavailable, for sessions with no underlying store
+    /// to repoint.
+    fn switch_to_session_file(&self, _path: &str) -> Result<(), String> {
+        Err("switching session files is not wired to this session".to_string())
     }
 }
 

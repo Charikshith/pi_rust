@@ -31,7 +31,7 @@ use crate::harness::messages::{
     create_branch_summary_message, create_compaction_summary_message, AgentMessage,
 };
 use crate::harness::session::v4::context::build_session_context;
-use crate::harness::session::v4::types::{Entry, MessageEntry};
+use crate::harness::session::v4::types::{CompactionEntry, Entry, MessageEntry};
 
 use super::{estimate_context_tokens, estimate_tokens, CompactionError, CompactionSettings};
 
@@ -318,6 +318,93 @@ pub fn prepare_compaction(
         previous_summary,
         settings: settings.clone(),
     }))
+}
+
+/// Synthesize a v4 `Entry` path from a flat live message list and run
+/// [`prepare_compaction`] over it.
+///
+/// # Why this exists
+///
+/// `prepare_compaction` is written against the v4 session-tree `Entry` model
+/// (`harness/session/v4/types.rs`), because that's the persisted shape the
+/// 0.84.2 oracle's RPC compaction path operates on. The interactive TUI's
+/// `SingleTurnSession` (`pirust-coding-agent/src/runtime_host.rs`), by
+/// contrast, holds conversation state as a flat `Vec<AgentMessage>` on
+/// [`crate::agent::Agent`] (`agent.rs:345` `messages()` / `agent.rs:360`
+/// `set_messages()`) — there is no `Entry` tree at all in that harness. This
+/// function bridges the two: it wraps each live message in a minimal,
+/// linearly-chained `Entry` so `prepare_compaction`'s boundary / cut-point /
+/// token-budget logic — which is exactly what we want reused, not
+/// reimplemented — can run unmodified.
+///
+/// # Synthesis rules
+///
+/// Entry `i` gets `id = "live:{i}"`, `seq = i`, and `parent_id =
+/// Some("live:{i-1}")` (or `None` for `i == 0`) — a straight-line chain
+/// matching message order, since the flat live list has no branching.
+/// `AgentMessage::CompactionSummary` messages become `Entry::Compaction`
+/// (so `prepare_compaction`'s "already compacted, nothing to do" and
+/// "previous summary" logic see them as compaction boundaries, not plain
+/// messages); every other variant, including `AgentMessage::BranchSummary`,
+/// becomes a plain `Entry::Message`. Mapping `BranchSummary` to a message
+/// entry rather than `Entry::BranchSummary` is a deliberate simplification:
+/// `BranchSummary` is a v3 tree-navigation concept, and `SingleTurnSession`
+/// (a single, non-branching turn sequence) never produces one — so the two
+/// representations are behaviorally identical for every input this function
+/// will actually see.
+///
+/// The synthesized `Entry::Compaction`'s `retained_tail` is always left
+/// empty — this is correct, not a shortcut. `prepare_compaction` only reads
+/// a previous compaction's `retained_tail` to *re-materialize* messages that
+/// would otherwise be missing from the entry path (see
+/// `compactable_entries` construction above). Here, nothing is missing: the
+/// flat live list already carries that same tail as literal, subsequent
+/// `AgentMessage`s / `Entry::Message`s right after the compaction entry.
+/// Populating `retained_tail` too would make `build_session_context`
+/// double-count that tail (see
+/// `harness/session/v4/context.rs::session_entry_to_context_messages`'s
+/// `Entry::Compaction` arm, which re-emits `[summary] + retained_tail`).
+///
+/// Because entries are synthesized 1:1, in order, from `messages`, the
+/// resulting `CompactionPreparation::retained_tail` is guaranteed to be a
+/// value-for-value suffix of `messages` — callers may safely recover *which*
+/// original message index starts the retained tail by counting from the
+/// end, without needing to match on `Entry` ids.
+pub fn prepare_compaction_from_messages(
+    messages: &[AgentMessage],
+    settings: &CompactionSettings,
+) -> Result<Option<CompactionPreparation>, CompactionError> {
+    let entries: Vec<Entry> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let id = format!("live:{index}");
+            let parent_id = (index > 0).then(|| format!("live:{}", index - 1));
+            let timestamp = message_timestamp(message);
+            match message {
+                AgentMessage::CompactionSummary(cs) => Entry::Compaction(CompactionEntry {
+                    id,
+                    seq: index as i64,
+                    parent_id,
+                    timestamp,
+                    summary: cs.summary.clone(),
+                    retained_tail: Vec::new(),
+                    tokens_before: cs.tokens_before,
+                    details: None,
+                    usage: None,
+                }),
+                _ => Entry::Message(MessageEntry {
+                    id,
+                    seq: index as i64,
+                    parent_id,
+                    timestamp,
+                    message: message.clone(),
+                    terminate: None,
+                }),
+            }
+        })
+        .collect();
+    prepare_compaction(&entries, settings)
 }
 
 /// The message's `timestamp` (used for virtual retained entries; compaction.ts

@@ -20,9 +20,9 @@ use std::time::Duration;
 use pirust_agent_core::harness::types::SessionHeader;
 use pirust_coding_agent::interactive_mode::InteractiveSession;
 use pirust_coding_agent::print_mode::{
-    AgentSessionEvent, Cancelled, ExtensionBinding, NavigateTreeOptions, PrintModeSession,
-    PromptOptions, SessionEventListener, SessionStateView, Subscription, ThrownValue,
-    ToolApprovalDecider, ToolApprovalDecision, TuiRuntimeInfo, TuiRuntimeStatus,
+    AgentSessionEvent, Cancelled, CompactionReason, ExtensionBinding, NavigateTreeOptions,
+    PrintModeSession, PromptOptions, SessionEventListener, SessionStateView, Subscription,
+    ThrownValue, ToolApprovalDecider, ToolApprovalDecision, TuiRuntimeInfo, TuiRuntimeStatus,
 };
 use pirust_tui::terminal::Terminal;
 
@@ -116,6 +116,15 @@ struct DelayedSession {
     /// release-wait loop below so a cancelled prompt unwinds on its own
     /// instead of relying on a hard task abort dropping it mid-await.
     aborted: Arc<AtomicBool>,
+    /// How many times `compact` has been entered — lets a mutual-exclusion
+    /// test assert `/compact` was never actually invoked while a prompt was
+    /// in flight (the guard lives in `run_compact`, before any call reaches
+    /// this session at all).
+    compact_count: Arc<AtomicUsize>,
+    /// When set, `compact` returns `Err` instead of `Ok`, so a test can
+    /// assert the TUI shows a failure notice rather than "Compaction
+    /// finished".
+    fail_compact: Arc<AtomicBool>,
 }
 
 impl DelayedSession {
@@ -132,6 +141,8 @@ impl DelayedSession {
             decider: Arc::new(Mutex::new(None)),
             last_decision: Arc::new(Mutex::new(None)),
             aborted: Arc::new(AtomicBool::new(false)),
+            compact_count: Arc::new(AtomicUsize::new(0)),
+            fail_compact: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -242,6 +253,43 @@ impl PrintModeSession for DelayedSession {
 
     fn abort(&self) {
         self.aborted.store(true, Ordering::SeqCst);
+    }
+
+    /// Mirrors `SingleTurnSession::compact`'s real event contract
+    /// (`runtime_host.rs`) — emit `CompactionStart`, then `CompactionEnd`
+    /// with `aborted` reflecting the outcome — so tests exercise
+    /// `InteractiveMode`'s reaction to those events, not a stand-in.
+    async fn compact(&self, reason: CompactionReason) -> Result<(), String> {
+        self.compact_count.fetch_add(1, Ordering::SeqCst);
+        let listener = self.listener.lock().unwrap().clone();
+        if let Some(listener) = &listener {
+            listener(&AgentSessionEvent::CompactionStart { reason });
+        }
+        let result = if self.fail_compact.load(Ordering::SeqCst) {
+            Err("synthetic compaction failure".to_string())
+        } else {
+            Ok(())
+        };
+        if let Some(listener) = &listener {
+            let event = match &result {
+                Ok(()) => AgentSessionEvent::CompactionEnd {
+                    reason,
+                    result: None,
+                    aborted: false,
+                    will_retry: false,
+                    error_message: None,
+                },
+                Err(error) => AgentSessionEvent::CompactionEnd {
+                    reason,
+                    result: None,
+                    aborted: true,
+                    will_retry: false,
+                    error_message: Some(error.clone()),
+                },
+            };
+            listener(&event);
+        }
+        result
     }
 }
 
@@ -637,6 +685,164 @@ fn a_prompt_submitted_mid_turn_is_queued_then_runs() {
         session.prompt_count.load(Ordering::SeqCst),
         2,
         "the queued prompt should have run after the first turn finished"
+    );
+}
+
+/// `/compact` runs end to end: it reaches the session exactly once and both
+/// the start and success notices render in the transcript.
+#[test]
+fn slash_compact_runs_and_shows_start_and_finish_notices() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let compact_count = Arc::clone(&session.compact_count);
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        on_input("/compact");
+        thread::sleep(Duration::from_millis(30));
+        on_input("\r");
+        for _ in 0..200 {
+            if compact_count.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(80));
+        on_input("\u{4}"); // quit
+    });
+
+    runtime.block_on(mode.run_async());
+
+    assert_eq!(
+        session.compact_count.load(Ordering::SeqCst),
+        1,
+        "/compact should have reached the session exactly once"
+    );
+    let writes = handles.writes.lock().unwrap().clone();
+    assert!(
+        writes.contains("Compacting session"),
+        "the start notice should render, got: {writes:?}"
+    );
+    assert!(
+        writes.contains("Compaction finished"),
+        "the success notice should render, got: {writes:?}"
+    );
+}
+
+/// A failed compaction must say so, not silently claim success — the bug
+/// `render_event`'s `CompactionEnd` arm used to have (it ignored `aborted`
+/// entirely and always showed "Compaction finished").
+#[test]
+fn slash_compact_failure_shows_failure_notice_not_success() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    session.fail_compact.store(true, Ordering::SeqCst);
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let compact_count = Arc::clone(&session.compact_count);
+    let on_input_slot = handles.input;
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        on_input("/compact");
+        thread::sleep(Duration::from_millis(30));
+        on_input("\r");
+        for _ in 0..200 {
+            if compact_count.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(80));
+        on_input("\u{4}"); // quit
+    });
+
+    runtime.block_on(mode.run_async());
+
+    let writes = handles.writes.lock().unwrap().clone();
+    assert!(
+        writes.contains("Compaction failed"),
+        "a failed compaction must say so, got: {writes:?}"
+    );
+    assert!(
+        !writes.contains("Compaction finished"),
+        "a failed compaction must not also claim success, got: {writes:?}"
+    );
+}
+
+/// A prompt turn and a `/compact` must never run concurrently: both mutate
+/// `Agent`'s message list, so `run_compact` guards on `active_turn` itself
+/// rather than relying on the generic mid-turn slash-command dispatch.
+#[test]
+fn slash_compact_is_blocked_while_a_prompt_is_in_flight() {
+    let terminal = Box::new(DriveTerminal::new());
+    let handles = TerminalHandles::grab(&terminal);
+    let session = Arc::new(DelayedSession::new());
+    let runtime = make_runtime();
+    let mut mode = pirust_coding_agent::interactive_mode::InteractiveMode::new(
+        terminal,
+        Arc::clone(&session) as Arc<dyn InteractiveSession>,
+        runtime.handle().clone(),
+    );
+
+    let prompt_seen = Arc::clone(&session.prompt_seen);
+    let release = Arc::clone(&session.release);
+    let on_input_slot = handles.input;
+    let writes_probe = Arc::clone(&handles.writes);
+    thread::spawn(move || {
+        let mut on_input = take_on_input(&on_input_slot);
+        // Start a prompt turn, which blocks on `release`.
+        type_and_submit(&mut on_input);
+        for _ in 0..200 {
+            if prompt_seen.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // While the prompt is still in flight, try to compact.
+        on_input("/compact");
+        thread::sleep(Duration::from_millis(30));
+        on_input("\r");
+        for _ in 0..200 {
+            if writes_probe
+                .lock()
+                .unwrap()
+                .contains("Cannot compact while a request is in progress")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Let the prompt finish, then quit.
+        release.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(100));
+        on_input("\u{4}"); // quit
+    });
+
+    runtime.block_on(mode.run_async());
+
+    let writes = handles.writes.lock().unwrap().clone();
+    assert!(
+        writes.contains("Cannot compact while a request is in progress"),
+        "compaction must refuse to start mid-turn, got: {writes:?}"
+    );
+    assert_eq!(
+        session.compact_count.load(Ordering::SeqCst),
+        0,
+        "the guard in run_compact should stop the call before it ever reaches the session"
     );
 }
 

@@ -539,6 +539,20 @@ async fn run(parsed: args::Args) -> i32 {
         // keypress would be pure waste.
         let model_entries =
             pirust_coding_agent::interactive_pickers::load_model_entries(model_runtime.providers());
+        // `TuiRuntimeInfo::set_model_by_name` (`runtime_host.rs`) resolves a `/model` picker
+        // selection back into a real `pirust_ai::types::Model` to hand to `Agent::set_model` —
+        // `SingleTurnSession` has no such catalogue of its own (it only holds the one `Agent`
+        // already in use), so it is handed the same flattened `ComposedProvider::models` list
+        // `model_entries` above was itself built from, right after construction, same as
+        // `model_entries`. This mirrors `model_entries`'s own doc comment: the only scope that
+        // holds `model_runtime` is this interactive arm, so this is where the catalogue has to
+        // be built and handed off.
+        let model_catalog: Vec<pirust_ai::types::Model> = model_runtime
+            .providers()
+            .iter()
+            .flat_map(|provider| provider.models.iter().cloned())
+            .collect();
+        session.set_model_catalog(model_catalog);
         run_interactive_mode(session, model_entries).await
     } else {
         let print_output_mode = print_mode::to_print_output_mode(app_mode);
@@ -688,7 +702,78 @@ async fn run_interactive_mode(
     let mut mode = InteractiveMode::new(terminal, session, runtime);
     mode.set_model_entries(model_entries);
     mode.run_async().await;
+
+    // `/restart` (`interactive_mode.rs::run_restart`) never spawns anything itself — it
+    // only sets `restart_requested` and quits through the exact same path `/quit` uses.
+    // This is deliberately the *only* place that ever calls `restart_process`, and it
+    // must run here, after the `.await` above has returned, not from inside
+    // `dispatch_command` or `run_async`: by this point `run_async`'s loop has already
+    // broken out of its `self.quit` check (interactive_mode.rs's `run_async`, the
+    // `if self.quit.load(..) { break; }` at the top of its loop) and `mode` — including
+    // the `TUI`/`Terminal` it owns — has been through its normal teardown, which is what
+    // takes the terminal back out of raw mode and off the alternate screen. Spawning a
+    // second `pirust` process any earlier, while this one still owns the terminal in raw
+    // mode, would leave two processes racing to read the same stdin and write the same
+    // stdout — not a restart, a wedged terminal (the same class of hazard this crate's
+    // Ctrl+C/Esc fixes exist to avoid). `mode` is a plain local `let mut mode`, so it is
+    // still alive and its flag is still readable here even though `run_async` took
+    // `&mut self` — the borrow ends when the `.await` above completes.
+    if mode.restart_requested() {
+        return restart_process();
+    }
     0
+}
+
+/// Re-exec the current `pirust` invocation in place of this process.
+///
+/// Only ever called from [`run_interactive_mode`], strictly after the TUI has already
+/// torn down — see that call site's comment for why that ordering is load-bearing.
+///
+/// Spawns the replacement and returns immediately, **without** calling `Child::wait`.
+/// This process's only remaining job once the child exists is to get out of the way: the
+/// terminal is a single resource, and holding this process alive (blocked on the child)
+/// buys nothing, since nothing here still needs to run afterward — `main`'s caller
+/// (`fn main`) does nothing with the exit code but pass it straight to
+/// `std::process::exit`. Not calling `Child::wait` is also why this cannot use the
+/// Unix-only `exec`-replace trick (`std::os::unix::process::CommandExt::exec`, which
+/// really would collapse two processes into one) even if this file only ever ran on
+/// Unix: `spawn` + let-the-parent-exit is the one approach that is both cross-platform
+/// (works on Windows, where `exec` does not exist at all) and never blocks this process
+/// waiting on the new one.
+///
+/// `std::env::args().skip(1)` reproduces the original argv byte-for-byte, so flags like
+/// `--resume <id>` carry over — they live in argv, never in a stream that gets consumed.
+/// The one input that genuinely cannot be reproduced this way is piped stdin
+/// (`read_piped_stdin`, below): a pipe is drained once and a re-exec's stdin would just
+/// see immediate EOF instead of the original content. That is not guarded here because
+/// it cannot arise here: `resolve_app_mode` (`print_mode.rs:1196-1211`) only ever chooses
+/// `AppMode::Interactive` when `stdin_is_tty` was already `true` (its line 1207:
+/// `!stdin_is_tty || !stdout_is_tty` forces `AppMode::Print` instead) — so any process
+/// that ever reaches `run_interactive_mode`, and therefore any session where `/restart`
+/// is reachable at all, was never reading piped stdin to begin with. The guard the task
+/// anticipated is already enforced one layer up, before this function's caller's caller
+/// even runs; duplicating it here would just be dead code checking a condition that
+/// cannot be false at this call site.
+fn restart_process() -> i32 {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            eprintln!("Error: /restart could not resolve the current executable: {err}");
+            return 1;
+        }
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match std::process::Command::new(&exe).args(&args).spawn() {
+        // Exit 0: the restart was successfully *scheduled*, which is the only thing this
+        // process can promise — whatever the new process's own exit code eventually is
+        // belongs to that process, not this one, exactly as a shell would treat any other
+        // backgrounded-then-detached command.
+        Ok(_child) => 0,
+        Err(err) => {
+            eprintln!("Error: /restart failed to launch {}: {err}", exe.display());
+            1
+        }
+    }
 }
 
 /// `getSessionDir()`-equivalent precedence, `main.ts:573-577` + spec §5.3.

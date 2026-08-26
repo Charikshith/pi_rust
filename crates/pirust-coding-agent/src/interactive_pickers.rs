@@ -9,10 +9,11 @@
 //! and §6 (session picker: title / cwd / modified time / model, a stable
 //! column layout, scrolling, and a clear selected-row highlight).
 //!
-//! This module owns the picker *widgets* (`ModelPicker`, `SessionPicker`) and
-//! their *data loaders* (`load_model_entries`, `load_session_entries`). It
-//! does **not** wire itself into `interactive_mode.rs` — per the task split,
-//! that file is edited by the caller, not here.
+//! This module owns the picker *widgets* (`ModelPicker`, `SessionPicker`,
+//! `BranchPicker`) and their *data loaders* (`load_model_entries`,
+//! `load_session_entries`, `load_branch_entries`). It does **not** wire
+//! itself into `interactive_mode.rs` — per the task split, that file is
+//! edited by the caller, not here.
 //!
 //! # Data sources (real, not fabricated)
 //!
@@ -40,6 +41,21 @@
 //!   entries once, lazily, or from an in-memory cache) and looks up by
 //!   `SessionInfo::id`. An empty map is fine — those rows just render with
 //!   a blank model column instead of a made-up value.
+//! - **Branches**: [`crate::session::SessionManager::list_branches`]
+//!   (`crate::session`:2675) returns `Vec<BranchInfo<'_>>`
+//!   (`crate::session`:1349) — a pre-order walk of the whole entry tree
+//!   (`crate::session`:1377-1382), so the output is already in tree-render
+//!   order. [`load_branch_entries`] takes that slice directly and must not
+//!   re-sort it. `BranchInfo` borrows from the `SessionManager` it was built
+//!   from, so it cannot live inside a picker the way the borrowed source
+//!   couldn't for sessions either — see [`BranchEntry`].
+//!
+//!   `BranchInfo`/`list_branches` is **not** a port of a Pi TypeScript
+//!   function: `crate::session`:1343-1345 already notes there is no
+//!   `listBranches`/`getTree` on Pi's `session-manager.ts` (grepped there;
+//!   the one `getTree` hit is an unrelated RPC-oracle stub), and a
+//!   `treePicker`/`branchPicker` grep across this repo turns up nothing
+//!   either — `BranchPicker` below is new, not translated from anywhere.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
@@ -50,9 +66,10 @@ use pirust_tui::keys::matches_key;
 use pirust_tui::tui::Component;
 use pirust_tui::utils::truncate_to_width;
 
+use crate::interactive_a11y::glyph;
 use crate::interactive_theme::{dark, fg};
 use crate::models::{locale_compare, ComposedProvider};
-use crate::session::SessionInfo;
+use crate::session::{BranchInfo, SessionInfo};
 
 // =============================================================================
 // Data: models
@@ -172,6 +189,20 @@ pub struct SessionEntry {
     /// The session's current model, if the caller could supply one. See the
     /// module docs: `SessionInfo` alone does not carry this.
     pub model: Option<String>,
+    /// `SessionInfo::path` (`session.rs:1705`) — the session file's path,
+    /// exactly as it was listed. This is what makes in-place `/resume`
+    /// possible: it is the argument `PrintModeSession::switch_to_session_file`
+    /// (`print_mode.rs:1086`, already wired for `/import`) needs to swap the
+    /// live session onto the chosen entry. It was previously dropped in the
+    /// `SessionInfo` → `SessionEntry` projection, which is why in-place
+    /// `/resume` used to have no real path to call with; it is carried
+    /// through now instead of re-deriving or guessing one. Deliberately not
+    /// folded into the fuzzy-search haystack in [`SessionPicker::new`]: a
+    /// full filesystem path shares directory-name segments across unrelated
+    /// rows (e.g. every session under the same project), so matching on it
+    /// would surface rows the query didn't really mean and make the filter
+    /// feel broken.
+    pub path: String,
 }
 
 /// `SessionInfo::modified` is milliseconds since the Unix epoch (Pi's
@@ -212,6 +243,73 @@ pub fn load_session_entries(
             cwd: info.cwd.clone(),
             modified: millis_to_system_time(info.modified),
             model: models_by_id.get(&info.id).cloned(),
+            path: info.path.clone(),
+        })
+        .collect()
+}
+
+// =============================================================================
+// Data: branches
+// =============================================================================
+
+/// One node of a session's branch tree, owned out of a [`BranchInfo`]. Same
+/// reason as [`SessionEntry`] over `SessionInfo` (module docs above):
+/// `BranchInfo<'a>` borrows every field from the `SessionManager` its walk
+/// was built against (`crate::session`:1349-1370), so a picker that must
+/// outlive one render pass cannot hold `BranchInfo` itself — it would tie
+/// the picker's lifetime to the manager's borrow. `BranchEntry` is a
+/// field-for-field owned mirror: same names, same meaning, `String`/`Option<String>`
+/// in place of `&str`/`Option<&str>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchEntry {
+    /// `BranchInfo::id` — the entry id `SessionManager`'s tree-navigation
+    /// primitive (`PrintModeSession::navigate_tree`, per `interactive_commands.rs`'s
+    /// `/tree` stub) would take to jump here.
+    pub id: String,
+    /// `BranchInfo::parent_id` — `None` for a root or an orphan (see
+    /// `build_branch_list`'s doc comment, `crate::session`:1384-1389).
+    pub parent_id: Option<String>,
+    /// `BranchInfo::label` — `SessionManager::get_label` for this id, when set.
+    pub label: Option<String>,
+    /// `BranchInfo::timestamp` — `entry.timestamp`, an ISO-8601 string (Pi's
+    /// on-disk transcript format). See [`BranchPicker`]'s doc comment for how
+    /// this picker displays it without a date/time dependency.
+    pub timestamp: Option<String>,
+    /// `BranchInfo::is_branch_point` — history forks here (more than one
+    /// child).
+    pub is_branch_point: bool,
+    /// `BranchInfo::child_count`.
+    pub child_count: usize,
+    /// `BranchInfo::is_current_leaf` — "you are here".
+    pub is_current_leaf: bool,
+    /// `BranchInfo::depth` — distance from its root; a root is `0`.
+    pub depth: usize,
+}
+
+/// Project a [`SessionManager::list_branches`] (`crate::session`:2675) result
+/// into owned [`BranchEntry`] values, field for field, in the same order.
+///
+/// Caller contract: pass the result of `SessionManager::list_branches`
+/// (whole tree) or `::branch_points` (`crate::session`:2683, fork points
+/// only) directly. **Do not re-sort or filter `branches` before calling
+/// this** — `list_branches`'s pre-order walk (`crate::session`:1377-1382) is
+/// exactly what lets [`BranchPicker`] render indentation from
+/// [`BranchEntry::depth`] alone, with no tree-rebuilding of its own; a
+/// re-sorted input would silently desync a row's indentation from its
+/// actual ancestor chain. This function does no I/O, does no sorting of its
+/// own, and holds nothing from `branches` afterward.
+pub fn load_branch_entries(branches: &[BranchInfo<'_>]) -> Vec<BranchEntry> {
+    branches
+        .iter()
+        .map(|branch| BranchEntry {
+            id: branch.id.to_string(),
+            parent_id: branch.parent_id.map(str::to_string),
+            label: branch.label.map(str::to_string),
+            timestamp: branch.timestamp.map(str::to_string),
+            is_branch_point: branch.is_branch_point,
+            child_count: branch.child_count,
+            is_current_leaf: branch.is_current_leaf,
+            depth: branch.depth,
         })
         .collect()
 }
@@ -1004,6 +1102,460 @@ impl Component for SessionPicker {
 }
 
 // =============================================================================
+// BranchPicker
+// =============================================================================
+
+/// Number of tree-guide segments (ancestor fillers + this row's own
+/// connector) rendered before a row's id/label. Each segment is 2-3 display
+/// columns (`"│  "`/`"   "` filler, `"├─ "`/`"└─ "` connector), so an
+/// unclamped indent on a long, repeatedly-forked session (branch-and-rebranch
+/// chains can reach dozens of levels) could consume the whole row width and
+/// push the id/label off screen entirely, or past a narrow terminal
+/// altogether. Clamped here: once a row needs more than this many segments,
+/// the outermost ones collapse into one "elided" marker
+/// (`build_tree_prefixes`) and only the innermost `MAX_INDENT_LEVELS - 1`
+/// ancestor levels plus the row's own connector are drawn — so the reserved
+/// indent width is bounded at a small, fixed number of columns regardless of
+/// how deep the branch tree goes.
+const MAX_INDENT_LEVELS: usize = 8;
+
+/// For each entry, is it the last (by original pre-order position) of its
+/// parent's children? Used only to choose `"├─ "` vs `"└─ "` connectors and
+/// whether an ancestor's vertical guide should keep running past its row.
+///
+/// Derived purely from `parent_id`, with no extra field needed on
+/// [`BranchInfo`]/[`BranchEntry`]: because `list_branches`'s walk is
+/// pre-order (`crate::session`:1377-1382), a parent's children are visited
+/// as a contiguous *group* in the sequence of "which entries share this
+/// `parent_id`" — the last entry in `entries` naming a given `parent_id` is
+/// that parent's last child. One pass records, per `parent_id`, the index of
+/// the last entry seen with it; a second pass checks whether each entry's own
+/// index is that recorded value.
+fn compute_last_child_flags(entries: &[BranchEntry]) -> Vec<bool> {
+    let mut last_index_for_parent: HashMap<Option<&str>, usize> =
+        HashMap::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        last_index_for_parent.insert(entry.parent_id.as_deref(), i);
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| last_index_for_parent.get(&entry.parent_id.as_deref()) == Some(&i))
+        .collect()
+}
+
+/// Precompute each row's tree-guide prefix (indentation + connector) once,
+/// alongside `haystacks` — never rebuilt per keystroke or per render, only
+/// once at construction (see [`BranchPicker::new`]).
+///
+/// A root (`depth == 0`) gets no prefix at all: it is drawn flush left, so it
+/// is never itself a guide column for its children either — a depth-1 row
+/// gets zero ancestor fillers and just its own connector, matching standard
+/// ASCII tree art where the root's column is never drawn.
+///
+/// Ancestor guide state is tracked with a single stack, `ancestor_continues`,
+/// walked once over `entries` in the pre-order they already arrive in — no
+/// per-row walk back up the parent chain is needed. `ancestor_continues[k]`
+/// (0-based, representing the ancestor at depth `k + 1`) is `true` when that
+/// ancestor is *not* the last child of its own parent, i.e. more of the tree
+/// still follows below it, so a vertical bar must keep running through this
+/// row's column. `depth`'s pre-order guarantee (a child's depth is always
+/// exactly one more than the entry immediately governing it) is what makes
+/// `resize`-to-`depth` a correct truncate/pad in one call rather than
+/// something that needs validating per row; if upstream data were ever
+/// malformed the `resize` still can't panic, it just pads with `false`
+/// (blank filler) instead of guessing a connector shape.
+fn build_tree_prefixes(entries: &[BranchEntry], is_last: &[bool]) -> Vec<String> {
+    let mut out = Vec::with_capacity(entries.len());
+    let mut ancestor_continues: Vec<bool> = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let depth = entry.depth;
+        if depth == 0 {
+            out.push(String::new());
+            ancestor_continues.clear();
+            continue;
+        }
+        // Trim (or defensively pad) to exactly `depth - 1` ancestors —
+        // everything strictly between the root and this row.
+        ancestor_continues.resize(depth - 1, false);
+
+        let total_segments = depth; // (depth - 1) fillers + this row's own connector
+        let elided = total_segments > MAX_INDENT_LEVELS;
+        let filler_start = if elided {
+            (depth - 1).saturating_sub(MAX_INDENT_LEVELS - 1)
+        } else {
+            0
+        };
+
+        let mut prefix = String::new();
+        if elided {
+            prefix.push_str(glyph("\u{22ef} ", "~ "));
+        }
+        for level in filler_start..(depth - 1) {
+            let continues = ancestor_continues.get(level).copied().unwrap_or(false);
+            prefix.push_str(if continues {
+                glyph("\u{2502}  ", "|  ")
+            } else {
+                "   "
+            });
+        }
+        prefix.push_str(if is_last[i] {
+            glyph("\u{2514}\u{2500} ", "`- ")
+        } else {
+            glyph("\u{251c}\u{2500} ", "|- ")
+        });
+        out.push(prefix);
+
+        ancestor_continues.resize(depth, false);
+        ancestor_continues[depth - 1] = !is_last[i];
+    }
+    out
+}
+
+/// The `/tree` branch picker: a fuzzy-searchable, indented tree view over a
+/// session's whole branch history (see module docs — sourced from
+/// [`SessionManager::list_branches`], `crate::session`:2675), with the same
+/// clamped ↑/↓ navigation, scrolled viewport and render cache as
+/// [`ModelPicker`]/[`SessionPicker`]. New widget — see the module docs'
+/// "Branches" section for why this is not a Pi port.
+///
+/// # Timestamp display
+/// `BranchEntry::timestamp` is an ISO-8601 string, not a `SystemTime` —
+/// unlike [`SessionEntry::modified`], there is no millisecond-epoch `i64` to
+/// convert. [`format_relative_age`] cannot be reused as-is (it takes
+/// `SystemTime`), and hand-rolling an ISO-8601 parser (timezone offsets,
+/// leap years, `Z` vs `+HH:MM` suffixes) is out of proportion for a picker
+/// column and explicitly out of scope — no date/time crate is a dependency
+/// here and adding one is not this task. This picker instead shows the raw
+/// ISO-8601 string, truncated to `"YYYY-MM-DDTHH:MM:SS"` (19 characters, the
+/// calendar/clock portion, dropping sub-second precision and any timezone
+/// suffix) through the same [`truncate_to_width`] every other column uses.
+/// That is honest about what the data actually is — an audit-trail
+/// timestamp, not a live "how stale is this" clock the way the session
+/// picker's modified time is — rather than implying false live-relative
+/// precision.
+pub struct BranchPicker {
+    entries: Vec<BranchEntry>,
+    /// `"{id} {label}"` per entry, built once — fuzzy filter is over id +
+    /// label, per spec.
+    haystacks: Vec<String>,
+    /// Tree-guide prefix per entry (see [`build_tree_prefixes`]), built once
+    /// alongside `haystacks` and `entries`; indexed by the same original
+    /// index, so a filtered/scrolled row looks its prefix up by `entries`
+    /// index just like it looks up the entry itself.
+    prefixes: Vec<String>,
+    filter: String,
+    filtered: Vec<u32>,
+    scored: Vec<(u32, f64)>,
+    selected: usize,
+    scroll: usize,
+    max_visible: usize,
+    revision: u64,
+    cache: Option<RenderCache>,
+}
+
+impl BranchPicker {
+    /// Build a picker over `entries` (see [`load_branch_entries`] — pass its
+    /// output directly, in the pre-order it already arrives in), showing
+    /// `max_visible` rows at a time (clamped to at least 1).
+    pub fn new(entries: Vec<BranchEntry>, max_visible: usize) -> Self {
+        let haystacks = entries
+            .iter()
+            .map(|e| format!("{} {}", e.id, e.label.as_deref().unwrap_or("")))
+            .collect();
+        let is_last = compute_last_child_flags(&entries);
+        let prefixes = build_tree_prefixes(&entries, &is_last);
+        let len = entries.len();
+        let mut filtered = Vec::with_capacity(len);
+        filtered.extend(0u32..len as u32);
+        Self {
+            entries,
+            haystacks,
+            prefixes,
+            filter: String::new(),
+            filtered,
+            scored: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            max_visible: max_visible.max(1),
+            revision: 0,
+            cache: None,
+        }
+    }
+
+    /// See [`ModelPicker::set_max_visible`].
+    pub fn set_max_visible(&mut self, max_visible: usize) {
+        self.max_visible = max_visible.max(1);
+        self.scroll = clamp_scroll(self.selected, self.scroll, self.max_visible);
+        self.cache = None;
+    }
+
+    /// The current filter text.
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// How many entries currently match the filter.
+    pub fn match_count(&self) -> usize {
+        self.filtered.len()
+    }
+
+    /// How many entries exist in total, filter aside.
+    pub fn total_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// The entry the highlighted row points at, if any.
+    pub fn selected_entry(&self) -> Option<&BranchEntry> {
+        self.filtered
+            .get(self.selected)
+            .map(|&idx| &self.entries[idx as usize])
+    }
+
+    fn rescan(&mut self, query: &str) {
+        if query.trim().is_empty() {
+            self.filtered.sort_unstable();
+        } else {
+            score_candidates(&self.haystacks, &self.filtered, query, &mut self.scored);
+            self.filtered.clear();
+            self.filtered
+                .extend(self.scored.iter().map(|&(idx, _)| idx));
+        }
+        self.selected = 0;
+        self.scroll = 0;
+        self.revision += 1;
+        self.cache = None;
+    }
+
+    /// See [`ModelPicker::push_filter_char`] — same monotonic-subsequence
+    /// argument applies verbatim.
+    pub fn push_filter_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        let mut filter = std::mem::take(&mut self.filter);
+        filter.push(ch);
+        self.rescan(filter.trim());
+        self.filter = filter;
+    }
+
+    /// See [`ModelPicker::pop_filter_char`].
+    pub fn pop_filter_char(&mut self) {
+        let mut filter = std::mem::take(&mut self.filter);
+        let popped = filter.pop().is_some();
+        if popped {
+            let len = self.entries.len();
+            self.filtered.clear();
+            self.filtered.extend(0u32..len as u32);
+            self.rescan(filter.trim());
+        }
+        self.filter = filter;
+    }
+
+    /// See [`ModelPicker::move_selection`].
+    pub fn move_selection(&mut self, delta: i32) {
+        if self.filtered.is_empty() {
+            return;
+        }
+        let max = self.filtered.len() - 1;
+        let next = if delta < 0 {
+            self.selected.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (self.selected + delta as usize).min(max)
+        };
+        if next != self.selected {
+            self.selected = next;
+            self.scroll = clamp_scroll(self.selected, self.scroll, self.max_visible);
+            self.cache = None;
+        }
+    }
+
+    /// See [`ModelPicker::handle_key`].
+    pub fn handle_key(&mut self, data: &str) -> PickerAction {
+        if matches_key(data, "escape") {
+            return PickerAction::Dismissed;
+        }
+        if matches_key(data, "enter") {
+            return match self.filtered.get(self.selected) {
+                Some(&idx) => PickerAction::Selected(idx as usize),
+                None => PickerAction::None,
+            };
+        }
+        if matches_key(data, "up") {
+            self.move_selection(-1);
+            return PickerAction::None;
+        }
+        if matches_key(data, "down") {
+            self.move_selection(1);
+            return PickerAction::None;
+        }
+        if matches_key(data, "backspace") {
+            self.pop_filter_char();
+            return PickerAction::None;
+        }
+        let mut chars = data.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            self.push_filter_char(ch);
+        }
+        PickerAction::None
+    }
+
+    fn column_tier(width: usize) -> ColumnTier {
+        if width >= 70 {
+            ColumnTier::Full
+        } else if width >= 30 {
+            ColumnTier::Compact
+        } else {
+            ColumnTier::Minimal
+        }
+    }
+
+    fn render_uncached(&self, width: usize) -> Vec<String> {
+        let mut lines = Vec::with_capacity(self.max_visible + 2);
+        lines.push(format!("Browse branches (filter: {})", self.filter));
+
+        if self.filtered.is_empty() {
+            let msg = if self.entries.is_empty() {
+                "  (no branches available)"
+            } else {
+                "  (no matching branches)"
+            };
+            lines.push(msg.to_string());
+            lines.push("↑/↓ navigate · Enter jump · Esc dismiss".to_string());
+            return lines;
+        }
+
+        let tier = Self::column_tier(width);
+        let end = (self.scroll + self.max_visible).min(self.filtered.len());
+        for row in self.scroll..end {
+            let idx = self.filtered[row] as usize;
+            let entry = &self.entries[idx];
+            let prefix = &self.prefixes[idx];
+            let is_selected = row == self.selected;
+            lines.push(Self::format_row(entry, prefix, tier, width, is_selected));
+        }
+
+        if self.scroll > 0 || end < self.filtered.len() {
+            lines.push(format!("  ({}/{})", self.selected + 1, self.filtered.len()));
+        }
+        lines.push("↑/↓ navigate · Enter jump · Esc dismiss".to_string());
+        lines
+    }
+
+    /// `entry.timestamp` truncated to its calendar/clock portion — see
+    /// [`BranchPicker`]'s doc comment for why.
+    fn format_timestamp(entry: &BranchEntry) -> String {
+        match &entry.timestamp {
+            Some(ts) => truncate_to_width(ts, 19, "", false),
+            None => "-".to_string(),
+        }
+    }
+
+    /// Neither the current-leaf nor branch-point marker relies on colour
+    /// alone (spec: no colour-only meaning) — both are distinct glyphs/text
+    /// routed through [`glyph`] so `PIRUST_ASCII`/`TERM=dumb` still leave a
+    /// legible, non-colour marker behind.
+    fn format_row(
+        entry: &BranchEntry,
+        prefix: &str,
+        tier: ColumnTier,
+        width: usize,
+        is_selected: bool,
+    ) -> String {
+        let marker = if is_selected { "> " } else { "  " };
+        let prefix_width = prefix.chars().count();
+        let label = entry.label.as_deref().unwrap_or(entry.id.as_str());
+        let body = match tier {
+            ColumnTier::Minimal => {
+                let id_width = width.saturating_sub(marker.len() + prefix_width).max(4);
+                let mut text = truncate_to_width(label, id_width, "…", false);
+                if entry.is_current_leaf {
+                    text.push_str(glyph(" \u{25c9}", " @"));
+                } else if entry.is_branch_point {
+                    text.push_str(glyph(" \u{25c7}", " +"));
+                    text.push_str(&entry.child_count.to_string());
+                }
+                format!("{prefix}{text}")
+            }
+            ColumnTier::Compact => {
+                let marker_col = if entry.is_current_leaf {
+                    glyph("\u{25c9} here", "@ here").to_string()
+                } else if entry.is_branch_point {
+                    format!("{}{}", glyph("\u{25c7}", "+"), entry.child_count)
+                } else {
+                    String::new()
+                };
+                let reserved = marker.len() + prefix_width + 1 + marker_col.chars().count();
+                let id_width = width.saturating_sub(reserved).max(4);
+                let id = truncate_to_width(label, id_width, "…", false);
+                format!("{prefix}{id:<id_width$} {marker_col}")
+            }
+            ColumnTier::Full => {
+                let leaf_col = if entry.is_current_leaf {
+                    glyph("\u{25c9} you are here", "@ you are here")
+                } else {
+                    ""
+                };
+                let branch_col = if entry.is_branch_point {
+                    format!("{}{}", glyph("\u{25c7} ", "+"), entry.child_count)
+                } else {
+                    String::new()
+                };
+                let ts = Self::format_timestamp(entry);
+                let reserved = marker.len()
+                    + prefix_width
+                    + 1
+                    + 6 // branch column
+                    + 1
+                    + 18 // leaf column
+                    + 1
+                    + 19; // timestamp column
+                let id_width = width.saturating_sub(reserved).max(4);
+                let id = truncate_to_width(label, id_width, "…", false);
+                format!("{prefix}{id:<id_width$} {branch_col:<6} {leaf_col:<18} {ts:<19}")
+            }
+        };
+        let line = format!("{marker}{body}");
+        if is_selected {
+            fg(dark::TEXT)(&line)
+        } else {
+            line
+        }
+    }
+}
+
+impl Component for BranchPicker {
+    fn invalidate(&mut self) {
+        self.cache = None;
+    }
+
+    fn render(&mut self, width: usize) -> Vec<String> {
+        if let Some(cache) = &self.cache {
+            if cache.width == width
+                && cache.revision == self.revision
+                && cache.selected == self.selected
+                && cache.scroll == self.scroll
+            {
+                return cache.lines.clone();
+            }
+        }
+        let lines = self.render_uncached(width);
+        self.cache = Some(RenderCache {
+            width,
+            revision: self.revision,
+            selected: self.selected,
+            scroll: self.scroll,
+            lines: lines.clone(),
+        });
+        lines
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        let _ = self.handle_key(data);
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -1211,6 +1763,20 @@ mod tests {
         let a = entries.iter().find(|e| e.id == "session-a").unwrap();
         let expected = UNIX_EPOCH + Duration::from_millis(2_000);
         assert_eq!(a.modified, Some(expected));
+    }
+
+    /// This is the whole point of the field: in-place `/resume`
+    /// (`interactive_mode.rs`'s `handle_resume_picker_key`) has no path to
+    /// call `switch_to_session_file` with unless it survives this
+    /// projection.
+    #[test]
+    fn load_session_entries_carries_path_through_from_session_info() {
+        let infos = sample_session_infos();
+        let entries = load_session_entries(&infos, &HashMap::new());
+        let a = entries.iter().find(|e| e.id == "session-a").unwrap();
+        let b = entries.iter().find(|e| e.id == "session-b").unwrap();
+        assert_eq!(a.path, "/sessions/a.jsonl");
+        assert_eq!(b.path, "/sessions/b.jsonl");
     }
 
     // -- ModelPicker: navigation clamps ------------------------------------
@@ -1456,5 +2022,364 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let future = now + Duration::from_secs(1_000);
         assert_eq!(format_relative_age(future, now), "just now");
+    }
+
+    // -- BranchPicker ----------------------------------------------------
+
+    use crate::interactive_a11y::{with_settings, A11ySettings};
+
+    /// Force deterministic ASCII glyphs for prefix/marker assertions below —
+    /// otherwise these would depend on whatever `PIRUST_ASCII`/`TERM` the
+    /// test process happens to inherit, which is exactly the flake
+    /// `interactive_theme`'s tests avoid the same way (`interactive_theme.rs`
+    /// `colored` helper).
+    fn ascii<R>(body: impl FnOnce() -> R) -> R {
+        with_settings(
+            A11ySettings {
+                ascii_only: true,
+                ..A11ySettings::default()
+            },
+            body,
+        )
+    }
+
+    fn branch_entry(
+        id: &str,
+        parent: Option<&str>,
+        label: Option<&str>,
+        depth: usize,
+        is_branch_point: bool,
+        child_count: usize,
+        is_current_leaf: bool,
+    ) -> BranchEntry {
+        BranchEntry {
+            id: id.to_string(),
+            parent_id: parent.map(str::to_string),
+            label: label.map(str::to_string),
+            timestamp: Some("2026-08-25T10:15:30.123Z".to_string()),
+            is_branch_point,
+            child_count,
+            is_current_leaf,
+            depth,
+        }
+    }
+
+    /// A small real tree, pre-order: root (2 children) -> a (1 child) -> c
+    /// (a's only child, depth 2) -> b (root's second, and last, child; the
+    /// current leaf).
+    fn sample_branch_entries() -> Vec<BranchEntry> {
+        vec![
+            branch_entry("root", None, None, 0, true, 2, false),
+            branch_entry("a", Some("root"), None, 1, false, 1, false),
+            branch_entry("c", Some("a"), None, 2, false, 0, false),
+            branch_entry("b", Some("root"), None, 1, false, 0, true),
+        ]
+    }
+
+    fn many_branch_entries(n: usize) -> Vec<BranchEntry> {
+        (0..n)
+            .map(|i| branch_entry(&format!("branch-{i:03}"), None, None, 0, false, 0, false))
+            .collect()
+    }
+
+    // -- load_branch_entries ----------------------------------------------
+
+    #[test]
+    fn load_branch_entries_projects_every_field() {
+        let root_id = "root".to_string();
+        let a_id = "a".to_string();
+        let a_label = "Refactor auth".to_string();
+        let ts = "2026-08-25T09:00:00.000Z".to_string();
+        let branches = vec![
+            BranchInfo {
+                id: &root_id,
+                parent_id: None,
+                label: None,
+                timestamp: None,
+                is_branch_point: true,
+                child_count: 2,
+                is_current_leaf: false,
+                depth: 0,
+            },
+            BranchInfo {
+                id: &a_id,
+                parent_id: Some(&root_id),
+                label: Some(&a_label),
+                timestamp: Some(&ts),
+                is_branch_point: false,
+                child_count: 0,
+                is_current_leaf: true,
+                depth: 1,
+            },
+        ];
+        let entries = load_branch_entries(&branches);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "root");
+        assert_eq!(entries[0].parent_id, None);
+        assert_eq!(entries[0].label, None);
+        assert_eq!(entries[0].timestamp, None);
+        assert!(entries[0].is_branch_point);
+        assert_eq!(entries[0].child_count, 2);
+        assert_eq!(entries[0].depth, 0);
+        assert_eq!(entries[1].id, "a");
+        assert_eq!(entries[1].parent_id.as_deref(), Some("root"));
+        assert_eq!(entries[1].label.as_deref(), Some("Refactor auth"));
+        assert_eq!(
+            entries[1].timestamp.as_deref(),
+            Some("2026-08-25T09:00:00.000Z")
+        );
+        assert!(entries[1].is_current_leaf);
+        assert_eq!(entries[1].depth, 1);
+    }
+
+    #[test]
+    fn load_branch_entries_does_not_resort_the_walk() {
+        // Deliberately *not* a real pre-order (b before root before a) — the
+        // point is that `load_branch_entries` must reproduce this exact
+        // order unchanged, proving it never re-sorts on its own even though
+        // it easily could (e.g. by id). Real callers always pass
+        // `list_branches`'s actual pre-order; this only tests the contract.
+        let ids = ["b".to_string(), "root".to_string(), "a".to_string()];
+        let branches: Vec<BranchInfo<'_>> = ids
+            .iter()
+            .map(|id| BranchInfo {
+                id,
+                parent_id: None,
+                label: None,
+                timestamp: None,
+                is_branch_point: false,
+                child_count: 0,
+                is_current_leaf: false,
+                depth: 0,
+            })
+            .collect();
+        let entries = load_branch_entries(&branches);
+        let got: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(got, vec!["b", "root", "a"]);
+    }
+
+    // -- tree indentation ---------------------------------------------------
+
+    #[test]
+    fn build_tree_prefixes_indents_by_depth_with_tree_guides() {
+        ascii(|| {
+            let entries = sample_branch_entries();
+            let is_last = compute_last_child_flags(&entries);
+            let prefixes = build_tree_prefixes(&entries, &is_last);
+            // root: no prefix at all — it is never itself a guide column.
+            assert_eq!(prefixes[0], "");
+            // a: root's first (not last) child -> a mid-branch connector.
+            assert_eq!(prefixes[1], "|- ");
+            // c: a's only (and thus last) child, one level deeper than a,
+            // with a levitating "|" guide continuing under a because a is
+            // *not* the last child of root.
+            assert_eq!(prefixes[2], "|  `- ");
+            // b: root's second and last child -> a closing connector.
+            assert_eq!(prefixes[3], "`- ");
+        });
+    }
+
+    #[test]
+    fn build_tree_prefixes_clamps_indent_at_extreme_depth() {
+        ascii(|| {
+            // A linear chain 12 deep (indices 0..=11, depth == index): each
+            // node has exactly one child, so every non-root connector is a
+            // "last child" connector by construction.
+            let mut entries = Vec::with_capacity(12);
+            entries.push(branch_entry("n0", None, None, 0, false, 1, false));
+            for i in 1..12 {
+                let parent = format!("n{}", i - 1);
+                entries.push(branch_entry(
+                    &format!("n{i}"),
+                    Some(&parent),
+                    None,
+                    i,
+                    false,
+                    if i < 11 { 1 } else { 0 },
+                    false,
+                ));
+            }
+            let is_last = compute_last_child_flags(&entries);
+            let prefixes = build_tree_prefixes(&entries, &is_last);
+
+            assert_eq!(prefixes[0], ""); // root
+            assert_eq!(prefixes[1], "`- "); // depth 1: unclamped, ordinary connector
+
+            let deepest = prefixes.last().unwrap();
+            assert!(
+                deepest.starts_with("~ "),
+                "expected the elided-ancestors marker on a row past the clamp, got {deepest:?}"
+            );
+            // Bounded: the elide marker (2 chars) plus at most
+            // `MAX_INDENT_LEVELS` guide segments (3 chars each) — never
+            // proportional to the raw depth (11).
+            assert!(
+                deepest.chars().count() <= 2 + MAX_INDENT_LEVELS * 3,
+                "indent must be clamped, got {} chars: {deepest:?}",
+                deepest.chars().count()
+            );
+        });
+    }
+
+    #[test]
+    fn branch_picker_render_shows_tree_guides_in_original_order() {
+        ascii(|| {
+            let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+            let lines = picker.render(80);
+            // header + 4 rows + footer (no scroll indicator: everything fits)
+            assert!(lines.iter().any(|l| l.contains("|  `- c")));
+            assert!(lines.iter().any(|l| l.contains("|- a")));
+        });
+    }
+
+    // -- markers: not by colour alone ---------------------------------------
+
+    #[test]
+    fn branch_picker_marks_current_leaf_without_relying_on_colour() {
+        ascii(|| {
+            let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+            let lines = picker.render(80); // width >= 70 -> Full tier
+                                           // `.contains('b')` alone would match the header ("Browse
+                                           // branches...") before ever reaching entry "b"'s own row, so
+                                           // anchor on its tree connector ("`- b") instead — unique to
+                                           // that row since it is root's last child.
+            let leaf_row = lines.iter().find(|l| l.contains("`- b")).unwrap();
+            assert!(
+                leaf_row.contains("you are here"),
+                "current-leaf row must carry a text/glyph marker, not just colour: {leaf_row:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn branch_picker_marks_branch_point_with_child_count() {
+        ascii(|| {
+            let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+            let lines = picker.render(80);
+            let root_row = &lines[1]; // root renders first, unfiltered
+            assert!(root_row.contains("root"));
+            assert!(
+                root_row.contains('2'),
+                "branch-point row must show its child_count: {root_row:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn branch_picker_minimal_width_still_appends_leaf_marker() {
+        ascii(|| {
+            let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+            let lines = picker.render(20); // < 30 -> Minimal tier
+                                           // Same header-collision hazard as above — anchor on the tree
+                                           // connector, not a bare 'b'.
+            let leaf_row = lines.iter().find(|l| l.contains("`- b")).unwrap();
+            assert!(
+                leaf_row.contains('@'),
+                "even the minimal tier must mark the current leaf: {leaf_row:?}"
+            );
+        });
+    }
+
+    // -- navigation / filtering ----------------------------------------------
+
+    #[test]
+    fn branch_picker_navigation_clamps_at_both_ends() {
+        let mut picker = BranchPicker::new(many_branch_entries(4), 2);
+        for _ in 0..50 {
+            picker.move_selection(1);
+        }
+        assert_eq!(
+            picker.handle_key("\r"),
+            PickerAction::Selected(3),
+            "over-scrolling down must land on the last entry, not past it"
+        );
+        for _ in 0..50 {
+            picker.move_selection(-1);
+        }
+        assert_eq!(
+            picker.handle_key("\r"),
+            PickerAction::Selected(0),
+            "over-scrolling up must land on the first entry"
+        );
+    }
+
+    #[test]
+    fn branch_picker_selected_returns_original_index_under_filter() {
+        let mut picker = BranchPicker::new(many_branch_entries(20), 10);
+        for ch in "branch-015".chars() {
+            picker.push_filter_char(ch);
+        }
+        assert_eq!(picker.match_count(), 1);
+        match picker.handle_key("\r") {
+            PickerAction::Selected(idx) => assert_eq!(idx, 15),
+            other => panic!("expected Selected(15), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_picker_filters_over_id_and_label() {
+        let entries = vec![
+            branch_entry("abc123", None, Some("Refactor auth"), 0, false, 0, false),
+            branch_entry("def456", None, Some("Add tests"), 0, false, 0, false),
+        ];
+        let mut picker = BranchPicker::new(entries, 10);
+        for ch in "Refactor".chars() {
+            picker.push_filter_char(ch);
+        }
+        assert_eq!(picker.match_count(), 1);
+        assert_eq!(picker.selected_entry().unwrap().id, "abc123");
+    }
+
+    // -- width degradation ----------------------------------------------------
+
+    #[test]
+    fn branch_picker_width_40_drops_full_tier_columns() {
+        ascii(|| {
+            let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+            let lines = picker.render(40); // Compact tier
+                                           // Same header-collision hazard as above — anchor on the tree
+                                           // connector, not a bare 'b'.
+            let leaf_row = lines.iter().find(|l| l.contains("`- b")).unwrap();
+            assert!(!leaf_row.contains("you are here"));
+            assert!(leaf_row.contains("here")); // compact tier's shorter marker
+        });
+    }
+
+    #[test]
+    fn branch_picker_width_80_shows_full_tier_columns() {
+        ascii(|| {
+            let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+            let lines = picker.render(80); // Full tier
+                                           // Same header-collision hazard as above — anchor on the tree
+                                           // connector, not a bare 'b'.
+            let leaf_row = lines.iter().find(|l| l.contains("`- b")).unwrap();
+            assert!(leaf_row.contains("you are here"));
+            assert!(leaf_row.contains("2026-08-25T10:15:30"));
+        });
+    }
+
+    #[test]
+    fn branch_picker_width_200_stays_bounded_and_readable() {
+        ascii(|| {
+            let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+            let lines = picker.render(200);
+            assert!(lines.len() >= 4);
+            assert!(lines.iter().any(|l| l.contains("root")));
+        });
+    }
+
+    #[test]
+    fn branch_picker_empty_list_renders_placeholder_not_panic() {
+        let mut picker = BranchPicker::new(Vec::new(), 10);
+        let lines = picker.render(80);
+        assert!(lines.iter().any(|l| l.contains("no branches available")));
+    }
+
+    #[test]
+    fn branch_picker_render_cache_hits_on_unchanged_state() {
+        let mut picker = BranchPicker::new(sample_branch_entries(), 10);
+        let first = picker.render(80);
+        let second = picker.render(80);
+        assert_eq!(first, second);
     }
 }

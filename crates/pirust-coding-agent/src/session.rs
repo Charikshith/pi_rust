@@ -102,11 +102,16 @@
 //!
 //! # Not ported (and why)
 //!
-//! - `sessionEntryToContextMessages` (`:379-404`) and `buildSessionContext` (`:457-466`):
-//!   both need `core/messages.ts`' `createCustomMessage`/`createBranchSummaryMessage`/
-//!   `createCompactionSummaryMessage`, which has no Rust module yet. The *entry* half —
-//!   [`build_session_path`] and [`build_context_entries`], which is what the compaction
-//!   contract pins — is here; the message projection belongs with `messages.rs`/`sdk.rs`.
+//! - `buildSessionContext` (`:457-466`): needs the runtime/context-window plumbing
+//!   [`build_context_entries`] feeds, which lands with the harness driver, not here.
+//! - `sessionEntryToContextMessages` (`:379-404`) — **update:** this one *is* now ported, as
+//!   [`entries_to_agent_messages`], and it stays in this file rather than moving to
+//!   `messages.rs`/`sdk.rs` as an earlier version of this note assumed: the projection has to
+//!   read `entry_type`/`entry_id`/`entry_parent_id`/`entry_timestamp`, all private to this
+//!   module (§ above), so a `messages.rs`-side function would need them re-exported for no
+//!   other purpose. `core/messages.ts`'s `createCustomMessage`/`createBranchSummaryMessage`/
+//!   `createCompactionSummaryMessage` now exist at
+//!   [`pirust_agent_core::harness::messages`] and are what it calls.
 //! - `getTree` (`:1239-1277`) and `getChildren` (`:1139-1147`): the `/tree` TUI is feat-007
 //!   (spec §18) and nothing headless reads them.
 //! - The ≤10-way concurrency of the metadata loads (`:705-745`). Here it is sequential.
@@ -124,8 +129,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+use pirust_agent_core::harness::messages::{
+    create_branch_summary_message, create_compaction_summary_message, create_custom_message,
+    AgentMessage,
+};
 use pirust_agent_core::harness::session::uuid::uuidv7;
 use pirust_agent_core::harness::session::{Clock, SystemClock};
+use pirust_ai::types::UserMessageContent;
 use pirust_tools::path_utils::{self, PathEnv, PathInputOptions, Platform as PathPlatform};
 use serde_json::{Map, Value};
 
@@ -576,6 +586,14 @@ fn entry_id(entry: &FileEntry) -> Option<&str> {
 /// `entry.parentId`, or `None` for `null`/absent.
 fn entry_parent_id(entry: &FileEntry) -> Option<&str> {
     entry.get("parentId").and_then(Value::as_str)
+}
+
+/// `entry.timestamp`, or `None` for `null`/absent/non-string.
+///
+/// Not read anywhere else in this file (`entry_head`/`entry_tail` only ever write it), but
+/// [`BranchInfo`] surfaces it for a `/tree` picker, so it needs a reader.
+fn entry_timestamp(entry: &FileEntry) -> Option<&str> {
+    entry.get("timestamp").and_then(Value::as_str)
 }
 
 /// `e.type === "message" && e.message.role === "assistant"` (`:949`, `:1404`).
@@ -1320,6 +1338,358 @@ pub fn build_context_entries<'a>(
     context
 }
 
+/// One entry in [`SessionManager::list_branches`]'s pre-order walk of the whole entry tree.
+///
+/// Not a port — Pi has no `listBranches`/`getTree` on `session-manager.ts` (grepped; the
+/// nearest hit, `getTree` in `scripts/gen-rpc-oracle.mjs:307`, is an unrelated RPC-oracle
+/// stub). This exists so a later `/tree` picker can render every branch of a session without
+/// re-deriving branch points itself. All fields borrow from the [`SessionManager`] the walk
+/// was built from — clone what you need to keep past its lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BranchInfo<'a> {
+    /// `entry.id`.
+    pub id: &'a str,
+    /// `entry.parentId` — `None` for a root (or for an orphan; see the doc comment on
+    /// [`SessionManager::list_branches`]).
+    pub parent_id: Option<&'a str>,
+    /// [`SessionManager::get_label`] for this id.
+    pub label: Option<&'a str>,
+    /// `entry.timestamp`.
+    pub timestamp: Option<&'a str>,
+    /// `true` when this entry has more than one child — i.e. history was branched *from*
+    /// here, not just linearly continued.
+    pub is_branch_point: bool,
+    /// How many entries name this one as their `parentId`. `0` for a leaf, `1` for an
+    /// ordinary link in a chain, `>1` iff [`Self::is_branch_point`].
+    pub child_count: usize,
+    /// Matches [`SessionManager::get_leaf_id`] — "you are here".
+    pub is_current_leaf: bool,
+    /// Distance from its root (a root has depth `0`), so a tree view can indent without
+    /// recomputing it.
+    pub depth: usize,
+}
+
+/// The walk behind [`SessionManager::list_branches`], factored out so it can be exercised
+/// against a bare `entries` slice the way [`build_session_path`] and
+/// [`build_context_entries`] are tested — no full `SessionManager` fixture required.
+///
+/// # Ordering
+/// A pre-order walk from the root(s): each root is visited, then its children (each
+/// recursively pre-ordered) before moving to the next root, so a caller can render the
+/// result top-down and indent by [`BranchInfo::depth`] without sorting anything itself.
+/// Roots are visited in file order; a parent's children are visited in the order they were
+/// appended (`children` is built with one pass over `entries` in file order, so ties are
+/// never reordered).
+///
+/// # Orphans and multiple roots
+/// A "root" here is any entry whose `parentId` is absent/`null`, *or* whose `parentId` names
+/// an id this session doesn't have — a partially written or hand-edited file is a real thing,
+/// and dropping the entry would be worse than showing it disconnected from the tree it should
+/// have belonged to. Both cases surface with `parent_id` as read from the entry (so an
+/// orphan's stale `parentId` is still visible to the caller) and `depth: 0`.
+///
+/// # Cycles
+/// A cycle in `parentId` (only reachable via a hand-edited file — an append-only tree cannot
+/// create one) cannot make this loop forever or recurse unboundedly: the walk is iterative
+/// (an explicit stack, not recursion, so a long linear session also can't blow the call
+/// stack) and a `visited` set guarantees every id is popped and emitted **at most once** — a
+/// second attempt to push an already-visited id is simply skipped. If every member of a
+/// cycle is unreachable from any root (e.g. `A`'s parent is `B` and `B`'s parent is `A`, and
+/// nothing outside the pair points into it), the main walk cannot reach it either; a second
+/// pass over `entries` in file order seeds the walk with anything still unvisited, so that
+/// cycle still gets surfaced (as its own one-entry-deep "root") instead of vanishing.
+///
+/// Entries with no `id` of their own are skipped, same as [`SessionManager::build_index`]
+/// skips them from `by_id` (`:1852-1855`): they cannot be referenced by any `parentId`, so
+/// they can be neither a parent nor a child here.
+fn build_branch_list<'a>(
+    entries: &[&'a FileEntry],
+    leaf_id: Option<&'a str>,
+    labels_by_id: &'a HashMap<String, String>,
+) -> Vec<BranchInfo<'a>> {
+    let by_id: HashMap<&'a str, &'a FileEntry> = entries
+        .iter()
+        .filter_map(|entry| entry_id(entry).map(|id| (id, *entry)))
+        .collect();
+
+    // One pass: group children by parentId (file order preserved within each group) and
+    // collect roots/orphans, instead of an O(n^2) "for each entry, scan all entries".
+    let mut children: HashMap<&'a str, Vec<&'a str>> = HashMap::with_capacity(by_id.len());
+    let mut roots: Vec<&'a str> = Vec::with_capacity(by_id.len());
+    for entry in entries {
+        let Some(id) = entry_id(entry) else {
+            continue;
+        };
+        match entry_parent_id(entry) {
+            Some(parent_id) if by_id.contains_key(parent_id) => {
+                children.entry(parent_id).or_default().push(id);
+            }
+            // No parentId, or one naming an id not in this session: both are roots.
+            _ => roots.push(id),
+        }
+    }
+
+    let mut out = Vec::with_capacity(by_id.len());
+    let mut visited: std::collections::HashSet<&'a str> =
+        std::collections::HashSet::with_capacity(by_id.len());
+    // Push in reverse so the LIFO pop order matches file order.
+    let mut stack: Vec<(&'a str, usize)> = roots.iter().rev().map(|&id| (id, 0)).collect();
+    // Runs twice at most: the real roots, then (only if that left ids unvisited — the
+    // rootless-cycle case) everything `entries` still knows about that wasn't reached.
+    let mut seeded_leftovers = false;
+    loop {
+        while let Some((id, depth)) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let Some(&entry) = by_id.get(id) else {
+                continue;
+            };
+            let kids: &[&str] = children.get(id).map(Vec::as_slice).unwrap_or(&[]);
+            out.push(BranchInfo {
+                id,
+                parent_id: entry_parent_id(entry),
+                label: labels_by_id.get(id).map(String::as_str),
+                timestamp: entry_timestamp(entry),
+                is_branch_point: kids.len() > 1,
+                child_count: kids.len(),
+                is_current_leaf: leaf_id == Some(id),
+                depth,
+            });
+            for &child in kids.iter().rev() {
+                stack.push((child, depth + 1));
+            }
+        }
+        if seeded_leftovers {
+            break;
+        }
+        seeded_leftovers = true;
+        for entry in entries.iter().rev() {
+            if let Some(id) = entry_id(entry) {
+                if !visited.contains(id) {
+                    stack.push((id, 0));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Civil `(year, month, day)` → days since 1970-01-01 (Howard Hinnant's algorithm).
+///
+/// Ported, not imported: [`pirust_agent_core::harness::session`] defines the identical
+/// function (`harness/session/mod.rs:91-98`) as a module-private `fn`, and its sibling
+/// `iso8601_to_epoch_ms` below it is private too — nothing in that module is reachable from
+/// here. Duplicated rather than made `pub(crate)` there, since that file isn't mine to edit
+/// for this change.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Parse the canonical `Date#toISOString` form (`YYYY-MM-DDTHH:MM:SS.sssZ`) into Unix
+/// milliseconds — mirrors `new Date(iso).getTime()` for that format. Returns `0` for anything
+/// unparseable (session entries' `timestamp` is always written via
+/// [`SessionEnv::in_memory`]-style `now_iso()`/`entry_head`, so this is a defensive
+/// fallback, not a real code path in practice).
+///
+/// Ported from `pirust_agent_core::harness::session::iso8601_to_epoch_ms`
+/// (`harness/session/mod.rs:131-163`), verbatim except for the name — see the note on
+/// [`days_from_civil`] for why it's copied rather than shared.
+fn iso8601_to_epoch_ms(s: &str) -> i64 {
+    fn parse(s: &str) -> Option<i64> {
+        let s = s.strip_suffix('Z').unwrap_or(s);
+        let (date, time) = s.split_once('T')?;
+        let mut dp = date.split('-');
+        let y: i64 = dp.next()?.parse().ok()?;
+        let mo: i64 = dp.next()?.parse().ok()?;
+        let d: i64 = dp.next()?.parse().ok()?;
+        let (hms, frac) = match time.split_once('.') {
+            Some((a, b)) => (a, Some(b)),
+            None => (time, None),
+        };
+        let mut tp = hms.split(':');
+        let hh: i64 = tp.next()?.parse().ok()?;
+        let mm: i64 = tp.next()?.parse().ok()?;
+        let ss: i64 = tp.next().unwrap_or("0").parse().ok()?;
+        // Milliseconds: pad/truncate the fractional part to exactly 3 digits.
+        let millis: i64 = match frac {
+            Some(f) => {
+                let mut f = f.to_string();
+                f.truncate(3);
+                while f.len() < 3 {
+                    f.push('0');
+                }
+                f.parse().ok()?
+            }
+            None => 0,
+        };
+        let days = days_from_civil(y, mo, d);
+        Some(days * 86_400_000 + hh * 3_600_000 + mm * 60_000 + ss * 1000 + millis)
+    }
+    parse(s).unwrap_or(0)
+}
+
+/// Session entries → in-context [`AgentMessage`]s: the message-projection half of
+/// `sessionEntryToContextMessages` (`session-manager.ts:379-404`) — see the corrected module
+/// doc note above. Lives next to [`SessionManager::get_branch`] in spirit (its natural input
+/// is `get_branch`'s root-first `Vec<&FileEntry>`) but is a free function, not a method,
+/// mirroring [`build_branch_list`]: pure data-in/data-out, so it is directly unit-testable
+/// against hand-built `Vec<Value>` fixtures with no [`SessionManager`]/[`SessionEnv`] and no
+/// I/O.
+///
+/// # Which of the 9 written `"type"` tags convert, and which are deliberately skipped
+/// Grepped from every `entry_head("...")`/`append_custom_entry`/`append_custom_message_entry`
+/// call and [`is_header`] in this file: `"session"` (header), `"message"`,
+/// `"thinking_level_change"`, `"model_change"`, `"compaction"`, `"custom"`, `"session_info"`,
+/// `"custom_message"`, `"label"`, `"branch_summary"`. Of those:
+///
+/// - `"message"` → the value stored under the entry's `"message"` key (exactly what
+///   [`SessionManager::append_message`] writes it under), deserialized straight as an
+///   [`AgentMessage`].
+/// - `"custom_message"` → [`create_custom_message`], from the entry's `customType` / `content`
+///   / `display` / `details` — the shape [`SessionManager::append_custom_message_entry`]
+///   writes.
+/// - `"compaction"` → [`create_compaction_summary_message`], from `summary` / `tokensBefore`.
+/// - `"branch_summary"` → [`create_branch_summary_message`], from `fromId` / `summary`, **only
+///   when `summary` is non-empty** — matching the guard agent-core's own canonical projection
+///   applies (`pirust_agent_core::harness::session::session_entry_to_context_messages`,
+///   `harness/session/mod.rs:350-396`): an empty-summary branch point contributes nothing to
+///   context there either.
+/// - everything else — the header, `"thinking_level_change"`, `"model_change"`, `"custom"`,
+///   `"session_info"`, `"label"`, and any unrecognized future tag — contributes **zero**
+///   messages.
+///
+/// **Correction to an earlier assumption:** bare `"custom"` entries (from
+/// [`SessionManager::append_custom_entry`]) are *not* routed to [`create_custom_message`].
+/// That entry shape only ever carries `customType`/`data`, never the `content`/`display` a
+/// `CustomMessage` requires, and agent-core's canonical `session_entry_to_context_messages`
+/// (cited above) has no match arm for a bare `"custom"` tag at all — only `"custom_message"`
+/// feeds [`create_custom_message`] there. Routing `"custom"` through it would be inventing a
+/// mapping Pi doesn't have, so it is skipped, matching agent-core's behavior.
+///
+/// # Malformed entries
+/// A convertible-type entry that is missing a required field, wrongly typed, or (for
+/// `"message"`) fails [`AgentMessage`] deserialization is skipped, not panicked on — a
+/// truncated or hand-edited session file is a real thing. Unlike
+/// [`parse_session_entry_line`]'s fully-silent `.ok()` convention, each skip here prints one
+/// `eprintln!("Warning: ...")` line (id included when the entry has one), matching this
+/// crate's existing `"Warning: ..."` phrasing (see `runtime_host.rs`'s
+/// `"Warning: failed to ..."` lines and this file's own `SessionStream::Stderr` arm above) —
+/// silently dropping a message out of context is worse than a loud one-line warning, but the
+/// signature stays `-> Vec<AgentMessage>` (not a `Result`/count) since one bad entry among many
+/// good ones shouldn't fail the whole conversion.
+///
+/// # Performance
+/// `Vec::with_capacity(entries.len())`: every entry contributes at most one message, so this
+/// is an exact upper bound, never a reallocation. `serde_json::from_value` *consumes* its
+/// argument, so converting from a borrowed `&FileEntry` unavoidably clones the **payload**
+/// value (`message`, `content`, `details` — never the whole entry, and never for entry types
+/// that don't convert); `entry_type`/`entry_id`/`entry_timestamp` and the plain field reads
+/// below (`summary`, `fromId`, `tokensBefore`, `customType`, `display`) are all read by
+/// reference.
+pub(crate) fn entries_to_agent_messages(entries: &[&FileEntry]) -> Vec<AgentMessage> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry_type(entry) {
+            Some("message") => match entry.get("message") {
+                Some(message) => match serde_json::from_value::<AgentMessage>(message.clone()) {
+                    Ok(message) => out.push(message),
+                    Err(error) => eprintln!(
+                        "Warning: skipping malformed \"message\" session entry (id {:?}): {error}",
+                        entry_id(entry)
+                    ),
+                },
+                None => eprintln!(
+                    "Warning: skipping \"message\" session entry with no \"message\" field (id {:?})",
+                    entry_id(entry)
+                ),
+            },
+            Some("custom_message") => {
+                let custom_type = entry.get("customType").and_then(Value::as_str);
+                let content = entry.get("content").cloned();
+                let display = entry.get("display").and_then(Value::as_bool);
+                match (custom_type, content, display) {
+                    (Some(custom_type), Some(content), Some(display)) => {
+                        match serde_json::from_value::<UserMessageContent>(content) {
+                            Ok(content) => {
+                                let details = entry.get("details").cloned();
+                                let timestamp =
+                                    iso8601_to_epoch_ms(entry_timestamp(entry).unwrap_or(""));
+                                out.push(AgentMessage::Custom(create_custom_message(
+                                    custom_type.to_string(),
+                                    content,
+                                    display,
+                                    details,
+                                    timestamp,
+                                )));
+                            }
+                            Err(error) => eprintln!(
+                                "Warning: skipping malformed \"custom_message\" session entry (id {:?}): {error}",
+                                entry_id(entry)
+                            ),
+                        }
+                    }
+                    _ => eprintln!(
+                        "Warning: skipping \"custom_message\" session entry missing customType/content/display (id {:?})",
+                        entry_id(entry)
+                    ),
+                }
+            }
+            Some("compaction") => {
+                let summary = entry.get("summary").and_then(Value::as_str);
+                let tokens_before = entry.get("tokensBefore").and_then(Value::as_i64);
+                match (summary, tokens_before) {
+                    (Some(summary), Some(tokens_before)) => {
+                        let timestamp = iso8601_to_epoch_ms(entry_timestamp(entry).unwrap_or(""));
+                        out.push(AgentMessage::CompactionSummary(
+                            create_compaction_summary_message(
+                                summary.to_string(),
+                                tokens_before,
+                                timestamp,
+                            ),
+                        ));
+                    }
+                    _ => eprintln!(
+                        "Warning: skipping \"compaction\" session entry missing summary/tokensBefore (id {:?})",
+                        entry_id(entry)
+                    ),
+                }
+            }
+            Some("branch_summary") => {
+                let summary = entry.get("summary").and_then(Value::as_str);
+                let from_id = entry.get("fromId").and_then(Value::as_str);
+                match (summary, from_id) {
+                    (Some(summary), Some(from_id)) if !summary.is_empty() => {
+                        let timestamp = iso8601_to_epoch_ms(entry_timestamp(entry).unwrap_or(""));
+                        out.push(AgentMessage::BranchSummary(create_branch_summary_message(
+                            summary.to_string(),
+                            from_id.to_string(),
+                            timestamp,
+                        )));
+                    }
+                    // Empty summary: agent-core's own projection drops these too (see doc
+                    // comment above) — not malformed, so no warning.
+                    (Some(_), Some(_)) => {}
+                    _ => eprintln!(
+                        "Warning: skipping \"branch_summary\" session entry missing summary/fromId (id {:?})",
+                        entry_id(entry)
+                    ),
+                }
+            }
+            // Header ("session"), "thinking_level_change", "model_change", "custom",
+            // "session_info", "label", and any unrecognized future type: not part of the
+            // in-context message projection (see doc comment above).
+            _ => {}
+        }
+    }
+    out
+}
+
 // =============================================================================
 // SessionInfo (`session-manager.ts:170-184`, `:623-778`)
 // =============================================================================
@@ -1617,6 +1987,30 @@ fn write_truncate(path: &str, contents: &str) -> Result<(), SessionError> {
         .map_err(|e| SessionError::io("write", path, e))
 }
 
+/// `_rewriteFile()`'s two early-return guards plus the actual write
+/// (`session-manager.ts:910-920`): a no-op when not persisting or with no file, otherwise
+/// the whole buffer serialized with flag `"w"`.
+///
+/// A free function (not a `SessionManager` method) so
+/// [`SessionManager::set_session_file`] can perform this write against a **local** entry
+/// buffer and a not-yet-committed path — the write is one of the fallible steps that must
+/// run before `self` is touched, not after. [`SessionManager::rewrite_file`] is a thin
+/// wrapper over this for every other caller.
+fn write_entries_to_file(
+    persist: bool,
+    file: Option<&str>,
+    entries: &[FileEntry],
+) -> Result<(), SessionError> {
+    if !persist {
+        return Ok(());
+    }
+    let Some(file) = file.filter(|f| !f.is_empty()) else {
+        return Ok(());
+    };
+    let contents: String = entries.iter().map(to_line).collect();
+    write_truncate(file, &contents)
+}
+
 /// `appendFileSync(path, …)` — creates the file when missing
 /// (`session-manager.ts:952`, `:971`, `:1536`).
 fn append_to(path: &str, contents: &str) -> Result<(), SessionError> {
@@ -1740,47 +2134,124 @@ impl SessionManager {
     /// `flushed = true`. A **non-existent** path starts a fresh session and then restores the
     /// explicit path (`:854-858`) — so `--session <new-path>` writes nothing until the first
     /// assistant message.
+    ///
+    /// **Atomicity.** Pi's own `setSessionFile` mutates `this` incrementally as it goes —
+    /// `this.sessionFile = resolved` runs before the existence check, and
+    /// `this.fileEntries = loadEntriesFromFile(...)` runs before the `size > 0` check that
+    /// can throw `NotAPiSessionError` (`:828-833`). Porting that shape verbatim would mean a
+    /// failed `/import` or in-place `/resume` (`SingleTurnSession::switch_to_session_file` in
+    /// `runtime_host.rs`) leaves the live `SessionManager` pointed at the rejected path with
+    /// its entry buffer wiped, even though the caller only observes an `Err` and reasonably
+    /// assumes nothing changed. So every fallible step here — resolving the path, reading
+    /// and parsing the file, the v1→v3 migration, and the on-disk rewrite the 0-byte and
+    /// migrated-entries branches can trigger — runs first against **local** bindings; `self`
+    /// is written only once every one of them has already succeeded, as one straight-line
+    /// block of infallible assignments at the end of each branch. Do not reintroduce an
+    /// early `self.session_file = …` / `self.file_entries = …` ahead of a `?` — that is
+    /// exactly the corruption this shape exists to prevent.
     pub fn set_session_file(&mut self, session_file: &str) -> Result<(), SessionError> {
         let resolved = self.env.resolve_path(session_file)?;
-        self.session_file = Some(resolved.clone());
 
         if !exists(&resolved) {
+            // `newSession(None)` has no fallible step once `options` is `None` (the only
+            // `Err` it can produce, `assertValidSessionId`, is behind `Some(id)`), so it is
+            // already atomic on its own here: either it fully commits, or it returns `Err`
+            // before touching `self` at all.
             self.new_session(None)?;
             // Preserve the explicit path from the --session flag.
             self.session_file = Some(resolved);
             return Ok(());
         }
 
-        self.file_entries = self.env.load_entries_from_file(&resolved)?;
+        let entries = self.env.load_entries_from_file(&resolved)?;
 
-        if self.file_entries.is_empty() {
+        if entries.is_empty() {
             let size = fs::metadata(&resolved)
                 .map_err(|e| SessionError::io("stat", &resolved, e))?
                 .len();
             if size > 0 {
                 return Err(SessionError::NotAPiSession(resolved));
             }
-            self.new_session(None)?;
+
+            // 0-byte file: build the fresh header and write it to `resolved` before
+            // touching `self`, so a failing write (disk full, permissions, a path that
+            // vanished between the existence check and here, …) leaves the manager exactly
+            // as it was instead of parked mid-reset.
+            let (id, _timestamp, header) = self.build_session_header(None)?;
+            let entries = vec![header];
+            write_entries_to_file(self.persist, Some(&resolved), &entries)?;
+
+            self.session_id = id;
+            self.file_entries = entries;
+            self.by_id.clear();
+            self.labels_by_id.clear();
+            self.label_timestamps_by_id.clear();
+            self.leaf_id = None;
             self.session_file = Some(resolved);
-            self.rewrite_file()?;
             self.flushed = true;
             return Ok(());
         }
 
-        let header_id = self
-            .file_entries
+        // Existing, parseable file. The v1→v3 migration mutates in place, so it runs
+        // against this LOCAL `entries` — never `self.file_entries` — and the resulting
+        // rewrite is attempted before anything is committed: if the write fails, `self`
+        // must not be left holding migrated entries that were never actually persisted.
+        let mut entries = entries;
+        let header_id = entries
             .iter()
             .find(|entry| is_header(entry))
             .and_then(entry_id)
             .map(str::to_string);
-        self.session_id = header_id.unwrap_or_else(|| self.env.ids.session_id());
+        let session_id = header_id.unwrap_or_else(|| self.env.ids.session_id());
 
-        if migrate_session_entries(&mut self.file_entries, &*self.env.ids) {
-            self.rewrite_file()?;
+        if migrate_session_entries(&mut entries, &*self.env.ids) {
+            write_entries_to_file(self.persist, Some(&resolved), &entries)?;
         }
+
+        // Every fallible step above has already succeeded — commit as one unit.
+        self.session_id = session_id;
+        self.file_entries = entries;
+        self.session_file = Some(resolved);
         self.build_index();
         self.flushed = true;
         Ok(())
+    }
+
+    /// The pure, non-mutating half of `newSession` (`session-manager.ts:861-887`): validates
+    /// an explicit id and builds the header entry, but commits nothing to `self`.
+    ///
+    /// Split out so [`SessionManager::set_session_file`]'s 0-byte-file branch can run the
+    /// one fallible step (`assertValidSessionId`, in practice unreachable there since it is
+    /// only ever called with `None`) and the resulting on-disk rewrite *before* touching
+    /// `self`, while [`SessionManager::new_session`] itself stays a thin "compute, then
+    /// commit" wrapper around it — its own behaviour is unchanged by this split.
+    fn build_session_header(
+        &self,
+        options: Option<&NewSessionOptions>,
+    ) -> Result<(String, String, FileEntry), SessionError> {
+        let id = match options.and_then(|options| options.id.as_deref()) {
+            Some(id) => {
+                assert_valid_session_id(id)?;
+                id.to_string()
+            }
+            None => self.env.ids.session_id(),
+        };
+        let timestamp = self.env.clock.now_iso();
+
+        let mut header = Map::new();
+        header.insert("type".to_string(), Value::String("session".to_string()));
+        header.insert("version".to_string(), Value::from(CURRENT_SESSION_VERSION));
+        header.insert("id".to_string(), Value::String(id.clone()));
+        header.insert("timestamp".to_string(), Value::String(timestamp.clone()));
+        header.insert("cwd".to_string(), Value::String(self.cwd.clone()));
+        if let Some(parent) = options.and_then(|options| options.parent_session.as_deref()) {
+            header.insert(
+                "parentSession".to_string(),
+                Value::String(parent.to_string()),
+            );
+        }
+
+        Ok((id, timestamp, Value::Object(header)))
     }
 
     /// `newSession(options?)` (`session-manager.ts:861-887`).
@@ -1791,35 +2262,16 @@ impl SessionManager {
     /// [`SessionManager::get_session_dir`]. Returns the new file path, as Pi does.
     ///
     /// Header key order is `type, version, id, timestamp, cwd, parentSession`, with
-    /// `parentSession` omitted when absent (spec §11.1).
+    /// `parentSession` omitted when absent (spec §11.1). The header itself comes from
+    /// [`SessionManager::build_session_header`]; that call is this method's only fallible
+    /// step, and it happens before any of the mutation below.
     pub fn new_session(
         &mut self,
         options: Option<&NewSessionOptions>,
     ) -> Result<Option<String>, SessionError> {
-        let id = match options.and_then(|options| options.id.as_deref()) {
-            Some(id) => {
-                assert_valid_session_id(id)?;
-                id.to_string()
-            }
-            None => self.env.ids.session_id(),
-        };
+        let (id, timestamp, header) = self.build_session_header(options)?;
         self.session_id = id;
-        let timestamp = self.env.clock.now_iso();
-
-        let mut header = Map::new();
-        header.insert("type".to_string(), Value::String("session".to_string()));
-        header.insert("version".to_string(), Value::from(CURRENT_SESSION_VERSION));
-        header.insert("id".to_string(), Value::String(self.session_id.clone()));
-        header.insert("timestamp".to_string(), Value::String(timestamp.clone()));
-        header.insert("cwd".to_string(), Value::String(self.cwd.clone()));
-        if let Some(parent) = options.and_then(|options| options.parent_session.as_deref()) {
-            header.insert(
-                "parentSession".to_string(),
-                Value::String(parent.to_string()),
-            );
-        }
-
-        self.file_entries = vec![Value::Object(header)];
+        self.file_entries = vec![header];
         self.by_id.clear();
         self.labels_by_id.clear();
         self.label_timestamps_by_id.clear();
@@ -1891,16 +2343,15 @@ impl SessionManager {
     }
 
     /// `_rewriteFile()` (`session-manager.ts:910-920`) — the whole buffer with flag `"w"`.
-    /// A no-op when not persisting or with no file.
+    /// A no-op when not persisting or with no file. Thin wrapper over
+    /// [`write_entries_to_file`]; see that function's doc for why the write itself lives
+    /// outside `impl SessionManager`.
     fn rewrite_file(&self) -> Result<(), SessionError> {
-        if !self.persist {
-            return Ok(());
-        }
-        let Some(file) = self.session_file.as_deref().filter(|f| !f.is_empty()) else {
-            return Ok(());
-        };
-        let contents: String = self.file_entries.iter().map(to_line).collect();
-        write_truncate(file, &contents)
+        write_entries_to_file(
+            self.persist,
+            self.session_file.as_deref(),
+            &self.file_entries,
+        )
     }
 
     /// `_persist(entry)` (`session-manager.ts:946-973`) — quoted in spec §11.2.
@@ -2295,6 +2746,26 @@ impl SessionManager {
         }
         path.reverse();
         path
+    }
+
+    /// Not a port — see the doc comment on [`build_branch_list`] for why (grepped for a
+    /// `listBranches`/`getTree` equivalent in `session-manager.ts`; there isn't one) and for
+    /// the ordering, orphan and cycle rules, which this just applies to `self`. Added so a
+    /// later `/tree` picker has something to render: [`Self::get_branch`] only ever returns
+    /// one root-first path, never the whole tree.
+    pub fn list_branches(&self) -> Vec<BranchInfo<'_>> {
+        let entries = self.get_entries();
+        build_branch_list(&entries, self.leaf_id.as_deref(), &self.labels_by_id)
+    }
+
+    /// [`Self::list_branches`], filtered to the entries where history actually forks
+    /// (`is_branch_point`). Convenience for a caller that only cares where a `/tree` picker
+    /// needs to offer a choice, not the full linear filler in between.
+    pub fn branch_points(&self) -> Vec<BranchInfo<'_>> {
+        self.list_branches()
+            .into_iter()
+            .filter(|branch| branch.is_branch_point)
+            .collect()
     }
 
     /// `buildContextEntries()` (`:1205-1207`) — [`build_context_entries`] from the current
@@ -3165,5 +3636,413 @@ mod tests {
         let entries = parse_session_entries(content);
         assert_eq!(entries.len(), 2);
         assert_eq!(entry_id(&entries[1]), Some("b"));
+    }
+
+    #[test]
+    fn list_branches_linear_session_has_no_branch_points() {
+        let a = serde_json::json!({"type":"message","id":"a","parentId":null,"timestamp":"t0"});
+        let b = serde_json::json!({"type":"message","id":"b","parentId":"a","timestamp":"t1"});
+        let c = serde_json::json!({"type":"message","id":"c","parentId":"b","timestamp":"t2"});
+        let entries: Vec<&FileEntry> = vec![&a, &b, &c];
+        let mut labels = HashMap::new();
+        labels.insert("b".to_string(), "checkpoint".to_string());
+        let branches = build_branch_list(&entries, None, &labels);
+
+        assert_eq!(
+            branches.iter().map(|info| info.id).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(branches.iter().all(|info| !info.is_branch_point));
+        assert_eq!(
+            branches.iter().map(|info| info.depth).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert_eq!(
+            branches
+                .iter()
+                .map(|info| info.child_count)
+                .collect::<Vec<_>>(),
+            [1, 1, 0]
+        );
+        assert_eq!(
+            branches.iter().find(|info| info.id == "b").unwrap().label,
+            Some("checkpoint")
+        );
+        assert_eq!(
+            branches.iter().find(|info| info.id == "a").unwrap().label,
+            None
+        );
+    }
+
+    #[test]
+    fn list_branches_flags_a_real_fork() {
+        let root = serde_json::json!({"type":"message","id":"root","parentId":null});
+        let c1 = serde_json::json!({"type":"message","id":"c1","parentId":"root"});
+        let c2 = serde_json::json!({"type":"message","id":"c2","parentId":"root"});
+        let entries: Vec<&FileEntry> = vec![&root, &c1, &c2];
+        let labels = HashMap::new();
+        let branches = build_branch_list(&entries, None, &labels);
+
+        // Pre-order: the parent, then each child, in append order.
+        assert_eq!(
+            branches.iter().map(|info| info.id).collect::<Vec<_>>(),
+            ["root", "c1", "c2"]
+        );
+        let root_info = branches.iter().find(|info| info.id == "root").unwrap();
+        assert!(root_info.is_branch_point);
+        assert_eq!(root_info.child_count, 2);
+        assert_eq!(root_info.depth, 0);
+        for child_id in ["c1", "c2"] {
+            let info = branches.iter().find(|info| info.id == child_id).unwrap();
+            assert!(!info.is_branch_point);
+            assert_eq!(info.child_count, 0);
+            assert_eq!(info.depth, 1);
+        }
+    }
+
+    #[test]
+    fn list_branches_depth_and_current_leaf_past_a_fork() {
+        let root = serde_json::json!({"type":"message","id":"root","parentId":null});
+        let mid = serde_json::json!({"type":"message","id":"mid","parentId":"root"});
+        let leaf_a = serde_json::json!({"type":"message","id":"leaf_a","parentId":"mid"});
+        let leaf_b = serde_json::json!({"type":"message","id":"leaf_b","parentId":"mid"});
+        let entries: Vec<&FileEntry> = vec![&root, &mid, &leaf_a, &leaf_b];
+        let labels = HashMap::new();
+        let branches = build_branch_list(&entries, Some("leaf_b"), &labels);
+
+        let depth_of = |id: &str| branches.iter().find(|info| info.id == id).unwrap().depth;
+        assert_eq!(depth_of("root"), 0);
+        assert_eq!(depth_of("mid"), 1);
+        assert_eq!(depth_of("leaf_a"), 2);
+        assert_eq!(depth_of("leaf_b"), 2);
+
+        assert!(
+            !branches
+                .iter()
+                .find(|info| info.id == "leaf_a")
+                .unwrap()
+                .is_current_leaf
+        );
+        assert!(
+            branches
+                .iter()
+                .find(|info| info.id == "leaf_b")
+                .unwrap()
+                .is_current_leaf
+        );
+    }
+
+    #[test]
+    fn list_branches_surfaces_an_orphan_instead_of_dropping_it() {
+        let root = serde_json::json!({"type":"message","id":"root","parentId":null});
+        // `parentId` names an id this session doesn't have — e.g. a partially written file.
+        let orphan = serde_json::json!({"type":"message","id":"orphan","parentId":"missing"});
+        let entries: Vec<&FileEntry> = vec![&root, &orphan];
+        let labels = HashMap::new();
+        let branches = build_branch_list(&entries, None, &labels);
+
+        assert_eq!(branches.len(), 2);
+        let orphan_info = branches.iter().find(|info| info.id == "orphan").unwrap();
+        // Surfaced as its own root...
+        assert_eq!(orphan_info.depth, 0);
+        assert!(!orphan_info.is_branch_point);
+        // ...but the stale parentId is still visible to the caller.
+        assert_eq!(orphan_info.parent_id, Some("missing"));
+    }
+
+    #[test]
+    fn list_branches_does_not_hang_on_a_parent_id_cycle() {
+        let a = serde_json::json!({"type":"message","id":"a","parentId":"b"});
+        let b = serde_json::json!({"type":"message","id":"b","parentId":"a"});
+        let entries: Vec<&FileEntry> = vec![&a, &b];
+        let labels = HashMap::new();
+        // If the walk didn't terminate, this call itself would hang the test.
+        let branches = build_branch_list(&entries, None, &labels);
+
+        let mut ids: Vec<&str> = branches.iter().map(|info| info.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["a", "b"]);
+    }
+
+    // -------------------------------------------------------------------------
+    // entries_to_agent_messages
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn entries_to_agent_messages_round_trips_a_message_entry() {
+        use pirust_ai::types::{Message, UserMessage, UserRole};
+
+        let env = SessionEnv::from_process_env();
+        let mut manager = env.in_memory(None, None).expect("in-memory session");
+        let original = AgentMessage::Llm(Message::User(UserMessage {
+            role: UserRole::User,
+            content: UserMessageContent::Text("hello".to_string()),
+            timestamp: 1_700_000_000_000,
+        }));
+        let id = manager.append_message(&original).expect("append_message");
+        let entry = manager.get_entry(&id).expect("entry was just appended");
+
+        let messages = entries_to_agent_messages(&[entry]);
+        assert_eq!(messages, vec![original]);
+    }
+
+    #[test]
+    fn entries_to_agent_messages_converts_branch_summary_entries() {
+        let entry = serde_json::json!({
+            "type": "branch_summary",
+            "id": "b1",
+            "parentId": null,
+            "timestamp": "2024-01-01T00:00:00.000Z",
+            "fromId": "a1",
+            "summary": "did stuff"
+        });
+        let messages = entries_to_agent_messages(&[&entry]);
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AgentMessage::BranchSummary(bs) => {
+                assert_eq!(bs.summary, "did stuff");
+                assert_eq!(bs.from_id, "a1");
+                assert_eq!(bs.timestamp, 1_704_067_200_000);
+            }
+            other => panic!("expected BranchSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entries_to_agent_messages_drops_an_empty_branch_summary() {
+        // Matches agent-core's own `session_entry_to_context_messages` guard.
+        let entry = serde_json::json!({
+            "type": "branch_summary",
+            "id": "b1",
+            "parentId": null,
+            "timestamp": "t",
+            "fromId": "a1",
+            "summary": ""
+        });
+        assert!(entries_to_agent_messages(&[&entry]).is_empty());
+    }
+
+    #[test]
+    fn entries_to_agent_messages_converts_compaction_entries() {
+        let entry = serde_json::json!({
+            "type": "compaction",
+            "id": "c1",
+            "parentId": "p0",
+            "timestamp": "2024-01-01T00:00:00.000Z",
+            "summary": "compacted history",
+            "firstKeptEntryId": "k1",
+            "tokensBefore": 4321
+        });
+        let messages = entries_to_agent_messages(&[&entry]);
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AgentMessage::CompactionSummary(cs) => {
+                assert_eq!(cs.summary, "compacted history");
+                assert_eq!(cs.tokens_before, 4321);
+                assert_eq!(cs.timestamp, 1_704_067_200_000);
+            }
+            other => panic!("expected CompactionSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entries_to_agent_messages_converts_custom_message_entries() {
+        let entry = serde_json::json!({
+            "type": "custom_message",
+            "id": "cm1",
+            "parentId": null,
+            "timestamp": "2024-01-01T00:00:00.000Z",
+            "customType": "note",
+            "content": "hi there",
+            "display": true
+        });
+        let messages = entries_to_agent_messages(&[&entry]);
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AgentMessage::Custom(c) => {
+                assert_eq!(c.custom_type, "note");
+                assert_eq!(c.content, UserMessageContent::Text("hi there".to_string()));
+                assert!(c.display);
+                assert_eq!(c.timestamp, 1_704_067_200_000);
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entries_to_agent_messages_skips_non_projected_types() {
+        // A bare "custom" entry (customType/data, no content/display) is deliberately NOT
+        // routed to create_custom_message — see the doc comment's "Correction" section.
+        let header = serde_json::json!({"type":"session","id":"h","timestamp":"t"});
+        let custom = serde_json::json!({
+            "type": "custom", "id": "x1", "parentId": null, "timestamp": "t",
+            "customType": "note", "data": {"a": 1}
+        });
+        let label = serde_json::json!({
+            "type": "label", "id": "x2", "parentId": null, "timestamp": "t",
+            "targetId": "x1", "label": "checkpoint"
+        });
+        let thinking = serde_json::json!({
+            "type": "thinking_level_change", "id": "x3", "parentId": null, "timestamp": "t",
+            "thinkingLevel": "high"
+        });
+        let model = serde_json::json!({
+            "type": "model_change", "id": "x4", "parentId": null, "timestamp": "t",
+            "provider": "anthropic", "modelId": "claude"
+        });
+        let info = serde_json::json!({
+            "type": "session_info", "id": "x5", "parentId": null, "timestamp": "t", "name": "n"
+        });
+        let entries: Vec<&FileEntry> = vec![&header, &custom, &label, &thinking, &model, &info];
+        assert!(entries_to_agent_messages(&entries).is_empty());
+    }
+
+    #[test]
+    fn entries_to_agent_messages_skips_a_malformed_message_entry_without_panicking() {
+        // "message" payload has no recognizable role, so AgentMessage deserialization fails.
+        let entry = serde_json::json!({
+            "type": "message",
+            "id": "m1",
+            "parentId": null,
+            "timestamp": "t",
+            "message": {"nonsense": true}
+        });
+        assert!(entries_to_agent_messages(&[&entry]).is_empty());
+    }
+
+    #[test]
+    fn entries_to_agent_messages_skips_a_compaction_entry_missing_required_fields() {
+        let entry = serde_json::json!({
+            "type": "compaction",
+            "id": "c1",
+            "parentId": null,
+            "timestamp": "t",
+            "summary": "no tokensBefore here"
+        });
+        assert!(entries_to_agent_messages(&[&entry]).is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // set_session_file — atomicity regression coverage
+    // -------------------------------------------------------------------------
+
+    /// An in-memory (`persist = false`) [`SessionEnv`] rooted in a fresh tempdir, so path
+    /// resolution ("~", relative bits) has somewhere real to land without touching the
+    /// actual home directory.
+    fn atomicity_test_env(root: &std::path::Path) -> SessionEnv {
+        SessionEnv::new(
+            ConfigEnv {
+                identity: crate::config::PIRUST,
+                platform: Platform::current(),
+                home_dir: Some(root.join("home").to_string_lossy().into_owned()),
+                agent_dir_override: Some(root.join("agent").to_string_lossy().into_owned()),
+            },
+            root.join("project").to_string_lossy().into_owned(),
+        )
+    }
+
+    /// Every field [`SessionManager::set_session_file`] can touch, read back through its
+    /// public accessors, so a snapshot before/after a call can assert nothing moved.
+    #[derive(Debug, PartialEq)]
+    struct ManagerSnapshot {
+        session_file: Option<String>,
+        session_id: String,
+        cwd: String,
+        session_dir: String,
+        entry_count: usize,
+        leaf_id: Option<String>,
+    }
+
+    fn snapshot(manager: &SessionManager) -> ManagerSnapshot {
+        ManagerSnapshot {
+            session_file: manager.get_session_file().map(str::to_string),
+            session_id: manager.get_session_id().to_string(),
+            cwd: manager.get_cwd().to_string(),
+            session_dir: manager.get_session_dir().to_string(),
+            entry_count: manager.get_entries().len(),
+            leaf_id: manager.get_leaf_id().map(str::to_string),
+        }
+    }
+
+    /// Regression for the corruption bug: an existing-but-unparseable file must fail
+    /// `set_session_file` WITHOUT leaving `session_file`/`file_entries` (and therefore the
+    /// index built from them) reassigned to the rejected candidate.
+    ///
+    /// Before the fix, `self.session_file` was assigned the candidate path and
+    /// `self.file_entries` was cleared before the `NotAPiSession` check ran, so this test
+    /// fails on the pre-fix code: the post-call snapshot differs from the pre-call one
+    /// (`session_file` becomes `Some(garbage path)` and `entry_count` drops to 0).
+    #[test]
+    fn set_session_file_leaves_the_manager_untouched_on_unparseable_content() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let env = atomicity_test_env(root.path());
+        let mut manager = env.in_memory(None, None).expect("in_memory session");
+
+        let before = snapshot(&manager);
+        // A fresh in-memory session has only its header entry — and `get_entries()` is
+        // "every non-header entry" (see its doc comment), so `entry_count` starts at 0.
+        // Since `persist = false`, there is also no session file yet. Assert both so the
+        // test would actually notice a regression rather than vacuously comparing
+        // `None == None`.
+        assert_eq!(before.session_file, None);
+        assert_eq!(before.entry_count, 0);
+
+        let garbage_path = root.path().join("garbage.jsonl");
+        fs::write(&garbage_path, b"not json\nstill not json\n").expect("write garbage file");
+
+        let err = manager
+            .set_session_file(&garbage_path.to_string_lossy())
+            .expect_err("unparseable-but-existing content must be rejected");
+        assert!(
+            matches!(err, SessionError::NotAPiSession(_)),
+            "unexpected error variant: {err:?}"
+        );
+
+        let after = snapshot(&manager);
+        assert_eq!(
+            after, before,
+            "set_session_file must not mutate the manager when it returns Err"
+        );
+    }
+
+    /// The success path is unchanged by the atomicity rework: switching to a valid,
+    /// existing session file loads its entries and adopts its header id.
+    #[test]
+    fn set_session_file_success_path_loads_the_target_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let env = atomicity_test_env(root.path());
+        let mut manager = env.in_memory(None, None).expect("in_memory session");
+
+        let valid_path = root.path().join("valid.jsonl");
+        let header = serde_json::json!({
+            "type": "session",
+            "version": CURRENT_SESSION_VERSION,
+            "id": "target-session",
+            "timestamp": "2020-01-01T00:00:00.000Z",
+            "cwd": env.process_cwd,
+        });
+        let message = serde_json::json!({
+            "type": "message",
+            "id": "m1",
+            "parentId": null,
+            "timestamp": "2020-01-01T00:00:01.000Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        });
+        let mut content = serde_json::to_string(&header).unwrap();
+        content.push('\n');
+        content.push_str(&serde_json::to_string(&message).unwrap());
+        content.push('\n');
+        fs::write(&valid_path, &content).expect("write valid session file");
+
+        manager
+            .set_session_file(&valid_path.to_string_lossy())
+            .expect("a well-formed, existing session file must load");
+
+        assert_eq!(manager.get_session_id(), "target-session");
+        // `get_entries()` excludes the header, so only the one message entry counts.
+        assert_eq!(manager.get_entries().len(), 1);
+        let resolved = env.resolve_path(&valid_path.to_string_lossy()).unwrap();
+        assert_eq!(manager.get_session_file(), Some(resolved.as_str()));
+        assert_eq!(manager.get_leaf_id(), Some("m1"));
     }
 }
