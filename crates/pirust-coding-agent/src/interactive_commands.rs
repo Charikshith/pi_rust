@@ -744,6 +744,36 @@ pub fn share_confirmation_notice() -> CommandOutcome {
 /// found alike) — it is scratch input to `gh`, not an artifact the user asked to keep
 /// (`/export` is the command for that).
 pub fn run_gist_share(messages: &[AgentMessage], session_id: Option<&str>) -> CommandOutcome {
+    run_gist_share_with(messages, session_id, &real_gh_gist_create)
+}
+
+/// The actual `gh gist create` invocation, factored out to a function pointer
+/// so [`run_gist_share_with`] can take a stand-in in tests (see its doc
+/// comment for why: a real gist cannot be created against a scripted account,
+/// and this module's existing coverage already depends on this machine
+/// genuinely lacking `gh` on PATH).
+fn real_gh_gist_create(path: &Path, desc: &str) -> std::io::Result<std::process::Output> {
+    std::process::Command::new("gh")
+        .args(["gist", "create", "--desc", desc])
+        .arg(path)
+        .output()
+}
+
+/// [`run_gist_share`]'s body, parameterized over the process invocation
+/// (P4, `docs/tui-pending-action-plan.md`): `run_gist_share`'s success-path
+/// URL parsing and non-zero-exit stderr passthrough were previously
+/// untestable without a real, authenticated `gh` install — this machine has
+/// neither, and CI cannot script a GitHub account either. `runner` takes the
+/// already-written export path and description and returns exactly what
+/// `std::process::Command::output()` would, so tests can supply a real
+/// `std::process::Output` (from a genuinely-run, always-present trivial
+/// command — see `tests::fake_output`) without touching `gh` at all, and the
+/// parsing/error-formatting logic below runs unmodified either way.
+fn run_gist_share_with(
+    messages: &[AgentMessage],
+    session_id: Option<&str>,
+    runner: &dyn Fn(&Path, &str) -> std::io::Result<std::process::Output>,
+) -> CommandOutcome {
     if messages.is_empty() {
         return CommandOutcome::Error(
             "Nothing to share yet \u{2014} the session has no messages.".to_string(),
@@ -764,11 +794,7 @@ pub fn run_gist_share(messages: &[AgentMessage], session_id: Option<&str>) -> Co
         Some(id) => format!("pirust session {id}"),
         None => "pirust session export".to_string(),
     };
-    let outcome = match std::process::Command::new("gh")
-        .args(["gist", "create", "--desc", &desc])
-        .arg(&path)
-        .output()
-    {
+    let outcome = match runner(&path, &desc) {
         Ok(output) if output.status.success() => {
             // `gh gist create`'s entire useful output on success is the gist URL on
             // stdout — that is the whole point of the command, so it is the whole
@@ -1413,6 +1439,101 @@ mod tests {
         assert!(
             !leftover.exists(),
             "run_gist_share must remove its temp file even when `gh` is absent"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // `run_gist_share_with` — the injectable-runner seam (P4,
+    // `docs/tui-pending-action-plan.md`): a real, authenticated `gh` cannot be
+    // scripted here or in CI, so these tests supply a genuinely-run, always-
+    // present trivial command in place of `gh` to prove the URL-parsing and
+    // non-zero-exit passthrough logic without ever invoking `gh` itself.
+    // -------------------------------------------------------------------------
+
+    /// A real `std::process::Output` (genuine `ExitStatus`, no hand-built
+    /// platform-specific bit-packing) produced by a trivial, always-present
+    /// shell invocation — stands in for `gh`'s output in the tests below.
+    #[cfg(unix)]
+    fn fake_output(code: i32, stdout_text: &str, stderr_text: &str) -> std::process::Output {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(r#"printf '%s' "$1"; printf '%s' "$2" >&2; exit "$3""#)
+            .arg("_")
+            .arg(stdout_text)
+            .arg(stderr_text)
+            .arg(code.to_string())
+            .output()
+            .expect("sh must be available to build a fake Output")
+    }
+
+    #[cfg(windows)]
+    fn fake_output(code: i32, stdout_text: &str, stderr_text: &str) -> std::process::Output {
+        // `echo` with an empty argument prints the literal "ECHO is on."
+        // (a `cmd` quirk, not a blank line) — segments are omitted entirely
+        // rather than passed empty so the empty-output test case stays empty.
+        let mut script = String::new();
+        if !stdout_text.is_empty() {
+            script.push_str(&format!("echo {stdout_text}&"));
+        }
+        if !stderr_text.is_empty() {
+            script.push_str(&format!("echo {stderr_text} 1>&2&"));
+        }
+        script.push_str(&format!("exit /b {code}"));
+        std::process::Command::new("cmd")
+            .args(["/C", &script])
+            .output()
+            .expect("cmd must be available to build a fake Output")
+    }
+
+    #[test]
+    fn run_gist_share_with_parses_the_gist_url_on_success() {
+        let messages = vec![user_text_message("hello from a test")];
+        let outcome = run_gist_share_with(&messages, Some("share-url-test"), &|_path, _desc| {
+            Ok(fake_output(0, "https://gist.github.com/anonymous/deadbeef", ""))
+        });
+        match outcome {
+            CommandOutcome::Notice(text) => {
+                assert!(text.contains("Shared as a secret gist:"));
+                assert!(text.contains("https://gist.github.com/anonymous/deadbeef"));
+            }
+            other => panic!("expected Notice, got {other:?}"),
+        }
+        let leftover = std::env::temp_dir().join("pirust-share-share-url-test.html");
+        assert!(
+            !leftover.exists(),
+            "run_gist_share_with must remove its temp file on the success path too"
+        );
+    }
+
+    #[test]
+    fn run_gist_share_with_reports_error_when_success_output_has_no_url() {
+        let messages = vec![user_text_message("hello from a test")];
+        let outcome = run_gist_share_with(&messages, Some("share-empty-test"), &|_path, _desc| {
+            Ok(fake_output(0, "", ""))
+        });
+        match outcome {
+            CommandOutcome::Error(text) => assert!(text.contains("printed no URL")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_gist_share_with_passes_through_nonzero_exit_stderr() {
+        let messages = vec![user_text_message("hello from a test")];
+        let outcome = run_gist_share_with(&messages, Some("share-fail-test"), &|_path, _desc| {
+            Ok(fake_output(1, "", "not authenticated. run: gh auth login"))
+        });
+        match outcome {
+            CommandOutcome::Error(text) => {
+                assert!(text.contains("gh gist create failed:"));
+                assert!(text.contains("not authenticated"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        let leftover = std::env::temp_dir().join("pirust-share-share-fail-test.html");
+        assert!(
+            !leftover.exists(),
+            "run_gist_share_with must remove its temp file on the error path too"
         );
     }
 

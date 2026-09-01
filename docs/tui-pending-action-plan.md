@@ -119,61 +119,78 @@ pre-existing `latex.rs:30` warning.
 
 ---
 
-## P3 — `/resume` picker's model column is always blank
+## P3 — `/resume` picker's model column is always blank — DONE (2026-09-01)
 
 `interactive_pickers::load_session_entries` takes
 `models_by_id: &HashMap<String, String>` and `runtime_host.rs` passes an empty
 map, because `SessionInfo` carries no model — a session's model exists only as
-`model_change` entries *inside* the transcript. Filling the column naively means
-opening every session file just to draw a list.
+`model_change` entries *inside* the transcript.
 
-Options, cheapest first:
-
-- [ ] **(a)** Leave it blank and drop the column. Honest, zero cost, and nobody
-      misses a column they never saw.
-- [ ] **(b)** Populate lazily: only read the transcript for the rows currently
-      in the viewport, cached by session id.
-- [ ] **(c)** Record the model in the session header at creation so listing is
-      free. Best long-term, but it is an on-disk format change and the format
-      is byte-compatible with Pi — check `session_golden.rs` before touching it.
-
-**Recommendation:** (a) now, (b) if users ask. Do not do (c) casually.
-
-**Acceptance:** either the column is gone, or it is populated without a
-full-store read on every `/resume`.
-
-**Size:** (a) trivial, (b) small, (c) do not.
+Went with recommendation **(a)**: the `Full`-tier row in
+`SessionPicker::format_row` no longer renders a model column (it always
+showed a blank `-` placeholder, which read as broken rather than honest). The
+underlying plumbing — `SessionEntry::model`, `load_session_entries`'s
+`models_by_id` parameter, and the fuzzy-search haystack fold-in — is left in
+place as the seam a future lazy-populate wave (option (b)) would use; only the
+always-empty visible column was removed. Test added:
+`session_picker_full_tier_row_has_no_model_column`.
 
 ---
 
-## P4 — Two paths that ship untested
+## P4 — Two paths that ship untested — substantially DONE (2026-09-01)
 
-Both are honest gaps, already documented in code. Neither is a defect; they are
-verification debt.
+Both were honest gaps, already documented in code. Neither was a defect; they
+were verification debt.
 
 ### `/share` success path
-`gh` is **not installed** on this machine, so gist creation, URL parsing, and
-the not-authenticated stderr passthrough were never exercised. The
-not-installed path *is* tested against a real `Command` call.
+`gh` is still **not installed** on this machine, so the real end-to-end path
+(a genuine `gh gist create` against an authenticated account) is still
+unverified and needs a human — that bullet stands. But the "optionally
+introduce a seam" bullet is done: `run_gist_share` is now a thin wrapper
+around `run_gist_share_with(messages, session_id, runner)`, where `runner` is
+an injected `&dyn Fn(&Path, &str) -> io::Result<Output>` (defaulting to the
+real `gh gist create` invocation). Three new tests supply a real
+`std::process::Output` from a genuinely-run, always-present trivial command
+(`sh`/`cmd`) in place of `gh`, proving the URL-parsing success path, the
+empty-stdout-on-success error path, and the non-zero-exit stderr passthrough
+— all without touching `gh` or a network.
 
-- [ ] Verify manually on a machine with `gh` authenticated: run `/share`, then
-      `/share confirm`, confirm the printed URL resolves and the gist is secret.
-- [ ] Optionally introduce a seam so the `gh` invocation can be faked (inject
-      the program name, or a trait with one method) and test URL parsing and
-      the non-zero-exit passthrough without the binary.
+- [ ] Still needs a human: verify manually on a machine with `gh`
+      authenticated that `/share confirm`'s printed URL actually resolves and
+      the gist is secret. The seam above proves the *logic* is right; it
+      cannot prove `gh`'s real CLI contract hasn't drifted.
 
 ### `/restart` re-exec
-The flag-and-clean-shutdown path is tested; the actual
-`current_exe()` + `spawn()` is not, because tests must not spawn processes.
+Same shape of fix: `restart_process` (`main.rs`) is now a thin wrapper that
+resolves `current_exe()`/`args()` and calls `spawn_replacement(exe, args)`,
+which takes the executable path and argv as parameters instead of reading the
+environment directly. Two new tests inject a harmless, always-present real
+executable (`/bin/sh -c 'exit 0'` / `cmd /C exit 0`) in place of `current_exe()`
+— which, inside `cargo test`, *is* the test binary itself, so calling the
+un-refactored function directly would have recursively re-launched the whole
+suite. The tests prove `spawn_replacement` returns immediately without
+blocking on the child (the "returns without waiting" test would hang forever
+if a `Child::wait` were ever added) and reports exit code 1 on a spawn
+failure rather than panicking.
 
-- [ ] Verify manually: `/restart` in a real terminal, confirm the session
-      restarts, argv is preserved (test with `--resume <id>`), and the terminal
-      is not left in raw mode.
-- [ ] Confirm no orphan process is left if the child fails to start.
+Also resolved by re-reading the existing code rather than by a test — no
+patch needed: **no orphan process is left if the child fails to start**,
+because a failed `spawn()` means the OS never created a process at all (see
+`spawn_replacement`'s new doc comment), and on a *successful* spawn this
+process exits via `std::process::exit` moments later, which is ordinary
+backgrounded-process handling, not a leak.
 
-**Acceptance:** both manually verified once and the result recorded here.
+- [ ] Still needs a human: run `/restart` in a real terminal, confirm the
+      session restarts, argv is preserved (test with `--resume <id>`), and the
+      terminal is not left in raw mode. The seam above cannot observe real
+      terminal-mode state.
 
-**Size:** small, but needs a human at a terminal.
+**Acceptance:** both success paths are now covered by tests that exercise the
+real parsing/spawn logic without the external dependency; only the
+external-tool/terminal-state halves still need a human, as noted above.
+
+Workspace: 1141 tests passing (was 1135 before P3/P4), clippy clean apart from
+the pre-existing `latex.rs:30` warning.
 
 ---
 

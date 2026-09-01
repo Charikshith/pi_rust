@@ -1042,23 +1042,24 @@ impl SessionPicker {
                 format!("{title} — {cwd}")
             }
             ColumnTier::Full => {
+                // No model column (P3, `docs/tui-pending-action-plan.md`):
+                // `SessionInfo` carries no model — a session's model exists
+                // only as `model_change` entries inside its transcript — so
+                // `entry.model` is always `None` today (`runtime_host.rs`
+                // passes an empty `models_by_id` map). Rendering it as an
+                // always-blank `-` column looked broken, not honest, so the
+                // column is dropped rather than shown empty; `entry.model`
+                // stays wired for a future lazy-populate wave (see the
+                // module docs) and still feeds the fuzzy-search haystack.
                 let cwd = truncate_to_width(&entry.cwd, 24, "…", true);
                 let age = entry
                     .modified
                     .map(|m| format_relative_age(m, now))
                     .unwrap_or_else(|| "-".to_string());
-                let model = entry.model.as_deref().unwrap_or("-");
-                let model = truncate_to_width(model, 16, "…", true);
-                let reserved = marker.len()
-                    + cwd.chars().count()
-                    + 3
-                    + 10 // age column
-                    + 1
-                    + model.chars().count()
-                    + 1;
+                let reserved = marker.len() + cwd.chars().count() + 3 + 10; // age column
                 let title_width = width.saturating_sub(reserved).max(4);
                 let title = truncate_to_width(&entry.title, title_width, "…", false);
-                format!("{title:<title_width$} — {cwd}  {age:<10} {model}")
+                format!("{title:<title_width$} — {cwd}  {age:<10}")
             }
         };
         let line = format!("{marker}{body}");
@@ -1933,6 +1934,26 @@ mod tests {
         let mut picker = SessionPicker::new(Vec::new(), 10);
         let lines = picker.render(80);
         assert!(lines.iter().any(|l| l.contains("no resumable sessions")));
+    }
+
+    /// P3 (`docs/tui-pending-action-plan.md`): the model column is always
+    /// blank in production (`runtime_host.rs` passes an empty
+    /// `models_by_id`), so at the wide (`Full`-tier) width it must not render
+    /// a trailing `-` placeholder — the row ends right after the age column.
+    #[test]
+    fn session_picker_full_tier_row_has_no_model_column() {
+        let infos = sample_session_infos();
+        let entries = load_session_entries(&infos, &HashMap::new());
+        let mut picker = SessionPicker::new(entries, 10);
+        let lines = picker.render(90); // >= 70 columns selects ColumnTier::Full
+        let row = lines
+            .iter()
+            .find(|l| l.contains("Refactor auth"))
+            .expect("session-a's row should be present");
+        assert!(
+            !row.trim_end().ends_with('-'),
+            "row must not end with a blank model placeholder, got {row:?}"
+        );
     }
 
     // -- shared helpers -------------------------------------------------

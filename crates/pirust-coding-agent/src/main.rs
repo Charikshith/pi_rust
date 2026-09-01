@@ -763,11 +763,28 @@ fn restart_process() -> i32 {
         }
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match std::process::Command::new(&exe).args(&args).spawn() {
+    spawn_replacement(&exe, &args)
+}
+
+/// [`restart_process`]'s body once the executable path and argv are resolved
+/// — split out purely so a test can supply a harmless real executable
+/// instead of `current_exe()` (P4, `docs/tui-pending-action-plan.md`: inside
+/// `cargo test`, `current_exe()` **is** the test binary itself — spawning it
+/// unmodified would recursively re-launch the whole suite, not exercise a
+/// harmless child).
+fn spawn_replacement(exe: &std::path::Path, args: &[String]) -> i32 {
+    match std::process::Command::new(exe).args(args).spawn() {
         // Exit 0: the restart was successfully *scheduled*, which is the only thing this
         // process can promise — whatever the new process's own exit code eventually is
         // belongs to that process, not this one, exactly as a shell would treat any other
         // backgrounded-then-detached command.
+        //
+        // No orphan/zombie risk from not calling `Child::wait` here: on a failed `spawn`
+        // the OS never created a process at all, so there is nothing to leak; on a
+        // successful `spawn`, this process (per the module doc above) exits via
+        // `std::process::exit` moments later, and the kernel reaps or reparents the
+        // child exactly as it would for any other backgrounded process whose parent
+        // exits — the same shape as a shell backgrounding a command with `&` and quitting.
         Ok(_child) => 0,
         Err(err) => {
             eprintln!("Error: /restart failed to launch {}: {err}", exe.display());
@@ -808,5 +825,53 @@ fn read_piped_stdin() -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::spawn_replacement;
+
+    /// A harmless, always-present real executable + args that exits 0
+    /// immediately — stands in for the restarted `pirust` binary.
+    #[cfg(unix)]
+    fn harmless_command() -> (std::path::PathBuf, Vec<String>) {
+        (
+            std::path::PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), "exit 0".to_string()],
+        )
+    }
+
+    #[cfg(windows)]
+    fn harmless_command() -> (std::path::PathBuf, Vec<String>) {
+        (
+            std::path::PathBuf::from("cmd"),
+            vec!["/C".to_string(), "exit".to_string(), "0".to_string()],
+        )
+    }
+
+    /// Proves the two properties `restart_process` actually needs: a
+    /// successful spawn reports exit code 0, and the call returns
+    /// immediately rather than blocking on the child (this test would hang
+    /// forever if `spawn_replacement` ever grew a `Child::wait`).
+    #[test]
+    fn spawn_replacement_launches_and_returns_without_waiting() {
+        let (exe, args) = harmless_command();
+        let code = spawn_replacement(&exe, &args);
+        assert_eq!(code, 0, "a successful spawn must report exit code 0");
+    }
+
+    #[test]
+    fn spawn_replacement_reports_an_error_when_the_executable_does_not_exist() {
+        let exe = std::path::PathBuf::from(if cfg!(windows) {
+            "pirust-definitely-not-a-real-binary.exe"
+        } else {
+            "/definitely/not/a/real/binary"
+        });
+        let code = spawn_replacement(&exe, &[]);
+        assert_eq!(
+            code, 1,
+            "a failed spawn must report exit code 1, not panic or hang"
+        );
     }
 }
