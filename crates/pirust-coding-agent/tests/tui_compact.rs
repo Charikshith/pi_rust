@@ -134,12 +134,9 @@ fn make_session(messages: Vec<AgentMessage>) -> (Arc<SingleTurnSession>, Agent) 
 /// (`compaction/mod.rs:73-77`), the accumulated-token budget is exceeded exactly at
 /// index 8 (7,000 + 7,000 + 7,000 == 21,000 >= 20,000, contributed by indices 10, 9,
 /// 8) — and index 8 is a **user** message (even index), so `find_cut_point` reports
-/// `is_split_turn == false` and the cut is clean: no turn-prefix message is silently
-/// dropped (see this file's module doc — `turn_prefix_messages` is intentionally
-/// unused by both `SingleTurnSession::compact_inner` and the RPC harness's own
-/// `AgentHarness::compact_inner`, so a split-turn cut would lose that message's
-/// content entirely; this test deliberately avoids that case to keep the assertions
-/// unambiguous).
+/// `is_split_turn == false` and the cut is clean: no turn-prefix message is in play
+/// here at all. See `compact_with_a_mid_turn_cut_keeps_the_turn_prefix_message` below
+/// for the split-turn case.
 #[tokio::test]
 async fn compact_shrinks_history_and_persists_a_compaction_entry() {
     let seed = alternating_messages(11, 28_000);
@@ -204,6 +201,50 @@ async fn compact_shrinks_history_and_persists_a_compaction_entry() {
         .and_then(|v| v.as_str())
         .expect("compaction entry has firstKeptEntryId");
     assert_eq!(first_kept_entry_id, expected_id);
+}
+
+/// Regression test for the split-turn message-loss bug: `turn_prefix_messages`
+/// (the messages belonging to a turn a compaction cut lands in the middle of)
+/// used to be silently dropped by `SingleTurnSession::compact_inner` — neither
+/// summarized (LLM summary generation is deferred everywhere in this codebase)
+/// nor retained.
+///
+/// 12 messages alternating user/assistant starting on user, each carrying
+/// 28,000 ASCII characters (7,000 estimated tokens, same arithmetic as
+/// `compact_shrinks_history_and_persists_a_compaction_entry` above). Walking
+/// backward against `keep_recent_tokens == 20_000`, the budget is exceeded
+/// exactly at index 9 (7,000 * 3 == 21,000, contributed by indices 11, 10, 9)
+/// — and index 9 is an **assistant** message (odd index), so `find_cut_point`
+/// reports `is_split_turn == true` with `turn_start_index == 8`: the user
+/// message that opened this turn. That message must survive compaction.
+#[tokio::test]
+async fn compact_with_a_mid_turn_cut_keeps_the_turn_prefix_message() {
+    let seed = alternating_messages(12, 28_000);
+    let (session, agent) = make_session(seed.clone());
+
+    session
+        .compact(CompactionReason::Manual)
+        .await
+        .expect("compaction should succeed with a real cut point");
+
+    let after = agent.messages();
+    // 1 synthesized summary + turn-prefix message (index 8) + retained tail
+    // (indices 9, 10, 11) == 5 messages. Before the fix this was 4: index 8's
+    // user message vanished entirely, with nothing in the summary or the
+    // retained tail to show it ever existed.
+    assert_eq!(
+        after.len(),
+        5,
+        "history shrank to summary + turn-prefix message + 3-message retained tail"
+    );
+    assert!(
+        matches!(after[0], AgentMessage::CompactionSummary(_)),
+        "first message after compaction is the synthesized summary, got {:?}",
+        after[0]
+    );
+    // Everything from the split turn's start onward — turn-prefix message
+    // included — is a value-for-value suffix of the original messages.
+    assert_eq!(after[1..], seed[8..]);
 }
 
 /// `prepare_compaction`/`prepare_compaction_from_messages` return `Ok(None)` when

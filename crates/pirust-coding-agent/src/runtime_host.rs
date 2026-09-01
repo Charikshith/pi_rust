@@ -321,7 +321,18 @@ impl SingleTurnSession {
             return Err("Nothing to compact".to_string());
         };
 
-        let tail_len = preparation.retained_tail.len();
+        // `turn_prefix_messages` is a split turn's messages that Pi would fold
+        // into a second, separately-generated `TURN_PREFIX` summary
+        // (compaction.ts:655-679) — deferred along with the rest of LLM
+        // summary generation below, so there is no summary text to fold them
+        // into yet. Keeping them verbatim, ahead of `retained_tail`, is the
+        // only choice that does not silently drop a mid-turn message: the
+        // session's live context is reconstructed as exactly
+        // `[summary, ...retained_tail]` below, so anything not in one of
+        // those two places is gone from every future turn in this session.
+        let mut retained_tail = preparation.turn_prefix_messages.clone();
+        retained_tail.extend(preparation.retained_tail.iter().cloned());
+        let tail_len = retained_tail.len();
         let cut_index = messages.len().saturating_sub(tail_len);
 
         let first_kept_entry_id = if tail_len == 0 {
@@ -377,7 +388,7 @@ impl SingleTurnSession {
 
         let mut new_messages = Vec::with_capacity(1 + tail_len);
         new_messages.push(AgentMessage::CompactionSummary(summary_message));
-        new_messages.extend(preparation.retained_tail.iter().cloned());
+        new_messages.extend(retained_tail.iter().cloned());
         self.agent.set_messages(&new_messages);
         self.persisted.store(new_messages.len(), Ordering::SeqCst);
 

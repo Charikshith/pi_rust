@@ -63,32 +63,59 @@ pre-existing `latex.rs:30` warning.
 
 ---
 
-## P2 — Split-turn compaction silently drops a message
+## P2 — Split-turn compaction silently drops a message — DONE (2026-09-01)
 
-**The finding (pre-existing, not from this work):**
-`CompactionPreparation.turn_prefix_messages` is computed by
+**The finding (pre-existing, not from the TUI work):**
+`CompactionPreparation.turn_prefix_messages` was computed by
 `prepare_compaction` in
-`crates/pirust-agent-core/src/harness/compaction/v4.rs` and **never consumed by
-any caller**. Both `AgentHarness::compact_inner` (the RPC path) and the new
-`SingleTurnSession::compact_inner` ignore it. When a compaction cut falls
-mid-turn, that message's content is lost.
+`crates/pirust-agent-core/src/harness/compaction/v4.rs` but **never consumed by
+any caller**. Both `AgentHarness::compact_inner` (the RPC path) and
+`SingleTurnSession::compact_inner` (the TUI path) ignored it. When a
+compaction cut fell mid-turn, that turn's own prefix message vanished
+entirely — not summarized (LLM summary generation is a deferred stub on both
+paths, using a `"[summary generation deferred]"` placeholder) and not
+retained.
 
-This affects RPC mode too, so it is not a TUI bug and should not be fixed as
-one.
+**What `turn_prefix_messages` is meant to be prepended to:** in the real Pi
+oracle, a split-turn compact generates a *second*, separately-summarized
+`TURN_PREFIX` block joined to the history summary with `---`
+(`compaction.ts:655-679`) — but that second LLM call shares the same deferred
+stub as the primary summary, so there is no summary text to fold it into yet.
+The only choice that does not silently drop content: keep
+`turn_prefix_messages` **verbatim**, spliced in ahead of `retained_tail`, at
+both call sites. `session_entry_to_context_messages`'s `Entry::Compaction` arm
+(and the flat-session equivalent) reconstructs a compacted branch's live
+context as exactly `[summary, ...retained_tail]` — so anything not in one of
+those two places is unrecoverable, and `retained_tail` was the only place left
+to put it.
 
-- [ ] Read `prepare_compaction` and determine what `turn_prefix_messages` is
-      meant to be prepended to.
-- [ ] Fix both call sites together, or fix it inside `prepare_compaction` so no
-      caller can forget.
-- [ ] Add a test that compacts with a cut deliberately placed mid-turn and
-      asserts the prefix survives. The existing `tests/tui_compact.rs` test
-      deliberately avoids this case — extend it rather than replacing it.
+`SingleTurnSession::compact_inner` needed one more change beyond the splice:
+`tail_len` (used to locate the on-disk `firstKeptEntryId` boundary) had to
+grow by `turn_prefix_messages.len()` too, since the disk boundary between
+"summarized away" and "kept" content moves left by exactly that many entries.
 
-**Acceptance:** a mid-turn cut loses no message content, proven by a test that
-fails before the fix.
+- [x] Read `prepare_compaction`, confirmed `turn_prefix_messages` is meant to
+      be prepended to `retained_tail`, not merged into the summary text (no
+      summarizer to merge it into yet).
+- [x] Fixed both call sites (`harness/mod.rs::compact_inner`,
+      `runtime_host.rs::compact_inner`) with the same splice.
+- [x] Extended `tests/tui_compact.rs` with
+      `compact_with_a_mid_turn_cut_keeps_the_turn_prefix_message`: 12
+      alternating messages sized so the cut lands on an assistant (odd) index,
+      forcing `is_split_turn == true`; asserts the turn-opening user message
+      survives compaction. Fails without the fix (history would be 4 messages
+      instead of 5, silently missing index 8).
 
-**Size:** medium, and it touches `pirust-agent-core`. Needs care: `v4.rs` has a
-byte-parity golden suite behind it.
+**Not done, deliberately:** no new integration test was added for the
+`AgentHarness`/RPC path specifically — that fix is a 2-line mechanical mirror
+of the now-tested TUI-path fix, and `prepare_compaction`'s own
+`turn_prefix_messages` contents are already golden-tested in
+`compaction_golden.rs`. Building a full v4-session harness fixture to
+re-prove the same splice felt like test-count padding, not risk reduction; a
+future real LLM-summarizer wave should exercise this path anyway.
+
+Workspace: 1135 tests passing (was 1134), clippy clean apart from the
+pre-existing `latex.rs:30` warning.
 
 ---
 

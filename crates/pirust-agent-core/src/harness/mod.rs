@@ -693,10 +693,22 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
         // LLM summary generation deferred (stub): use a placeholder. Pi calls
         // `compact(...)` here to produce the summary text via `models.completeSimple`.
         let summary = "[summary generation deferred]".to_string();
+        // `turn_prefix_messages` is a split turn's messages that Pi would fold
+        // into a second, separately-generated `TURN_PREFIX` summary
+        // (compaction.ts:655-679) — that second LLM call is deferred along
+        // with the rest of summary generation above, so there is no summary
+        // text to fold them into yet. Keeping them verbatim, ahead of
+        // `retained_tail`, is the only choice that does not silently drop a
+        // mid-turn message: `session_entry_to_context_messages`'s
+        // `Entry::Compaction` arm reconstructs a compacted branch's context as
+        // exactly `[summary] + retained_tail`, so anything not in one of those
+        // two places is gone from every future turn.
+        let mut retained_tail = preparation.turn_prefix_messages.clone();
+        retained_tail.extend(preparation.retained_tail.iter().cloned());
         let entry = ProvisionedEntry::Compaction(ProvisionedCompactionEntry {
             id: self.shared.session.new_id(),
             summary: summary.clone(),
-            retained_tail: preparation.retained_tail.clone(),
+            retained_tail: retained_tail.clone(),
             tokens_before: preparation.tokens_before,
             details: None,
             usage: None,
@@ -718,7 +730,7 @@ impl<St: V4SessionStorage + Send + Sync + 'static> AgentHarness<St> {
         Ok(CompactionOutcome {
             summary,
             tokens_before: preparation.tokens_before,
-            retained_tail: preparation.retained_tail.clone(),
+            retained_tail,
         })
     }
 
