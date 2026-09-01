@@ -49,7 +49,7 @@ use pirust_tui::components::text::Text;
 use pirust_tui::editor::Editor;
 use pirust_tui::tui::{Component, SharedComponent, TUI};
 
-use crate::interactive_a11y::glyph;
+use crate::interactive_a11y::{active, glyph, state_label};
 use crate::interactive_commands::CommandOutcome;
 use crate::interactive_debug::{DebugLog, DebugPanel, RequestId, TurnTimings};
 use crate::interactive_diff::{parse_file_change, DiffPreview};
@@ -388,21 +388,43 @@ impl ToolExecutionComponent {
         self.is_partial = is_partial;
     }
 
+    /// `running`/`error`/`ok` — the tool-box state as a [`state_label`] key.
+    /// The single source of truth for both the box's background colour and
+    /// (when `verbose_state` is on) its text label, so the two can never
+    /// disagree about what state is showing.
+    fn state_word(&self) -> &'static str {
+        if self.is_partial {
+            "running"
+        } else if self.result.as_ref().is_some_and(|r| r.is_error) {
+            "error"
+        } else {
+            "ok"
+        }
+    }
+
     /// The bg color for the current state (`updateDisplay`'s `bgFn`).
     fn bg_hex(&self) -> &'static str {
-        if self.is_partial {
-            dark::TOOL_PENDING_BG
-        } else if self.result.as_ref().is_some_and(|r| r.is_error) {
-            dark::TOOL_ERROR_BG
-        } else {
-            dark::TOOL_SUCCESS_BG
+        match self.state_word() {
+            "running" => dark::TOOL_PENDING_BG,
+            "error" => dark::TOOL_ERROR_BG,
+            _ => dark::TOOL_SUCCESS_BG,
         }
     }
 
     /// `formatToolExecution` (tool-execution.ts:379) — the fallback render:
     /// bold tool name + args JSON + result output.
+    ///
+    /// A pending/success/error tool box otherwise conveys its state only
+    /// through `bg_hex`'s background colour (WCAG 2.1 SC 1.4.1 "no
+    /// colour-only meaning" violation) — `verbose_state` prefixes a text
+    /// label so the state survives `NO_COLOR`/monochrome rendering too.
     fn format_tool_execution(&self) -> String {
-        let mut text = self.tool_name.clone();
+        let mut text = String::new();
+        if active().verbose_state {
+            text.push_str(state_label(self.state_word()));
+            text.push(' ');
+        }
+        text.push_str(&self.tool_name);
         if !self.suppress_args {
             let content = serde_json::to_string_pretty(&self.args).unwrap_or_default();
             if !content.is_empty() && content != "{}" && content != "null" {
@@ -2913,3 +2935,45 @@ pub const BUILTIN_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         Some("[on|off]"),
     ),
 ];
+
+#[cfg(test)]
+mod tool_execution_component_tests {
+    use super::ToolExecutionComponent;
+    use crate::interactive_a11y::{with_settings, A11ySettings};
+
+    fn verbose(on: bool) -> A11ySettings {
+        A11ySettings {
+            verbose_state: on,
+            ..A11ySettings::default()
+        }
+    }
+
+    /// A pending/success/error tool box otherwise conveys its state only
+    /// through background colour — this is the WCAG "no colour-only meaning"
+    /// gap `verbose_state` closes. See `format_tool_execution`'s doc comment.
+    #[test]
+    fn verbose_state_labels_pending_success_and_error() {
+        with_settings(verbose(true), || {
+            let pending = ToolExecutionComponent::new("bash".into(), serde_json::json!({}), true);
+            assert!(pending.format_tool_execution().starts_with("[running] bash"));
+
+            let mut success =
+                ToolExecutionComponent::new("bash".into(), serde_json::json!({}), true);
+            success.update_result(Vec::new(), false, false);
+            assert!(success.format_tool_execution().starts_with("[ok] bash"));
+
+            let mut failed =
+                ToolExecutionComponent::new("bash".into(), serde_json::json!({}), true);
+            failed.update_result(Vec::new(), true, false);
+            assert!(failed.format_tool_execution().starts_with("[error] bash"));
+        });
+    }
+
+    #[test]
+    fn verbose_state_off_omits_the_label() {
+        with_settings(verbose(false), || {
+            let pending = ToolExecutionComponent::new("bash".into(), serde_json::json!({}), true);
+            assert_eq!(pending.format_tool_execution(), "bash");
+        });
+    }
+}

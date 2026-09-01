@@ -26,40 +26,40 @@ Nothing else here can be reviewed cleanly until this lands.
 
 ---
 
-## P1 — Accessibility promise is half-kept
+## P1 — Accessibility promise is half-kept — DONE (2026-09-01)
 
 **The finding:** `interactive_a11y::A11ySettings` detects four flags. Only
-`ascii_only` (via `glyph`) and `color` (via `interactive_theme::fg/bg`) are
-consumed. `reduced_motion` and `verbose_state` appear **nowhere outside
-`interactive_a11y.rs`** — they are detected, stored in the packed atomic, and
-never read.
+`ascii_only` (via `glyph`) and `color` (via `interactive_theme::fg/bg`) were
+consumed. `reduced_motion` and `verbose_state` appeared **nowhere outside
+`interactive_a11y.rs`**.
 
-So `NO_COLOR=1` and `TERM=dumb` correctly kill colour and fancy glyphs, but:
+**What was actually wired, once traced to real call sites:**
 
-- animation/spinners are not suppressed (`reduced_motion`)
-- state is not forced to carry a word as well as a marker (`verbose_state`)
+- `Loader`/`CancellableLoader` (`pirust-tui`) turned out to be dead code —
+  never instantiated anywhere in `pirust-coding-agent`, so there was no live
+  spinner to gate. The one real, shipping animation is
+  `interactive_thinking.rs`'s collapsed streaming view, which rewrites its
+  last-line preview on every `push_delta`. `reduced_motion` now suppresses
+  that preview, keeping the static `"▸ Thinking… (N lines)"` header (real
+  progress, not decoration).
+- The one genuine "no colour-only meaning" violation was
+  `ToolExecutionComponent::bg_hex` in `interactive_mode.rs`: a tool box's
+  pending/success/error state was conveyed **only** by background colour.
+  `format_tool_execution` now prefixes `interactive_a11y::state_label` when
+  `verbose_state` is on, driven by a new `state_word()` that both `bg_hex`
+  and the label consult (so colour and label can't disagree).
+  `show_error`/the status line were checked too: both were already plain,
+  uncolored text with no color-only gap, so left untouched — adding a
+  redundant label there would have been scope creep, not a fix.
+- Two existing `interactive_thinking.rs` tests assumed `reduced_motion:
+  false`, which is *not* the real default in a non-TTY `cargo test` process
+  (`detect_from`'s non-TTY rule forces it true) — both now pin the setting
+  via `with_settings` instead of relying on ambient state.
 
-The spec's bar is *"no color-only meaning … reduced animation option"*. Half of
-that is unimplemented, and worse, the code currently implies otherwise.
-
-- [ ] Find every animated/spinner element. Start with
-      `crates/pirust-tui/src/components/loader.rs` and
-      `cancellable_loader.rs`, plus `interactive_thinking.rs`'s live tail.
-- [ ] Gate them on `interactive_a11y::active().reduced_motion` — render a
-      static marker instead of an animating one.
-- [ ] Consume `verbose_state`: when set, `show_error`/`show_notice`/the status
-      line should always include the state word (`interactive_a11y::state_label`
-      already exists for this and is also unused — check it).
-- [ ] Test both through the injectable `detect_from(env, is_tty)` seam, and
-      serialise via `interactive_a11y::with_settings` (the shared lock — several
-      tests share this process-global).
-
-**Acceptance:** with `reduced_motion` set, no frame differs from the previous
-one purely because of animation; with `verbose_state` set, every state is
-identifiable from text alone with colour disabled.
-
-**Size:** small-to-medium. One agent, files: `interactive_a11y.rs` consumers
-only — do not widen the struct.
+**Tests added:** `interactive_thinking::tests::reduced_motion_suppresses_live_last_line_preview`,
+`interactive_mode::tool_execution_component_tests::{verbose_state_labels_pending_success_and_error, verbose_state_off_omits_the_label}`.
+Workspace: 1134 tests passing (was 1131), clippy clean apart from the
+pre-existing `latex.rs:30` warning.
 
 ---
 

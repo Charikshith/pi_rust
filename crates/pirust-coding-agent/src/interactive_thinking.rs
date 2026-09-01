@@ -34,6 +34,7 @@ use std::rc::{Rc, Weak};
 use pirust_tui::tui::Component;
 use pirust_tui::utils::wrap_text_with_ansi;
 
+use crate::interactive_a11y;
 use crate::interactive_theme::{dark, fg};
 
 /// Upper bound on retained thinking text, in bytes.
@@ -246,11 +247,19 @@ impl ThinkingComponent {
             s
         } else if self.streaming {
             let mut s = format!("▸ Thinking… ({total_lines})");
-            let last = self.text.rsplit('\n').next().unwrap_or("").trim();
-            if !last.is_empty() {
-                s.push('\n');
-                s.push_str("  ");
-                s.push_str(last);
+            // The live last-line preview repaints on every streamed token —
+            // exactly the kind of continuous motion `reduced_motion` exists
+            // to suppress (screen readers re-announce it on every change;
+            // vestibular-disorder accommodation wants it still). The header
+            // above still updates (it is real progress, not decoration), just
+            // without the constantly-rewriting tail line.
+            if !interactive_a11y::active().reduced_motion {
+                let last = self.text.rsplit('\n').next().unwrap_or("").trim();
+                if !last.is_empty() {
+                    s.push('\n');
+                    s.push_str("  ");
+                    s.push_str(last);
+                }
             }
             s
         } else {
@@ -499,17 +508,48 @@ mod tests {
 
     // ---- ThinkingComponent: render content --------------------------------
 
+    /// Pinned via `with_settings`: this asserts the *non-reduced-motion* live
+    /// preview, which `interactive_a11y::active()` would not deterministically
+    /// give by default (a non-TTY test run detects `reduced_motion = true`).
     #[test]
     fn collapsed_streaming_render_shows_header_and_last_line() {
-        let mut t = ThinkingComponent::new();
-        t.push_delta("looking at the code\nnarrowing it down");
-        let lines = t.render(80);
-        let joined = lines.join("\n");
-        assert!(joined.contains("Thinking…"));
-        assert!(joined.contains("(2 lines)"));
-        assert!(joined.contains("narrowing it down"));
-        // The header still says "Thinking…", not "Thought for" — streaming.
-        assert!(!joined.contains("Thought for"));
+        interactive_a11y::with_settings(
+            interactive_a11y::A11ySettings {
+                reduced_motion: false,
+                ..interactive_a11y::A11ySettings::default()
+            },
+            || {
+                let mut t = ThinkingComponent::new();
+                t.push_delta("looking at the code\nnarrowing it down");
+                let lines = t.render(80);
+                let joined = lines.join("\n");
+                assert!(joined.contains("Thinking…"));
+                assert!(joined.contains("(2 lines)"));
+                assert!(joined.contains("narrowing it down"));
+                // The header still says "Thinking…", not "Thought for" — streaming.
+                assert!(!joined.contains("Thought for"));
+            },
+        );
+    }
+
+    /// `reduced_motion` must suppress the constantly-rewriting last-line
+    /// preview while still showing real progress (the line count).
+    #[test]
+    fn reduced_motion_suppresses_live_last_line_preview() {
+        interactive_a11y::with_settings(
+            interactive_a11y::A11ySettings {
+                reduced_motion: true,
+                ..interactive_a11y::A11ySettings::default()
+            },
+            || {
+                let mut t = ThinkingComponent::new();
+                t.push_delta("looking at the code\nnarrowing it down");
+                let joined = t.render(80).join("\n");
+                assert!(joined.contains("Thinking…"));
+                assert!(joined.contains("(2 lines)"));
+                assert!(!joined.contains("narrowing it down"));
+            },
+        );
     }
 
     #[test]
@@ -556,13 +596,25 @@ mod tests {
 
     #[test]
     fn render_cache_misses_on_width_change() {
-        let mut t = ThinkingComponent::new();
-        t.push_delta("a somewhat long line of reasoning text that will wrap");
-        let narrow = t.render(20);
-        let wide = t.render(80);
-        // Different wrap widths must not be silently served from the same
-        // cache entry.
-        assert_ne!(narrow, wide);
+        // Pinned `reduced_motion: false` so the live last-line preview (long
+        // enough to wrap differently at each width) is actually present —
+        // otherwise the two renders would both collapse to the same
+        // one-line header and this test would stop testing the cache.
+        interactive_a11y::with_settings(
+            interactive_a11y::A11ySettings {
+                reduced_motion: false,
+                ..interactive_a11y::A11ySettings::default()
+            },
+            || {
+                let mut t = ThinkingComponent::new();
+                t.push_delta("a somewhat long line of reasoning text that will wrap");
+                let narrow = t.render(20);
+                let wide = t.render(80);
+                // Different wrap widths must not be silently served from the
+                // same cache entry.
+                assert_ne!(narrow, wide);
+            },
+        );
     }
 
     #[test]
