@@ -28,9 +28,19 @@
 //!   sequential loop, never mid-stream), the on-disk result is the same messages in the
 //!   same order — only the *timing* of when they hit disk narrows (end-of-turn, not
 //!   mid-turn). Harden to event-level if a crash-mid-turn resume scenario is exercised.
-//! - **`set_rebind_session`'s callback is stored and never invoked** — nothing in this
-//!   wave swaps the session under the runtime (no `/fork`, no extension `new_session`),
-//!   so the callback is dead by construction, not by omission.
+//! - **`set_rebind_session`'s callback is now stored and invoked** (P5,
+//!   `docs/tui-pending-action-plan.md`) — [`SingleTurnRuntimeHost::new_session`]/`::fork`/
+//!   `::switch_session` call it after a successful [`SingleTurnSession`] mutation,
+//!   matching `interactive_mode.rs`'s own `/new`/`/fork`/`/import` handlers, which call
+//!   the same [`PrintModeSession`] methods directly and were always real. What remains
+//!   genuinely unwired is the interactive TUI's *visual* refresh: `main.rs`'s interactive
+//!   arm never calls `set_rebind_session` at all (there is no `RebindSessionFn`-shaped,
+//!   `Send + Sync` hook into the `Rc`-based `InteractiveMode`'s `reset_transcript_view` —
+//!   see that arm's own comment), so an extension-triggered swap there updates the real
+//!   session state but leaves the already-rendered chat stale until something else
+//!   (e.g. the user's own `/new`) repaints it. The RPC/print-mode path
+//!   (`print_mode.rs::run_print_mode`) has no such gap: it is headless, and its own
+//!   `rebind_session` is exactly the callback this now invokes.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1419,14 +1429,50 @@ fn to_extension_event(event: &AgentEvent) -> Option<ExtensionEvent> {
 
 /// Wraps a [`SingleTurnSession`] behind [`AgentSessionRuntimeHost`] — the two traits are
 /// split in `print_mode.rs` because Pi's runtime can swap the session underneath a fixed
-/// host; this wave's host never does, so `session()` always returns the same instance.
+/// host; this wave's host never does (`session()` always returns the same instance) —
+/// `new_session`/`fork`/`switch_session` below mutate that one instance's `Agent`/
+/// `SessionManager` in place (the same real `PrintModeSession` methods
+/// `interactive_mode.rs`'s `/new`/`/fork`/`/import` already call directly), rather than
+/// constructing a replacement to swap in.
 pub struct SingleTurnRuntimeHost {
     session: Arc<SingleTurnSession>,
+    /// Set via `set_rebind_session` (`print_mode.rs::run_print_mode`, for the RPC/print-
+    /// mode path) and invoked after a successful `new_session`/`fork`/`switch_session`
+    /// below — that is the caller's cue to re-fetch `session()` (unchanged here, but the
+    /// caller does not know that) and re-subscribe/rebuild its extension binding, exactly
+    /// as `PrintModeRun::rebind_session` does. `None` (never invoked) is the correct,
+    /// harmless state for any caller — such as `main.rs`'s interactive arm, see its own
+    /// comment on this — that never calls `set_rebind_session` in the first place.
+    rebind: Mutex<Option<RebindSessionFn>>,
 }
 
 impl SingleTurnRuntimeHost {
     pub fn new(session: Arc<SingleTurnSession>) -> Self {
-        Self { session }
+        Self {
+            session,
+            rebind: Mutex::new(None),
+        }
+    }
+
+    /// Run the stored rebind callback, if any, after a successful session mutation.
+    /// Errors from the callback itself are logged, not propagated: the session mutation
+    /// this follows already succeeded, and this crate has no channel back to whatever
+    /// invoked `new_session`/`fork`/`switch_session` to report a *second*, unrelated
+    /// failure in the rebind step through the trait's plain `Value`/`Cancelled` returns.
+    async fn run_rebind(&self) {
+        let rebind = self
+            .rebind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(rebind) = rebind {
+            if let Err(error) = rebind().await {
+                eprintln!(
+                    "Warning: rebind after a session swap failed: {}",
+                    error.console_message()
+                );
+            }
+        }
     }
 }
 
@@ -1435,27 +1481,59 @@ impl AgentSessionRuntimeHost for SingleTurnRuntimeHost {
         Arc::clone(&self.session) as Arc<dyn PrintModeSession>
     }
 
-    fn set_rebind_session(&self, _rebind: RebindSessionFn) {
-        // Never invoked this wave — see module docs.
+    fn set_rebind_session(&self, rebind: RebindSessionFn) {
+        *self.rebind.lock().unwrap_or_else(|e| e.into_inner()) = Some(rebind);
     }
 
     fn dispose(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
 
+    /// `runtimeHost.newSession(options)` (`print-mode.ts:77`) — delegates to the real
+    /// [`PrintModeSession::start_new_session`] `interactive_mode.rs`'s `/new` already
+    /// calls. `options` is accepted (matching the trait) but unused: `start_new_session`
+    /// takes none, matching `/new`'s own signature.
     fn new_session(&self, _options: Value) -> BoxFuture<'_, Value> {
-        // Unreachable this wave — see module docs.
-        Box::pin(async { Value::Null })
+        Box::pin(async move {
+            match self.session.start_new_session() {
+                Ok(()) => {
+                    self.run_rebind().await;
+                    Value::Null
+                }
+                Err(error) => serde_json::json!({ "error": error }),
+            }
+        })
     }
 
-    fn fork(&self, _entry_id: String, _options: Value) -> BoxFuture<'_, Cancelled> {
-        // Unreachable this wave — see module docs.
-        Box::pin(async { Cancelled { cancelled: false } })
+    /// `runtimeHost.fork(entryId, options)` (`print-mode.ts:79`) — delegates to
+    /// [`PrintModeSession::fork_from`]. The trait's `Cancelled { cancelled }` return has
+    /// no room for an error message (unlike `new_session`/`switch_session`'s `Value`), so
+    /// a failure is logged to stderr rather than silently dropped; `cancelled: false`
+    /// either way, since a failure is not the same thing as the operation having been
+    /// cancelled mid-flight (the meaning `Cancelled` carries for `navigate_tree`).
+    fn fork(&self, entry_id: String, _options: Value) -> BoxFuture<'_, Cancelled> {
+        Box::pin(async move {
+            match self.session.fork_from(&entry_id) {
+                Ok(_path) => self.run_rebind().await,
+                Err(error) => eprintln!("Warning: fork to {entry_id} failed: {error}"),
+            }
+            Cancelled { cancelled: false }
+        })
     }
 
-    fn switch_session(&self, _session_path: String, _options: Value) -> BoxFuture<'_, Value> {
-        // Unreachable this wave — see module docs.
-        Box::pin(async { Value::Null })
+    /// `runtimeHost.switchSession(path, options)` (`print-mode.ts:92`) — delegates to
+    /// [`PrintModeSession::switch_to_session_file`], same success/error shape as
+    /// [`Self::new_session`].
+    fn switch_session(&self, session_path: String, _options: Value) -> BoxFuture<'_, Value> {
+        Box::pin(async move {
+            match self.session.switch_to_session_file(&session_path) {
+                Ok(()) => {
+                    self.run_rebind().await;
+                    Value::Null
+                }
+                Err(error) => serde_json::json!({ "error": error }),
+            }
+        })
     }
 }
 
@@ -2168,6 +2246,211 @@ mod session_mutation_tests {
             empty_catalog_err, unknown_model_err,
             "an empty catalog and an unknown model are different problems and must be \
              reported differently"
+        );
+    }
+
+    // -- SingleTurnRuntimeHost (P5, `docs/tui-pending-action-plan.md`) --------
+
+    /// `new_session` genuinely calls `start_new_session` (not a stub) and invokes a
+    /// registered rebind callback on success.
+    #[tokio::test]
+    async fn host_new_session_wipes_the_transcript_and_invokes_rebind() {
+        let seed = vec![user_text_message("hi"), assistant_text_message("hello")];
+        let (session, agent) = make_in_memory_session(seed);
+        let host = SingleTurnRuntimeHost::new(session);
+
+        let rebind_called = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&rebind_called);
+        host.set_rebind_session(Arc::new(move || {
+            let flag = Arc::clone(&flag);
+            Box::pin(async move {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+
+        let result = host.new_session(Value::Null).await;
+        assert_eq!(result, Value::Null, "success reports Value::Null");
+        assert_eq!(agent.messages().len(), 0, "the live transcript was wiped");
+        assert!(
+            rebind_called.load(Ordering::SeqCst),
+            "a registered rebind callback must run after a successful new_session"
+        );
+    }
+
+    /// No rebind registered (`main.rs`'s interactive arm, by design — see the module
+    /// doc) must not panic; it is simply a no-op.
+    #[tokio::test]
+    async fn host_new_session_with_no_rebind_registered_does_not_panic() {
+        let (session, agent) = make_in_memory_session(vec![user_text_message("hi")]);
+        let host = SingleTurnRuntimeHost::new(session);
+        let result = host.new_session(Value::Null).await;
+        assert_eq!(result, Value::Null);
+        assert_eq!(agent.messages().len(), 0);
+    }
+
+    /// `fork` genuinely calls `fork_from` (rewinding the live transcript to the fork
+    /// point) and invokes a registered rebind callback on success — `Cancelled` is
+    /// always `{ cancelled: false }` on success, since nothing aborted mid-flight.
+    #[tokio::test]
+    async fn host_fork_rewinds_the_transcript_and_invokes_rebind() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let seed = vec![
+            user_text_message("first"),
+            assistant_text_message("second"),
+            user_text_message("third"),
+        ];
+        let (session, agent) = make_persisting_session(tmp.path(), seed.clone());
+        session.persist_new_messages();
+        let fork_point = {
+            let entries = session.entries_for_test();
+            entries
+                .iter()
+                .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("message"))
+                .and_then(|e| e.get("id"))
+                .and_then(|v| v.as_str())
+                .expect("first message entry has an id")
+                .to_string()
+        };
+        let host = SingleTurnRuntimeHost::new(session);
+
+        let rebind_called = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&rebind_called);
+        host.set_rebind_session(Arc::new(move || {
+            let flag = Arc::clone(&flag);
+            Box::pin(async move {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+
+        let result = host.fork(fork_point, Value::Null).await;
+        assert!(!result.cancelled, "a successful fork is not a cancellation");
+        assert_eq!(
+            agent.messages(),
+            vec![seed[0].clone()],
+            "the live transcript was rewound to exactly the forked-from message"
+        );
+        assert!(
+            rebind_called.load(Ordering::SeqCst),
+            "a registered rebind callback must run after a successful fork"
+        );
+    }
+
+    /// A failed fork (bogus entry id) reports `{ cancelled: false }` — a failure, not
+    /// a cancellation — and must not invoke rebind, since nothing changed to rebind to.
+    #[tokio::test]
+    async fn host_fork_on_bad_entry_id_reports_not_cancelled_and_skips_rebind() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (session, agent) =
+            make_persisting_session(tmp.path(), vec![user_text_message("hi")]);
+        let before = agent.messages();
+        let host = SingleTurnRuntimeHost::new(session);
+
+        let rebind_called = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&rebind_called);
+        host.set_rebind_session(Arc::new(move || {
+            let flag = Arc::clone(&flag);
+            Box::pin(async move {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+
+        let result = host
+            .fork("no-such-entry-id".to_string(), Value::Null)
+            .await;
+        assert!(
+            !result.cancelled,
+            "a failure is reported as not-cancelled, not conflated with an abort"
+        );
+        assert_eq!(agent.messages(), before, "a failed fork leaves the transcript untouched");
+        assert!(
+            !rebind_called.load(Ordering::SeqCst),
+            "rebind must not run when the underlying fork failed"
+        );
+    }
+
+    /// `switch_session` genuinely calls `switch_to_session_file` and invokes a
+    /// registered rebind callback on success.
+    #[tokio::test]
+    async fn host_switch_session_loads_the_other_files_messages_and_invokes_rebind() {
+        let tmp_a = tempfile::tempdir().expect("tempdir a");
+        let tmp_b = tempfile::tempdir().expect("tempdir b");
+        let (session_a, agent_a) =
+            make_persisting_session(tmp_a.path(), vec![user_text_message("session a")]);
+        // Needs an assistant message too: an all-user buffer never flushes a real file
+        // to disk (see `switch_to_session_file_loads_a_different_files_messages`'s own
+        // comment on this, just above).
+        let seed_b = vec![
+            user_text_message("session b"),
+            assistant_text_message("session b reply"),
+        ];
+        let (session_b, _agent_b) = make_persisting_session(tmp_b.path(), seed_b.clone());
+        session_a.persist_new_messages();
+        session_b.persist_new_messages();
+        let path_b = {
+            let manager = session_b
+                .session_manager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            manager
+                .get_session_file()
+                .expect("a persisting session with an assistant message has a real file")
+                .to_string()
+        };
+        let host = SingleTurnRuntimeHost::new(session_a);
+
+        let rebind_called = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&rebind_called);
+        host.set_rebind_session(Arc::new(move || {
+            let flag = Arc::clone(&flag);
+            Box::pin(async move {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+
+        let result = host.switch_session(path_b, Value::Null).await;
+        assert_eq!(result, Value::Null, "success reports Value::Null");
+        assert_eq!(
+            agent_a.messages(),
+            seed_b,
+            "the live transcript now reflects session b's messages"
+        );
+        assert!(
+            rebind_called.load(Ordering::SeqCst),
+            "a registered rebind callback must run after a successful switch_session"
+        );
+    }
+
+    /// A failed switch (an existing-but-invalid session file — see
+    /// `switch_to_session_file_on_a_bad_path_errors_without_corrupting_state`'s own
+    /// comment on why a genuinely nonexistent path does not exercise this branch)
+    /// surfaces an `{ "error": .. }` `Value` rather than silently reporting
+    /// `Value::Null` as if it had succeeded.
+    #[tokio::test]
+    async fn host_switch_session_on_bad_path_reports_an_error_value() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (session, _agent) =
+            make_persisting_session(tmp.path(), vec![user_text_message("hi")]);
+        let garbage_path = tmp.path().join("not-a-session.jsonl");
+        std::fs::write(&garbage_path, b"this is not jsonl at all\nneither is this")
+            .expect("write garbage fixture");
+        let host = SingleTurnRuntimeHost::new(session);
+
+        let result = host
+            .switch_session(
+                garbage_path
+                    .to_str()
+                    .expect("tempdir path should be valid UTF-8")
+                    .to_string(),
+                Value::Null,
+            )
+            .await;
+        assert!(
+            result.get("error").is_some(),
+            "a failed switch must surface an error, not Value::Null, got {result:?}"
         );
     }
 }

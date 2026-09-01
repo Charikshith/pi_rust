@@ -194,35 +194,49 @@ the pre-existing `latex.rs:30` warning.
 
 ---
 
-## P5 — `SingleTurnRuntimeHost` is still a shell
+## P5 — `SingleTurnRuntimeHost` is still a shell — DONE (2026-09-01)
 
-Five of six `AgentSessionRuntimeHost` methods still return `Value::Null` with a
-`// Unreachable this wave` comment, and `main.rs` still passes
+Five of six `AgentSessionRuntimeHost` methods returned `Value::Null` with a
+`// Unreachable this wave` comment, and `main.rs` passed
 `CommandContextActions::placeholder()` in the interactive arm.
 
-**This does not affect the TUI's own commands** — they call `PrintModeSession`
-directly, which is why `/new`, `/fork`, `/clone`, `/import` work today. It does
-mean **an extension cannot drive** `new_session`/`fork`/`switch_session`, and
-`set_rebind_session`'s callback is stored and never invoked.
+- [x] `SingleTurnRuntimeHost::new_session`/`::fork`/`::switch_session` now call
+      the real `SingleTurnSession` methods (`start_new_session`/`fork_from`/
+      `switch_to_session_file`) `interactive_mode.rs`'s `/new`/`/fork`/`/import`
+      already used directly. `new_session`/`switch_session` return `Value::Null`
+      on success or `{"error": ..}` on failure; `fork` returns `Cancelled{
+      cancelled: false}` either way (the trait's return type has no room for
+      an error message — a failure logs to stderr instead, documented at the
+      call site as a real, narrow limitation, not silently dropped).
+- [x] `set_rebind_session` now stores the callback in a `Mutex<Option<..>>`
+      and `run_rebind()` invokes it after every successful mutation above.
+- [x] `main.rs`'s interactive arm now builds real `CommandContextActions` via
+      a new shared `print_mode::build_command_context_actions(host, session)`
+      — extracted from `PrintModeRun::command_context_actions`, which is now a
+      one-line wrapper around it, so the wiring exists in exactly one place.
+- [x] `runtime_host.rs`'s module doc updated — see its own text for what
+      remains genuinely unwired (below).
 
-The underlying work is now all done, so this is pure delegation:
+**Not fully done, deliberately:** the interactive arm never calls
+`host.set_rebind_session(..)` — `RebindSessionFn` is `Send + Sync` by
+contract, and there is no such hook into the `Rc`-based `InteractiveMode`
+(it does not exist yet at the point extensions are bound, and reaching it
+from a `Send + Sync` closure would need a channel-based redesign, not
+"pure delegation"). So an extension-triggered `new_session`/`fork`/
+`switch_session` in the TUI now genuinely mutates the session — real
+progress — but the already-rendered chat stays stale until something else
+(e.g. the user's own `/new`) repaints it. The RPC/print-mode path has no
+such gap: `run_print_mode` already registers a real rebind callback, and
+that path is headless (`Send + Sync` throughout), so this now works
+end-to-end there.
 
-- [ ] Point the host's `new_session`/`fork`/`switch_session` at the real
-      `SingleTurnSession` methods that already exist.
-- [ ] Make `set_rebind_session` store and invoke the callback.
-- [ ] Build real `CommandContextActions` in `main.rs`'s interactive arm instead
-      of `placeholder()`.
-- [ ] Update the module doc at the top of `runtime_host.rs`, which currently
-      states the callback is dead by construction.
+Tests added: 6 in `runtime_host.rs`'s `session_mutation_tests` module,
+covering success + rebind-invoked for all three methods, plus the two
+failure paths (fork on a bad entry id, switch on an existing-but-invalid
+file) reporting failure without invoking rebind.
 
-**Prerequisite already met:** the `subscribe` listener leak is fixed, so calling
-the rebind path more than once no longer duplicates `--json` output. That fix
-was landed specifically to unblock this.
-
-**Acceptance:** an extension-invoked `new_session` swaps the session and the TUI
-re-renders against it.
-
-**Size:** medium. Files: `runtime_host.rs`, `main.rs`.
+Workspace: 1147 tests passing (was 1141), clippy clean apart from the
+pre-existing `latex.rs:30` warning.
 
 ---
 

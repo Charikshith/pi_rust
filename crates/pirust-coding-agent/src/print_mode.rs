@@ -879,6 +879,73 @@ pub const COMMAND_CONTEXT_ACTION_KEYS: [&str; 6] = [
     "reload",
 ];
 
+/// `commandContextActions` (`print-mode.ts:76-97`) — builds the six extension-facing
+/// closures over a given `host`/`session` pair. Shared by [`PrintModeRun`]'s own
+/// `command_context_actions` (the RPC/print-mode path) and `main.rs`'s interactive arm
+/// (P5, `docs/tui-pending-action-plan.md`), so the wiring exists in exactly one place —
+/// `PrintModeRun::command_context_actions` used to hold this body directly, with `self.host`
+/// in place of the `host` parameter here.
+pub fn build_command_context_actions(
+    host: &Arc<dyn AgentSessionRuntimeHost>,
+    session: &Arc<dyn PrintModeSession>,
+) -> CommandContextActions {
+    let wait_session = Arc::clone(session);
+    let navigate_session = Arc::clone(session);
+    let reload_session = Arc::clone(session);
+    let new_session_host = Arc::clone(host);
+    let fork_host = Arc::clone(host);
+    let switch_host = Arc::clone(host);
+
+    CommandContextActions {
+        // `:77`
+        wait_for_idle: Arc::new(move || {
+            let session = Arc::clone(&wait_session);
+            Box::pin(async move { session.wait_for_idle().await })
+        }),
+        // `:78`
+        new_session: Arc::new(move |options| {
+            let host = Arc::clone(&new_session_host);
+            Box::pin(async move { host.new_session(options).await })
+        }),
+        // `:79-82` — the result is narrowed to `{ cancelled }`.
+        fork: Arc::new(move |entry_id, options| {
+            let host = Arc::clone(&fork_host);
+            Box::pin(async move {
+                let result = host.fork(entry_id, options).await;
+                Cancelled {
+                    cancelled: result.cancelled,
+                }
+            })
+        }),
+        // `:83-90` — the four options are re-picked, then the result narrowed.
+        navigate_tree: Arc::new(move |target_id, options| {
+            let session = Arc::clone(&navigate_session);
+            Box::pin(async move {
+                let repicked = options.map(|options| NavigateTreeOptions {
+                    summarize: options.summarize,
+                    custom_instructions: options.custom_instructions,
+                    replace_instructions: options.replace_instructions,
+                    label: options.label,
+                });
+                let result = session.navigate_tree(&target_id, repicked).await;
+                Cancelled {
+                    cancelled: result.cancelled,
+                }
+            })
+        }),
+        // `:91-93`
+        switch_session: Arc::new(move |session_path, options| {
+            let host = Arc::clone(&switch_host);
+            Box::pin(async move { host.switch_session(session_path, options).await })
+        }),
+        // `:94-96`
+        reload: Arc::new(move || {
+            let session = Arc::clone(&reload_session);
+            Box::pin(async move { session.reload().await })
+        }),
+    }
+}
+
 /// The argument object print mode passes to `session.bindExtensions`
 /// (`print-mode.ts:73-101`).
 pub struct ExtensionBinding {
@@ -1371,62 +1438,7 @@ impl PrintModeRun {
         &self,
         session: &Arc<dyn PrintModeSession>,
     ) -> CommandContextActions {
-        let host = Arc::clone(&self.host);
-        let wait_session = Arc::clone(session);
-        let navigate_session = Arc::clone(session);
-        let reload_session = Arc::clone(session);
-        let new_session_host = Arc::clone(&host);
-        let fork_host = Arc::clone(&host);
-        let switch_host = Arc::clone(&host);
-
-        CommandContextActions {
-            // `:77`
-            wait_for_idle: Arc::new(move || {
-                let session = Arc::clone(&wait_session);
-                Box::pin(async move { session.wait_for_idle().await })
-            }),
-            // `:78`
-            new_session: Arc::new(move |options| {
-                let host = Arc::clone(&new_session_host);
-                Box::pin(async move { host.new_session(options).await })
-            }),
-            // `:79-82` — the result is narrowed to `{ cancelled }`.
-            fork: Arc::new(move |entry_id, options| {
-                let host = Arc::clone(&fork_host);
-                Box::pin(async move {
-                    let result = host.fork(entry_id, options).await;
-                    Cancelled {
-                        cancelled: result.cancelled,
-                    }
-                })
-            }),
-            // `:83-90` — the four options are re-picked, then the result narrowed.
-            navigate_tree: Arc::new(move |target_id, options| {
-                let session = Arc::clone(&navigate_session);
-                Box::pin(async move {
-                    let repicked = options.map(|options| NavigateTreeOptions {
-                        summarize: options.summarize,
-                        custom_instructions: options.custom_instructions,
-                        replace_instructions: options.replace_instructions,
-                        label: options.label,
-                    });
-                    let result = session.navigate_tree(&target_id, repicked).await;
-                    Cancelled {
-                        cancelled: result.cancelled,
-                    }
-                })
-            }),
-            // `:91-93`
-            switch_session: Arc::new(move |session_path, options| {
-                let host = Arc::clone(&switch_host);
-                Box::pin(async move { host.switch_session(session_path, options).await })
-            }),
-            // `:94-96`
-            reload: Arc::new(move || {
-                let session = Arc::clone(&reload_session);
-                Box::pin(async move { session.reload().await })
-            }),
-        }
+        build_command_context_actions(&self.host, session)
     }
 
     /// `onError` (`print-mode.ts:98-100`) — always stderr, via `console.error`.

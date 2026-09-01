@@ -680,13 +680,35 @@ async fn run_interactive_mode(
     model_entries: Vec<pirust_coding_agent::interactive_pickers::ModelEntry>,
 ) -> i32 {
     use pirust_coding_agent::interactive_mode::{InteractiveMode, InteractiveSession};
-    use pirust_coding_agent::print_mode::PrintModeSession;
+    use pirust_coding_agent::print_mode::{AgentSessionRuntimeHost, PrintModeSession};
+    use pirust_coding_agent::runtime_host::SingleTurnRuntimeHost;
 
     // Bind the extension runner (plan-mode + tool blocking active in the TUI).
+    //
+    // `command_context_actions` (P5, `docs/tui-pending-action-plan.md`) is now real,
+    // not `CommandContextActions::placeholder()`: an extension's `newSession`/`fork`/
+    // `switchSession` call genuinely reaches `SingleTurnRuntimeHost`, which mutates this
+    // same `session`'s `Agent`/`SessionManager` — the identical `PrintModeSession`
+    // methods `/new`/`/fork`/`/import` already call from `interactive_mode.rs`.
+    //
+    // `host.set_rebind_session` is deliberately never called here, unlike
+    // `print_mode.rs::run_print_mode`: that callback is `Send + Sync` by contract
+    // (`RebindSessionFn`), and there is no such hook into the `Rc`-based
+    // `InteractiveMode` below — it does not exist yet at this point in the function, and
+    // even once built could not be reached from a `Send + Sync` closure without a
+    // channel-based redesign (see `runtime_host.rs`'s module doc for the full
+    // reasoning). So an extension-triggered swap here genuinely mutates the session, but
+    // the already-rendered chat stays stale until something else (e.g. the user's own
+    // `/new`) repaints it — a real, named limitation, not a silent gap.
+    let host: Arc<dyn AgentSessionRuntimeHost> =
+        Arc::new(SingleTurnRuntimeHost::new(Arc::clone(&session)));
+    let session_dyn = Arc::clone(&session) as Arc<dyn PrintModeSession>;
     let binding = pirust_coding_agent::print_mode::ExtensionBinding {
         mode: pirust_coding_agent::print_mode::ExtensionBindMode::Tui,
-        command_context_actions:
-            pirust_coding_agent::print_mode::CommandContextActions::placeholder(),
+        command_context_actions: pirust_coding_agent::print_mode::build_command_context_actions(
+            &host,
+            &session_dyn,
+        ),
         on_error: Arc::new(|_| {}),
     };
     if let Err(error) = session.bind_extensions(binding).await {
