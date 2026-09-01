@@ -19,24 +19,20 @@ would notice.
 
 ---
 
-## P0 — Commit the second half — commit landed, push still pending (2026-09-01)
+## P0 — Commit the second half — DONE, pushed (2026-09-01)
 
 **Status:** the working tree was committed some time after this plan was
 written — `feat/tui-design-spec-buildout` merged directly onto `master`
 (the branch workflow this bullet originally assumed did not end up being how
 the rest of the work landed, so "open a PR against master" is moot: there is
 no longer a separate feature branch to open one from). `git status` has been
-clean throughout P1–P7 above.
+clean throughout P1–P7 above, and `master` is now pushed to `origin/master`
+(was 6 commits ahead, now in sync).
 
-- [x] Commit the working tree — done, now several commits further on `master`.
-- [ ] **Push `master` to `origin`.** Local is 5 commits ahead of
-      `origin/master` as of P1–P7 landing. Deliberately not done
-      autonomously here — pushing is a visible, shared-state action, and
-      this was asked about twice during P1–P7 with "keep working locally"
-      chosen both times. Still the user's call, not automated by this plan.
+- [x] Commit the working tree.
+- [x] Push `master` to `origin` — done, at the user's explicit request.
 
-**Acceptance:** `git status` clean (met); a push decision from the user
-(open).
+**Acceptance:** `git status` clean and `master` matches `origin/master` — met.
 
 ---
 
