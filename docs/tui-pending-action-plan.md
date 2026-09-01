@@ -1,14 +1,21 @@
 # TUI — pending action plan
 
-State as of 2026-08-26, branch `feat/tui-design-spec-buildout`.
+State as of 2026-08-26 (opened) / 2026-09-01 (P1–P7 all closed), branch
+`master`.
+
+**All seven items below (P1–P7) are now DONE.** Workspace at **1141 tests
+passing, 0 failing**, clippy 100% clean (the one pre-existing `latex.rs:30`
+warning noted below was fixed as part of P7). Each section retains its
+original finding plus what was actually done, for anyone auditing the work
+later — nothing was deleted, only marked and extended.
 
 The build-out against [`tui-design-samples.html`](tui-design-samples.html) is
 done: all 11 spec gaps closed, all 28 slash commands live (the dead-command
-count went 18 → 0), workspace at **1131 tests passing, 0 failing**, clippy clean
-apart from one pre-existing warning, release build green.
+count went 18 → 0), release build green.
 
-This file lists what is genuinely left. Every item below was verified against
-the source, not assumed. Items are ordered by whether a user would notice.
+This file lists what was genuinely left as of 2026-08-26. Every item was
+verified against the source, not assumed. Items are ordered by whether a user
+would notice.
 
 ---
 
@@ -240,42 +247,83 @@ pre-existing `latex.rs:30` warning.
 
 ---
 
-## P6 — Performance: the render cache clones every frame
+## P6 — Performance: the render cache clones every frame — MEASURED, no refactor (2026-09-01)
 
 `Component::render(&mut self, width) -> Vec<String>` returns owned data, so a
 cache *hit* still allocates a fresh `Vec<String>` plus every `String` in it.
 Confirmed in 4 places: `text.rs`, `interactive_welcome.rs` (×2),
-`interactive_thinking.rs`, `interactive_debug.rs`. Several modules document this
-honestly as unavoidable *under the current trait signature* — which is the point.
+`interactive_thinking.rs`, `interactive_debug.rs`.
 
-- [ ] Measure first. Add a bench or instrument a long transcript at 200×50.
-      This may be irrelevant next to terminal I/O; do not refactor on a hunch.
-- [ ] If it matters, change the trait to `fn render(&mut self, width) -> &[String]`
-      (or add a `render_cached` returning a borrow). This is a **wide** change
-      across `pirust-tui` and every component.
-- [ ] The differential renderer already avoids redundant *writes*; this is
-      purely about allocation, so the win shows up as CPU/allocator pressure on
-      long sessions, not as visible lag.
+- [x] Measured. Added `crates/pirust-tui/tests/render_cache_perf.rs`
+      (`#[ignore]`d — a timing comparison, not a correctness gate; run with
+      `cargo test -p pirust-tui --test render_cache_perf --release -- --ignored
+      --nocapture`). Scenario: 500 long, multi-line chat messages mounted at
+      200×50 (the plan's own named scenario), then 2,000 pure cache-hit
+      `render(200)` calls (nothing changed — every component hits its cache)
+      timed against one real frame's terminal write (one row's text changed,
+      the differential renderer does genuine work).
 
-**Acceptance:** a measured before/after. No change without a number.
+  Three runs, release build:
 
-**Size:** large and risky. Do not start without P0–P5 done.
+  | run | cache-hit render() | one real frame's I/O | I/O ÷ render() |
+  |----:|--------------------:|----------------------:|----------------:|
+  | 1   | 478µs/call           | 1.36ms (0 B — invalid, see below) | n/a |
+  | 2   | 137.5µs/call         | 2.76ms (235 B)         | 20.1x |
+  | 3   | 127.2µs/call         | 626µs (235 B)          | 4.9x  |
+
+  Run 1's "I/O" number is invalid (no row was actually changed, so the
+  differential renderer wrote 0 bytes — fixed for runs 2–3 by mutating a
+  tail row first, same as `transcript_pruning.rs`'s own fixture). Runs 2–3
+  are the real comparison.
+
+- [x] **Conclusion: does not matter, no refactor.** Even at the worst
+  measured ratio (4.9x), one real frame's terminal write costs several times
+  more than the *entire* 500-message transcript's cache-hit clone — and the
+  clone itself (127–140µs, consistently) is under 1% of a 16.6ms/60fps frame
+  budget on its own, with no I/O in the comparison at all. The plan's own
+  hedge ("may be irrelevant next to terminal I/O") is confirmed, not just
+  plausible. The wide, risky trait-signature change
+  (`fn render(&mut self, width) -> &[String]` across every component in
+  `pirust-tui`) is **not warranted** by this data and was not started.
+
+**Acceptance met:** a measured before/after exists (above); the number says
+no change, so no change was made — exactly what "no change without a number"
+asks for either way.
 
 ---
 
-## P7 — Housekeeping
+## P7 — Housekeeping — DONE (2026-09-01)
 
-- [ ] `interactive_mode.rs` is **2,915 lines**. It has accumulated command
-      handlers, picker lifecycles, event rendering, and the loop. Consider
-      extracting the slash-command handlers into `interactive_mode/commands.rs`
-      and the picker lifecycle into `interactive_mode/pickers.rs`. Mechanical,
-      but do it in one commit that moves code without changing it.
-- [ ] Pre-existing clippy warning: `crates/pirust-tui/src/latex.rs:30`
-      ("may be rewritten with the `?` operator"). Untouched by this work.
-- [ ] Subagent shell redirects left ~15 stray 0-byte files in the repo root
-      during this session (`i32`, `bool`, `SessionStateView`, …). All cleaned,
-      but worth a `.gitignore` guard or a pre-commit check if agents keep
-      running here.
+- [x] `interactive_mode.rs` (2,979 lines by this point) split into
+      `interactive_mode/mod.rs` (2,149 lines — struct, constructor, event
+      loop, event rendering, status/notice helpers), `interactive_mode/
+      commands.rs` (635 lines — `dispatch_command` and every `/command`
+      handler), and `interactive_mode/pickers.rs` (240 lines — opening the
+      `/model`/`/resume`/`/tree` pickers and routing keys to them). A pure
+      move, not a rewrite: every relocated method is still an inherent
+      `impl InteractiveMode` method, callable identically regardless of
+      which file defines it — Rust resolves `self.method()` the same way no
+      matter where in the crate `method` lives. `commands.rs`/`pickers.rs`
+      use `use super::*;`, the same pattern this crate's own `mod tests {
+      use super::*; }` submodules already rely on: a child module sees
+      everything its parent imported or defined, private items included,
+      because Rust privacy already extends downward to descendants — nothing
+      needed to be re-exported or widened to `pub` to make this split work.
+      Verified with the full test suite (no change) and clippy (clean, no
+      new warnings) after.
+- [x] Pre-existing clippy warning fixed: `crates/pirust-tui/src/latex.rs:30`
+      rewritten with the `?` operator, per clippy's own suggested diff.
+      Workspace clippy is now 100% clean, zero warnings anywhere.
+- [x] `.gitignore` guard added for the three stray filenames actually
+      observed (`i32`, `bool`, `SessionStateView`), root-only so it can never
+      hide a real source file elsewhere in the tree. Narrow, not a general
+      solution — extend the list if the same failure mode recurs under a
+      different name; no pre-commit hook infrastructure existed in this repo
+      to hang a broader check on, and building one from scratch was judged
+      out of scope for a one-line housekeeping item.
+
+Workspace: still ~1141 tests passing (none added or removed by this
+housekeeping work), clippy fully clean.
 
 ---
 
@@ -289,8 +337,9 @@ Every capability gap in this repo had one shape: the lower layer worked, but
    `PrintModeSession` and three hand-implement `TuiRuntimeInfo`; a required
    method breaks them all at once.
 2. Implement it on `SingleTurnSession` in `runtime_host.rs`.
-3. Wire `dispatch_command` in `interactive_mode.rs`, updating
-   `slash_command_available` **in the same edit** — a test enforces parity.
+3. Wire `dispatch_command` in `interactive_mode/commands.rs` (moved there by
+   P7's split — see above), updating `slash_command_available` **in the same
+   edit** — a test enforces parity.
 
 **The trap that cost the most time this session:** a feature can look finished
 — UI wired, tests green — while its trait method is still only the default stub

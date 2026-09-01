@@ -11,3 +11,13 @@ Cargo.lock
 
 # local harness artifact
 .pi/
+
+# Stray 0-byte files a subagent's shell redirect has left in the repo root
+# during past sessions (e.g. a misparsed `> i32` from a Rust type name
+# appearing where a real path was expected). Root-only (no leading `**/`),
+# named narrowly rather than broadly, so this never hides a real source file
+# anywhere in the tree — extend this list if the same failure mode recurs
+# under a different name (P7, `docs/tui-pending-action-plan.md`).
+/i32
+/bool
+/SessionStateView

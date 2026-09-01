@@ -27,11 +27,8 @@ fn replace_characters(value: &str, replacements: &HashMap<&str, &str>) -> Option
     let mut result = String::new();
     for character in value.chars() {
         let key = character.to_string();
-        if let Some(repl) = replacements.get(key.as_str()) {
-            result.push_str(repl);
-        } else {
-            return None;
-        }
+        let repl = replacements.get(key.as_str())?;
+        result.push_str(repl);
     }
     Some(result)
 }
